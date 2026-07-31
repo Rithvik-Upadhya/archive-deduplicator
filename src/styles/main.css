@@ -1,0 +1,15 @@
+:root {
+    font-size: 1.2rem;
+}
+
+@layer components {
+    /* Small uppercase section label used above panes and lists. */
+    .section-label {
+        font-family: var(--font-heading);
+        font-size: 0.7rem;
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--muted-foreground);
+    }
+}

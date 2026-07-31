@@ -1,0 +1,185 @@
+// Shared types mirroring the Rust structs in `src-tauri/src/model.rs`.
+
+export type NodeType = 'directory' | 'file' | 'link';
+export type SourceKind = 'json' | 'scan';
+export type ConsolidationAction = 'keep' | 'move' | 'copy' | 'skip';
+export type ViewName = 'dedup' | 'consolidate' | 'pathlimits';
+
+export interface Workspace {
+    id: number;
+    name: string;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface Source {
+    id: number;
+    workspace_id: number;
+    kind: SourceKind;
+    label: string;
+    device_label: string;
+    orig_root_path: string | null;
+    dev_id: number | null;
+    imported_at: string;
+    total_size: number;
+    file_count: number;
+    duplicated_pct: number;
+}
+
+export interface TreeNode {
+    id: number;
+    source_id: number;
+    parent_id: number | null;
+    name: string;
+    rel_path: string;
+    type: NodeType;
+    size: number;
+    mtime: string | null;
+    inode: number | null;
+    dev: number | null;
+    depth: number;
+    subtree_size: number;
+    subtree_file_count: number;
+    has_duplicate: boolean;
+    dup_pct: number;
+}
+
+/** A user decision about one node: the copy to retain, or a surplus copy. */
+export type NodeMarkValue = 'keep' | 'drop';
+
+/** State of a match group given the current decisions. */
+export type Decision = 'undecided' | 'decided' | 'conflict';
+
+export interface MatchMember {
+    node_id: number;
+    source_id: number;
+    device_label: string;
+    rel_path: string;
+    name: string;
+    type: NodeType;
+    size: number;
+    mtime: string | null;
+    /** True when this member lies inside the active scope. */
+    in_scope: boolean;
+    /** Effective mark, inherited from a marked ancestor when not set directly. */
+    mark: NodeMarkValue | null;
+    /** False when `mark` came from an ancestor rather than this node. */
+    mark_explicit: boolean;
+}
+
+export interface MatchGroup {
+    id: number;
+    workspace_id: number;
+    kind: 'file' | 'folder';
+    confidence: number;
+    primary_signal: string;
+    size: number;
+    members: MatchMember[];
+    decision: Decision;
+    keeper_node_id: number | null;
+}
+
+export interface GroupPage {
+    total: number;
+    groups: MatchGroup[];
+}
+
+export type GroupSort = 'confidence' | 'size';
+export type DecisionFilter = 'all' | Decision;
+
+export interface NodeMark {
+    node_id: number;
+    source_id: number;
+    rel_path: string;
+    type: NodeType;
+    mark: NodeMarkValue;
+}
+
+/** Another folder holding counterparts of a scoped folder's duplicates. */
+export interface FolderOverlap {
+    node_id: number;
+    source_id: number;
+    device_label: string;
+    rel_path: string;
+    name: string;
+    shared_bytes: number;
+    shared_files: number;
+}
+
+export interface FolderReport {
+    node_id: number;
+    source_id: number;
+    device_label: string;
+    name: string;
+    rel_path: string;
+    type: NodeType;
+    total_size: number;
+    file_count: number;
+    dup_pct: number;
+    dup_bytes: number;
+    group_count: number;
+    decided_count: number;
+    conflict_count: number;
+    overlaps: FolderOverlap[];
+}
+
+export interface DeviceStats {
+    source_id: number;
+    device_label: string;
+    total_size: number;
+    file_count: number;
+    duplicated_size: number;
+    duplicated_pct: number;
+}
+
+export interface ConsolidationNode {
+    id: number;
+    consolidation_id: number;
+    parent_id: number | null;
+    name: string;
+    type: NodeType;
+    source_node_id: number | null;
+    action: ConsolidationAction;
+    sort_order: number;
+}
+
+export interface ActionLogEntry {
+    id: number;
+    workspace_id: number;
+    ts: string;
+    op: string;
+    detail: string;
+}
+
+export type PathComponentKind = 'cons' | 'source';
+
+export interface PathComponent {
+    node_id: number;
+    kind: PathComponentKind;
+    name: string;
+    original_name: string;
+    type: NodeType;
+    edited: boolean;
+}
+
+export interface PathLimitEntry {
+    node_id: number;
+    leaf_kind: PathComponentKind;
+    effective_path: string;
+    length: number;
+    resolved: boolean;
+    components: PathComponent[];
+}
+
+export interface DedupProgress {
+    phase: string;
+    current: number;
+    total: number;
+}
+
+export interface ImportSummary {
+    workspaces_added: number;
+    sources_added: number;
+    nodes_added: number;
+    new_workspace_ids: number[];
+}
