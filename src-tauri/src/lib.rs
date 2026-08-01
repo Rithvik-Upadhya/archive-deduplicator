@@ -2,7 +2,6 @@ mod commands;
 mod db;
 mod dbio;
 mod dedup;
-mod marks;
 mod model;
 mod parse;
 mod pathfix;
@@ -42,11 +41,7 @@ pub fn run() {
             commands::get_tree,
             commands::run_dedup,
             commands::get_groups,
-            commands::get_folder_report,
-            commands::get_marks,
-            commands::set_node_mark,
-            commands::set_group_keeper,
-            commands::clear_marks,
+            commands::get_group_for_node,
             commands::get_device_stats,
             commands::consolidation_get,
             commands::consolidation_add_node,

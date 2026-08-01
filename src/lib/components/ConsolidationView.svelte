@@ -23,8 +23,6 @@
     let nodes = $state<ConsolidationNode[]>([]);
     let log = $state<ActionLogEntry[]>([]);
     let rootDragOver = $state(false);
-    /** Hide source nodes already marked as surplus copies. */
-    let hideResolved = $state(false);
 
     let showNewFolderDialog = $state(false);
     let newFolderName = $state('New Folder');
@@ -174,23 +172,9 @@
     <div class="grid min-h-0 grid-cols-2 gap-4">
         <!-- Source devices -->
         <section class="flex min-h-0 min-w-0 flex-col overflow-hidden pe-1">
-            <div class="mb-2 flex shrink-0 flex-wrap items-center gap-2">
-                <h2 class="section-label">
-                    Source devices — drag files &amp; folders →
-                </h2>
-                <!-- The payoff of the keeper decisions made while deduplicating:
-                     copies already ruled out stop cluttering the source trees. -->
-                <Button
-                    variant={hideResolved ? 'default' : 'outline'}
-                    size="sm"
-                    class="ms-auto text-xs"
-                    title="Hide copies already marked as surplus in the Deduplicate view"
-                    onclick={() => (hideResolved = !hideResolved)}>
-                    <Icon
-                        icon={hideResolved ? 'ph:eye-slash-fill' : 'ph:eye-fill'} />
-                    <span>Hide resolved</span>
-                </Button>
-            </div>
+            <h2 class="section-label mb-2 shrink-0">
+                Source devices — drag files &amp; folders →
+            </h2>
             {#if app.sources.length === 0}
                 <Empty.Root class="border border-dashed">
                     <Empty.Header>
@@ -205,7 +189,7 @@
                 </Empty.Root>
             {:else}
                 {#each app.sources as s (s.id)}
-                    <DeviceTree source={s} {hideResolved} draggable />
+                    <DeviceTree source={s} draggable />
                 {/each}
             {/if}
         </section>

@@ -6,14 +6,11 @@ import type {
     ActionLogEntry,
     ConsolidationAction,
     ConsolidationNode,
-    DecisionFilter,
     DeviceStats,
-    FolderReport,
     GroupPage,
     GroupSort,
     ImportSummary,
-    NodeMark,
-    NodeMarkValue,
+    MatchGroup,
     NodeType,
     PathComponentKind,
     PathLimitEntry,
@@ -69,9 +66,6 @@ export const getGroups = (args: {
     minSize: number;
     kind?: 'file' | 'folder';
     sort?: GroupSort;
-    /** Restrict to groups with at least one member inside this node's subtree. */
-    scopeNodeId?: number | null;
-    decision?: DecisionFilter;
     offset: number;
     limit: number;
 }) =>
@@ -81,36 +75,13 @@ export const getGroups = (args: {
         minSize: args.minSize,
         kind: args.kind ?? null,
         sort: args.sort ?? 'confidence',
-        scopeNodeId: args.scopeNodeId ?? null,
-        decision: args.decision ?? null,
         offset: args.offset,
         limit: args.limit,
     });
-export const getFolderReport = (
-    workspaceId: number,
-    nodeId: number,
-    limit = 8,
-) => invoke<FolderReport>('get_folder_report', { workspaceId, nodeId, limit });
+export const getGroupForNode = (nodeId: number) =>
+    invoke<MatchGroup | null>('get_group_for_node', { nodeId });
 export const getDeviceStats = (workspaceId: number) =>
     invoke<DeviceStats[]>('get_device_stats', { workspaceId });
-
-// --- Keeper decisions ---
-
-export const getMarks = (workspaceId: number) =>
-    invoke<NodeMark[]>('get_marks', { workspaceId });
-export const setNodeMark = (
-    workspaceId: number,
-    nodeId: number,
-    mark: NodeMarkValue | null,
-) => invoke<void>('set_node_mark', { workspaceId, nodeId, mark });
-/** Pass `null` to clear the group's decision. */
-export const setGroupKeeper = (
-    workspaceId: number,
-    groupId: number,
-    nodeId: number | null,
-) => invoke<void>('set_group_keeper', { workspaceId, groupId, nodeId });
-export const clearMarks = (workspaceId: number, nodeId: number) =>
-    invoke<number>('clear_marks', { workspaceId, nodeId });
 
 // --- Consolidation ---
 

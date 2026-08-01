@@ -44,27 +44,14 @@ export interface TreeNode {
     dup_pct: number;
 }
 
-/** A user decision about one node: the copy to retain, or a surplus copy. */
-export type NodeMarkValue = 'keep' | 'drop';
-
-/** State of a match group given the current decisions. */
-export type Decision = 'undecided' | 'decided' | 'conflict';
-
 export interface MatchMember {
     node_id: number;
     source_id: number;
     device_label: string;
     rel_path: string;
     name: string;
-    type: NodeType;
     size: number;
     mtime: string | null;
-    /** True when this member lies inside the active scope. */
-    in_scope: boolean;
-    /** Effective mark, inherited from a marked ancestor when not set directly. */
-    mark: NodeMarkValue | null;
-    /** False when `mark` came from an ancestor rather than this node. */
-    mark_explicit: boolean;
 }
 
 export interface MatchGroup {
@@ -75,8 +62,6 @@ export interface MatchGroup {
     primary_signal: string;
     size: number;
     members: MatchMember[];
-    decision: Decision;
-    keeper_node_id: number | null;
 }
 
 export interface GroupPage {
@@ -85,43 +70,6 @@ export interface GroupPage {
 }
 
 export type GroupSort = 'confidence' | 'size';
-export type DecisionFilter = 'all' | Decision;
-
-export interface NodeMark {
-    node_id: number;
-    source_id: number;
-    rel_path: string;
-    type: NodeType;
-    mark: NodeMarkValue;
-}
-
-/** Another folder holding counterparts of a scoped folder's duplicates. */
-export interface FolderOverlap {
-    node_id: number;
-    source_id: number;
-    device_label: string;
-    rel_path: string;
-    name: string;
-    shared_bytes: number;
-    shared_files: number;
-}
-
-export interface FolderReport {
-    node_id: number;
-    source_id: number;
-    device_label: string;
-    name: string;
-    rel_path: string;
-    type: NodeType;
-    total_size: number;
-    file_count: number;
-    dup_pct: number;
-    dup_bytes: number;
-    group_count: number;
-    decided_count: number;
-    conflict_count: number;
-    overlaps: FolderOverlap[];
-}
 
 export interface DeviceStats {
     source_id: number;

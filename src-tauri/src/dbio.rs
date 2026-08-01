@@ -294,36 +294,6 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                 }
             }
 
-            // --- node_marks ---
-            // Keeper decisions are the user's own work, so they have to survive
-            // an export/import round-trip like any other authored state.
-            // Exports taken before decisions existed have no such table, and
-            // referencing it would abort the whole import.
-            let has_marks_table: bool = tx.query_row(
-                "SELECT COUNT(*) FROM ext.sqlite_master WHERE type = 'table' AND name = 'node_marks'",
-                [],
-                |r| Ok(r.get::<_, i64>(0)? > 0),
-            )?;
-            if has_marks_table {
-                let mut stmt = tx.prepare(
-                    "SELECT node_id, mark, created_at FROM ext.node_marks WHERE workspace_id = ?1",
-                )?;
-                let rows: Vec<(i64, String, String)> = stmt
-                    .query_map(params![old_ws_id], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                for (old_node_id, mark, created_at) in rows {
-                    if let Some(&new_node_id) = node_id_map.get(&old_node_id) {
-                        tx.execute(
-                            "INSERT OR IGNORE INTO node_marks (node_id, workspace_id, mark, created_at)
-                             VALUES (?1, ?2, ?3, ?4)",
-                            params![new_node_id, new_ws_id, mark, created_at],
-                        )?;
-                    }
-                }
-            }
-
             // --- consolidations + consolidation_nodes ---
             let mut cons_id_map: HashMap<i64, i64> = HashMap::new();
             {

@@ -87,12 +87,6 @@ pub struct MatchGroup {
     pub size: i64,
     #[serde(default)]
     pub members: Vec<MatchMember>,
-    /// "undecided" | "decided" | "conflict" — see `marks::Decision`.
-    #[serde(default)]
-    pub decision: String,
-    /// The member the user marked as the definitive copy, when decided.
-    #[serde(default)]
-    pub keeper_node_id: Option<i64>,
 }
 
 /// One page of match groups plus the total count matching the filters.
@@ -110,67 +104,8 @@ pub struct MatchMember {
     pub device_label: String,
     pub rel_path: String,
     pub name: String,
-    #[serde(rename = "type")]
-    pub node_type: String,
     pub size: i64,
     pub mtime: Option<String>,
-    /// True when this member lies inside the scope the query was filtered to.
-    /// Always false for unscoped queries.
-    #[serde(default)]
-    pub in_scope: bool,
-    /// Effective mark ("keep"/"drop"), inherited from a marked ancestor when
-    /// not set on this node directly.
-    #[serde(default)]
-    pub mark: Option<String>,
-    /// False when `mark` came from an ancestor rather than this node.
-    #[serde(default)]
-    pub mark_explicit: bool,
-}
-
-/// An explicit keeper decision, for rendering marks in the device trees.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeMark {
-    pub node_id: i64,
-    pub source_id: i64,
-    pub rel_path: String,
-    #[serde(rename = "type")]
-    pub node_type: String,
-    pub mark: String,
-}
-
-/// Another folder that a scoped folder's duplicated bytes overlap with.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FolderOverlap {
-    pub node_id: i64,
-    pub source_id: i64,
-    pub device_label: String,
-    pub rel_path: String,
-    pub name: String,
-    pub shared_bytes: i64,
-    pub shared_files: i64,
-}
-
-/// Summary of the duplication inside one folder (or file): how much of it is
-/// duplicated, where the counterparts live, and how many groups still need a
-/// decision. Drives the scope card in the dedup view.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FolderReport {
-    pub node_id: i64,
-    pub source_id: i64,
-    pub device_label: String,
-    pub name: String,
-    pub rel_path: String,
-    #[serde(rename = "type")]
-    pub node_type: String,
-    pub total_size: i64,
-    pub file_count: i64,
-    pub dup_pct: f64,
-    pub dup_bytes: i64,
-    pub group_count: i64,
-    pub decided_count: i64,
-    pub conflict_count: i64,
-    /// Partner folders ranked by shared duplicated bytes, highest first.
-    pub overlaps: Vec<FolderOverlap>,
 }
 
 /// A node in a consolidation (target) tree the user is assembling.

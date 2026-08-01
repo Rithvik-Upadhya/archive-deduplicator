@@ -16,19 +16,10 @@
         source: Source;
         onselect?: (node: TreeNode) => void;
         onlocate?: (node: TreeNode) => void;
-        selectedId?: number | null;
-        hideResolved?: boolean;
         draggable?: boolean;
     }
 
-    let {
-        source,
-        onselect,
-        onlocate,
-        selectedId = null,
-        hideResolved = false,
-        draggable = false,
-    }: Props = $props();
+    let { source, onselect, onlocate, draggable = false }: Props = $props();
 
     let roots = $state<TreeNode[] | null>(null);
     let expanded = $state(true);
@@ -156,8 +147,6 @@
                             workspaceId={app.activeWorkspaceId!}
                             {onselect}
                             {onlocate}
-                            {selectedId}
-                            {hideResolved}
                             {draggable} />
                     {/each}
                 {/if}

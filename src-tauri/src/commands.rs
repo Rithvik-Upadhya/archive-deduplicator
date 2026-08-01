@@ -4,7 +4,7 @@
 use crate::db::Db;
 use crate::dedup::DedupParams;
 use crate::model::*;
-use crate::{marks, parse, pathfix, rollup, scan};
+use crate::{parse, pathfix, rollup, scan};
 use chrono::Utc;
 use rusqlite::params;
 use std::collections::HashMap;
@@ -232,7 +232,6 @@ pub fn source_delete(db: State<Db>, source_id: i64) -> CmdResult<()> {
     let conn = db.0.lock().unwrap();
     conn.execute("DELETE FROM sources WHERE id = ?1", params![source_id])
         .map_err(map_err)?;
-    invalidate_scope_cache(&conn);
     Ok(())
 }
 
@@ -324,8 +323,6 @@ pub fn run_dedup(
     );
     let mut conn = db.0.lock().unwrap();
     let count = crate::dedup::run(&mut conn, workspace_id, params).map_err(map_err)?;
-    // Group ids are rebuilt from scratch, so any cached scope is now wrong.
-    invalidate_scope_cache(&conn);
     log_action(
         &conn,
         workspace_id,
@@ -343,106 +340,10 @@ pub fn run_dedup(
     Ok(count)
 }
 
-/// Identifies a subtree the group list is scoped to.
-struct Scope {
-    source_id: i64,
-    rel_path: String,
-}
-
-impl Scope {
-    fn load(conn: &rusqlite::Connection, node_id: i64) -> CmdResult<Scope> {
-        conn.query_row(
-            "SELECT source_id, rel_path FROM nodes WHERE id = ?1",
-            params![node_id],
-            |r| {
-                Ok(Scope {
-                    source_id: r.get(0)?,
-                    rel_path: r.get(1)?,
-                })
-            },
-        )
-        .map_err(|_| format!("node {node_id} not found"))
-    }
-
-    /// Whether a node lies at or beneath the scope root.
-    fn contains(&self, source_id: i64, rel_path: &str) -> bool {
-        source_id == self.source_id
-            && (rel_path == self.rel_path
-                || rel_path
-                    .strip_prefix(&self.rel_path)
-                    .is_some_and(|rest| rest.starts_with('/')))
-    }
-
-    /// Materialize into `temp.scope_groups` every group with a member inside
-    /// this subtree, along with the largest such member's size.
-    ///
-    /// The direction matters enormously. Expressed as an `EXISTS` correlated to
-    /// each candidate group, SQLite drives the subquery from `nodes` and
-    /// re-scans the whole subtree once per group — 249k rows × 9.9k groups,
-    /// which reads as a hang. Collecting the group ids once, driven from the
-    /// `idx_nodes_path` range scan, takes ~100ms on the same data.
-    fn materialize(&self, conn: &rusqlite::Connection) -> CmdResult<()> {
-        // Scrolling through a large folder must not re-walk its subtree for
-        // every page, so the result is kept until the scope actually moves.
-        let cached: Option<(i64, String)> = conn
-            .query_row("SELECT source_id, rel_path FROM temp.scope_meta", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
-            .ok();
-        if cached.is_some_and(|(s, p)| s == self.source_id && p == self.rel_path) {
-            return Ok(());
-        }
-
-        conn.execute_batch(
-            "DROP TABLE IF EXISTS temp.scope_groups;
-             DROP TABLE IF EXISTS temp.scope_meta;
-             CREATE TEMP TABLE scope_groups (
-                 group_id INTEGER PRIMARY KEY,
-                 bytes INTEGER NOT NULL
-             );
-             CREATE TEMP TABLE scope_meta (source_id INTEGER, rel_path TEXT);",
-        )
-        .map_err(map_err)?;
-        conn.execute(
-            "INSERT INTO temp.scope_groups (group_id, bytes)
-             SELECT mm.group_id, MAX(n.size)
-             FROM nodes n
-             JOIN match_members mm ON mm.node_id = n.id
-             WHERE n.source_id = ?1
-               AND (n.rel_path = ?2 OR n.rel_path LIKE ?2 || '/%')
-             GROUP BY mm.group_id",
-            params![self.source_id, self.rel_path],
-        )
-        .map_err(map_err)?;
-        conn.execute(
-            "INSERT INTO temp.scope_meta (source_id, rel_path) VALUES (?1, ?2)",
-            params![self.source_id, self.rel_path],
-        )
-        .map_err(map_err)?;
-        Ok(())
-    }
-}
-
-/// Drop the cached scope, which is derived from groups and nodes and so must
-/// not outlive a change to either.
-fn invalidate_scope_cache(conn: &rusqlite::Connection) {
-    let _ = conn.execute_batch(
-        "DROP TABLE IF EXISTS temp.scope_groups;
-         DROP TABLE IF EXISTS temp.scope_meta;",
-    );
-}
-
-/// Return a page of match groups, filtered by confidence, minimum size, kind,
-/// an optional subtree scope and an optional decision state; sorted by
-/// confidence or size.
-///
-/// The scope is what makes a folder clickable: a folder showing "55% dup" is
-/// almost never a member of a folder-level group itself — the duplication lives
-/// in the files *inside* it — so scoping asks "which groups have a member under
-/// here" rather than "which group is this node in".
-///
-/// Members are fetched with a single batched query per page so pagination stays
-/// cheap even with hundreds of thousands of groups.
+/// Return a page of match groups for a workspace, filtered by confidence,
+/// minimum size and kind, sorted by confidence or size. Members are fetched
+/// with a single batched query per page so pagination stays cheap even with
+/// hundreds of thousands of groups.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn get_groups(
@@ -452,94 +353,57 @@ pub fn get_groups(
     min_size: i64,
     kind: Option<String>,
     sort: Option<String>,
-    scope_node_id: Option<i64>,
-    decision: Option<String>,
     offset: i64,
     limit: i64,
 ) -> CmdResult<GroupPage> {
     let conn = db.0.lock().unwrap();
     let kind_filter = kind.unwrap_or_default();
-    // Tiebreak on id: thousands of groups share the same (confidence, size), and
-    // without a total order LIMIT/OFFSET pages silently skip and repeat rows.
     let order = match sort.as_deref() {
-        Some("size") => "size DESC, confidence DESC, id DESC",
-        _ => "confidence DESC, size DESC, id DESC",
+        Some("size") => "size DESC, confidence DESC",
+        _ => "confidence DESC, size DESC",
     };
     let limit = if limit <= 0 { 100 } else { limit.min(500) };
 
-    let scope = match scope_node_id {
-        Some(id) => Some(Scope::load(&conn, id)?),
-        None => None,
-    };
-
-    let mut preds = String::new();
-    if let Some(s) = &scope {
-        s.materialize(&conn)?;
-        preds.push_str(" AND mg.id IN (SELECT group_id FROM temp.scope_groups)");
-    }
-
-    // Resolve decisions once into an indexed temp table. With nothing marked
-    // yet every group is undecided and the join can be skipped entirely.
-    let resolver = marks::Resolver::load(&conn, workspace_id).map_err(map_err)?;
-    let has_marks = resolver
-        .materialize_keep_set(&conn, workspace_id)
-        .map_err(map_err)?;
-    let decision_filter = decision.as_deref().filter(|d| *d != "all");
-    match decision_filter {
-        Some("undecided") if has_marks => {
-            preds.push_str(&format!(" AND {} = 0", marks::keep_count_sql("mg")));
-        }
-        Some("decided") if has_marks => {
-            preds.push_str(&format!(" AND {} = 1", marks::keep_count_sql("mg")));
-        }
-        Some("conflict") if has_marks => {
-            preds.push_str(&format!(" AND {} > 1", marks::keep_count_sql("mg")));
-        }
-        // Nothing is decided or conflicting on a workspace with no marks.
-        Some("decided") | Some("conflict") => preds.push_str(" AND 0"),
-        _ => {}
-    }
-
-    let base = format!(
-        "FROM match_groups mg
-         WHERE mg.workspace_id = :ws AND mg.confidence >= :minconf AND mg.size >= :minsize
-           AND (:kind = '' OR mg.kind = :kind){preds}"
-    );
-
-    let named: &[(&str, &dyn rusqlite::ToSql)] = &[
-        (":ws", &workspace_id),
-        (":minconf", &min_confidence),
-        (":minsize", &min_size),
-        (":kind", &kind_filter),
-    ];
-
     let total: i64 = conn
-        .query_row(&format!("SELECT COUNT(*) {base}"), named, |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM match_groups
+             WHERE workspace_id = ?1 AND confidence >= ?2 AND size >= ?3
+               AND (?4 = '' OR kind = ?4)",
+            params![workspace_id, min_confidence, min_size, kind_filter],
+            |r| r.get(0),
+        )
         .map_err(map_err)?;
 
     let sql = format!(
-        "SELECT mg.id, mg.workspace_id, mg.kind, mg.confidence, mg.primary_signal, mg.size
-         {base} ORDER BY {order} LIMIT :limit OFFSET :offset"
+        "SELECT id, workspace_id, kind, confidence, primary_signal, size
+         FROM match_groups
+         WHERE workspace_id = ?1 AND confidence >= ?2 AND size >= ?3
+           AND (?4 = '' OR kind = ?4)
+         ORDER BY {order} LIMIT ?5 OFFSET ?6"
     );
-    let mut page_params = named.to_vec();
-    page_params.push((":limit", &limit));
-    page_params.push((":offset", &offset));
-
     let mut stmt = conn.prepare(&sql).map_err(map_err)?;
     let mut groups = stmt
-        .query_map(page_params.as_slice(), |r| {
-            Ok(MatchGroup {
-                id: r.get(0)?,
-                workspace_id: r.get(1)?,
-                kind: r.get(2)?,
-                confidence: r.get(3)?,
-                primary_signal: r.get(4)?,
-                size: r.get(5)?,
-                members: Vec::new(),
-                decision: String::new(),
-                keeper_node_id: None,
-            })
-        })
+        .query_map(
+            params![
+                workspace_id,
+                min_confidence,
+                min_size,
+                kind_filter,
+                limit,
+                offset
+            ],
+            |r| {
+                Ok(MatchGroup {
+                    id: r.get(0)?,
+                    workspace_id: r.get(1)?,
+                    kind: r.get(2)?,
+                    confidence: r.get(3)?,
+                    primary_signal: r.get(4)?,
+                    size: r.get(5)?,
+                    members: Vec::new(),
+                })
+            },
+        )
         .map_err(map_err)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(map_err)?;
@@ -547,337 +411,95 @@ pub fn get_groups(
     // Batch-load members for this page of groups.
     if !groups.is_empty() {
         let ids: Vec<String> = groups.iter().map(|g| g.id.to_string()).collect();
-        let mut by_group =
-            load_members(&conn, &ids.join(","), scope.as_ref(), &resolver)?;
+        let sql = format!(
+            "SELECT mm.group_id, n.id, n.source_id, s.device_label, n.rel_path, n.name, n.size, n.mtime
+             FROM match_members mm
+             JOIN nodes n ON n.id = mm.node_id
+             JOIN sources s ON s.id = n.source_id
+             WHERE mm.group_id IN ({})",
+            ids.join(",")
+        );
+        let mut mstmt = conn.prepare(&sql).map_err(map_err)?;
+        let rows = mstmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    MatchMember {
+                        node_id: r.get(1)?,
+                        source_id: r.get(2)?,
+                        device_label: r.get(3)?,
+                        rel_path: r.get(4)?,
+                        name: r.get(5)?,
+                        size: r.get(6)?,
+                        mtime: r.get(7)?,
+                    },
+                ))
+            })
+            .map_err(map_err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_err)?;
+        let mut by_group: HashMap<i64, Vec<MatchMember>> = HashMap::new();
+        for (gid, m) in rows {
+            by_group.entry(gid).or_default().push(m);
+        }
         for g in &mut groups {
             g.members = by_group.remove(&g.id).unwrap_or_default();
-            let d = marks::decide(&g.members);
-            g.decision = d.as_str().to_string();
-            g.keeper_node_id = d.keeper();
         }
     }
 
     Ok(GroupPage { total, groups })
 }
 
-/// Load the members of an already-selected set of group ids, annotated with
-/// their effective mark and whether they fall inside the active scope.
-/// `group_ids` is a comma-joined list of ids read straight from the database,
-/// so it needs no further escaping.
-fn load_members(
-    conn: &rusqlite::Connection,
-    group_ids: &str,
-    scope: Option<&Scope>,
-    resolver: &marks::Resolver,
-) -> CmdResult<HashMap<i64, Vec<MatchMember>>> {
-    let sql = format!(
-        "SELECT mm.group_id, n.id, n.source_id, s.device_label, n.rel_path, n.name,
-                n.type, n.size, n.mtime
-         FROM match_members mm
-         JOIN nodes n ON n.id = mm.node_id
-         JOIN sources s ON s.id = n.source_id
-         WHERE mm.group_id IN ({group_ids})"
-    );
-    let mut stmt = conn.prepare(&sql).map_err(map_err)?;
-    let rows = stmt
-        .query_map([], |r| {
-            let source_id: i64 = r.get(2)?;
-            let rel_path: String = r.get(4)?;
-            let in_scope = scope.is_none_or(|s| s.contains(source_id, &rel_path));
-            let eff = resolver.effective(source_id, &rel_path);
-            Ok((
-                r.get::<_, i64>(0)?,
-                MatchMember {
-                    node_id: r.get(1)?,
-                    source_id,
-                    device_label: r.get(3)?,
-                    rel_path,
-                    name: r.get(5)?,
-                    node_type: r.get(6)?,
-                    size: r.get(7)?,
-                    mtime: r.get(8)?,
-                    mark: eff.map(|(m, _)| m.as_str().to_string()),
-                    mark_explicit: eff.is_some_and(|(_, explicit)| explicit),
-                    in_scope,
-                },
-            ))
-        })
-        .map_err(map_err)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(map_err)?;
-
-    let mut by_group: HashMap<i64, Vec<MatchMember>> = HashMap::new();
-    for (gid, m) in rows {
-        by_group.entry(gid).or_default().push(m);
-    }
-    // Keep in-scope copies first so the user reads their own side of the match
-    // before its counterparts.
-    for members in by_group.values_mut() {
-        members.sort_by(|a, b| {
-            b.in_scope
-                .cmp(&a.in_scope)
-                .then_with(|| a.device_label.cmp(&b.device_label))
-                .then_with(|| a.rel_path.cmp(&b.rel_path))
-        });
-    }
-    Ok(by_group)
-}
-
-/// Summarize the duplication inside one node's subtree: how much is duplicated,
-/// which folders elsewhere hold the counterparts, and how many groups still
-/// need a decision. Drives the scope card in the dedup view.
+/// Return the match group (with members) that a given node belongs to, if any.
+/// Used by the "locate duplicate" button in the device trees.
 #[tauri::command]
-pub fn get_folder_report(
-    db: State<Db>,
-    workspace_id: i64,
-    node_id: i64,
-    limit: i64,
-) -> CmdResult<FolderReport> {
+pub fn get_group_for_node(db: State<Db>, node_id: i64) -> CmdResult<Option<MatchGroup>> {
     let conn = db.0.lock().unwrap();
-    let limit = if limit <= 0 { 8 } else { limit.min(50) };
-
-    let (source_id, device_label, name, rel_path, node_type, size, subtree_size, file_count, dup_pct): (
-        i64,
-        String,
-        String,
-        String,
-        String,
-        i64,
-        i64,
-        i64,
-        f64,
-    ) = conn
+    let group: Option<MatchGroup> = conn
         .query_row(
-            "SELECT n.source_id, s.device_label, n.name, n.rel_path, n.type, n.size,
-                    n.subtree_size, n.subtree_file_count, COALESCE(d.dup_pct, 0)
-             FROM nodes n
-             JOIN sources s ON s.id = n.source_id
-             LEFT JOIN dup_annot d ON d.node_id = n.id
-             WHERE n.id = ?1",
+            "SELECT mg.id, mg.workspace_id, mg.kind, mg.confidence, mg.primary_signal, mg.size
+             FROM match_members mm JOIN match_groups mg ON mg.id = mm.group_id
+             WHERE mm.node_id = ?1 ORDER BY mg.confidence DESC LIMIT 1",
             params![node_id],
             |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                    r.get(7)?,
-                    r.get(8)?,
-                ))
+                Ok(MatchGroup {
+                    id: r.get(0)?,
+                    workspace_id: r.get(1)?,
+                    kind: r.get(2)?,
+                    confidence: r.get(3)?,
+                    primary_signal: r.get(4)?,
+                    size: r.get(5)?,
+                    members: Vec::new(),
+                })
             },
         )
-        .map_err(|_| format!("node {node_id} not found"))?;
-
-    let is_dir = node_type == "directory";
-    let total_size = if is_dir { subtree_size } else { size };
-    let file_count = if is_dir { file_count } else { 1 };
-
-    // Collect the groups represented inside this subtree once; every figure
-    // below reads from that temp table rather than re-walking the subtree.
-    let scope = Scope {
-        source_id,
-        rel_path: rel_path.clone(),
-    };
-    scope.materialize(&conn)?;
-
-    let (group_count, dup_bytes): (i64, i64) = conn
-        .query_row(
-            "SELECT COUNT(*), COALESCE(SUM(bytes), 0) FROM temp.scope_groups",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+        .ok();
+    let Some(mut g) = group else { return Ok(None) };
+    let mut mstmt = conn
+        .prepare(
+            "SELECT n.id, n.source_id, s.device_label, n.rel_path, n.name, n.size, n.mtime
+             FROM match_members mm
+             JOIN nodes n ON n.id = mm.node_id
+             JOIN sources s ON s.id = n.source_id
+             WHERE mm.group_id = ?1",
         )
         .map_err(map_err)?;
-
-    // Skip the decision join entirely until decisions exist.
-    let resolver = marks::Resolver::load(&conn, workspace_id).map_err(map_err)?;
-    let has_marks = resolver
-        .materialize_keep_set(&conn, workspace_id)
-        .map_err(map_err)?;
-    let (decided_count, conflict_count) = if group_count == 0 || !has_marks {
-        (0, 0)
-    } else {
-        let keep = marks::keep_count_sql("mg");
-        let sql = format!(
-            "SELECT COALESCE(SUM({keep} = 1), 0), COALESCE(SUM({keep} > 1), 0)
-             FROM match_groups mg
-             WHERE mg.id IN (SELECT group_id FROM temp.scope_groups)"
-        );
-        conn.query_row(&sql, [], |r| Ok((r.get(0)?, r.get(1)?)))
-            .map_err(map_err)?
-    };
-
-    // Rank the folders holding the counterparts. Attribution goes to each
-    // partner file's parent directory: that is the level a user actually acts
-    // on, and it keeps the list short without guessing at a common ancestor.
-    let overlaps = if group_count == 0 {
-        Vec::new()
-    } else {
-        let mut stmt = conn
-            .prepare(
-                "SELECT p.id, p.source_id, s.device_label, p.rel_path, p.name,
-                        SUM(n.size) AS shared, COUNT(*) AS files
-                 FROM temp.scope_groups sg
-                 JOIN match_members mm ON mm.group_id = sg.group_id
-                 JOIN nodes n ON n.id = mm.node_id
-                 JOIN nodes p ON p.id = n.parent_id
-                 JOIN sources s ON s.id = n.source_id
-                 WHERE NOT (n.source_id = ?1
-                            AND (n.rel_path = ?2 OR n.rel_path LIKE ?2 || '/%'))
-                 GROUP BY p.id
-                 ORDER BY shared DESC
-                 LIMIT ?3",
-            )
-            .map_err(map_err)?;
-        stmt.query_map(params![source_id, rel_path, limit], |r| {
-            Ok(FolderOverlap {
+    g.members = mstmt
+        .query_map(params![g.id], |r| {
+            Ok(MatchMember {
                 node_id: r.get(0)?,
                 source_id: r.get(1)?,
                 device_label: r.get(2)?,
                 rel_path: r.get(3)?,
                 name: r.get(4)?,
-                shared_bytes: r.get(5)?,
-                shared_files: r.get(6)?,
+                size: r.get(5)?,
+                mtime: r.get(6)?,
             })
         })
         .map_err(map_err)?
         .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(map_err)?
-    };
-
-    Ok(FolderReport {
-        node_id,
-        source_id,
-        device_label,
-        name,
-        rel_path,
-        node_type,
-        total_size,
-        file_count,
-        dup_pct,
-        dup_bytes,
-        group_count,
-        decided_count,
-        conflict_count,
-        overlaps,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Keeper decisions
-// ---------------------------------------------------------------------------
-
-/// Every explicit mark in the workspace. Small (one row per user decision), so
-/// the frontend loads them all and applies subtree inheritance when rendering.
-#[tauri::command]
-pub fn get_marks(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<NodeMark>> {
-    let conn = db.0.lock().unwrap();
-    let mut stmt = conn
-        .prepare(
-            "SELECT nm.node_id, n.source_id, n.rel_path, n.type, nm.mark
-             FROM node_marks nm JOIN nodes n ON n.id = nm.node_id
-             WHERE nm.workspace_id = ?1",
-        )
         .map_err(map_err)?;
-    stmt.query_map(params![workspace_id], |r| {
-        Ok(NodeMark {
-            node_id: r.get(0)?,
-            source_id: r.get(1)?,
-            rel_path: r.get(2)?,
-            node_type: r.get(3)?,
-            mark: r.get(4)?,
-        })
-    })
-    .map_err(map_err)?
-    .collect::<rusqlite::Result<Vec<_>>>()
-    .map_err(map_err)
-}
-
-/// Mark a node as the definitive copy (`keep`), as surplus (`drop`), or clear
-/// its mark (`None`). A mark on a directory covers its whole subtree.
-#[tauri::command]
-pub fn set_node_mark(
-    db: State<Db>,
-    workspace_id: i64,
-    node_id: i64,
-    mark: Option<String>,
-) -> CmdResult<()> {
-    let parsed = match mark.as_deref() {
-        None | Some("") => None,
-        Some(m) => Some(marks::Mark::parse(m).ok_or_else(|| format!("unknown mark: {m}"))?),
-    };
-    let conn = db.0.lock().unwrap();
-    marks::set_mark(&conn, workspace_id, node_id, parsed, &now()).map_err(map_err)?;
-    let detail = match parsed {
-        Some(m) => format!("node {node_id} marked {}", m.as_str()),
-        None => format!("node {node_id} decision cleared"),
-    };
-    log_action(&conn, workspace_id, "mark_node", &detail);
-    Ok(())
-}
-
-/// Mark one member of a group as the copy to keep, clearing explicit marks on
-/// its siblings so the group lands on exactly one keeper. Passing a `node_id`
-/// that is already the keeper clears the decision, making the star a toggle.
-#[tauri::command]
-pub fn set_group_keeper(
-    db: State<Db>,
-    workspace_id: i64,
-    group_id: i64,
-    node_id: Option<i64>,
-) -> CmdResult<()> {
-    let mut conn = db.0.lock().unwrap();
-    let members: Vec<i64> = {
-        let mut stmt = conn
-            .prepare("SELECT node_id FROM match_members WHERE group_id = ?1")
-            .map_err(map_err)?;
-        stmt.query_map(params![group_id], |r| r.get(0))
-            .map_err(map_err)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(map_err)?
-    };
-    if let Some(id) = node_id {
-        if !members.contains(&id) {
-            return Err(format!("node {id} is not a member of group {group_id}"));
-        }
-    }
-
-    let now = now();
-    let tx = conn.transaction().map_err(map_err)?;
-    for m in &members {
-        // Siblings get an explicit `drop` so the decision survives even if an
-        // ancestor is later marked `keep` for unrelated reasons.
-        let mark = match node_id {
-            Some(id) if *m == id => Some(marks::Mark::Keep),
-            Some(_) => Some(marks::Mark::Drop),
-            None => None,
-        };
-        marks::set_mark(&tx, workspace_id, *m, mark, &now).map_err(map_err)?;
-    }
-    tx.commit().map_err(map_err)?;
-
-    let detail = match node_id {
-        Some(id) => format!("group {group_id}: keeping node {id}"),
-        None => format!("group {group_id}: decision cleared"),
-    };
-    log_action(&conn, workspace_id, "mark_keeper", &detail);
-    Ok(())
-}
-
-/// Clear every decision at or beneath a node.
-#[tauri::command]
-pub fn clear_marks(db: State<Db>, workspace_id: i64, node_id: i64) -> CmdResult<usize> {
-    let conn = db.0.lock().unwrap();
-    let n = marks::clear_subtree(&conn, workspace_id, node_id).map_err(map_err)?;
-    log_action(
-        &conn,
-        workspace_id,
-        "mark_node",
-        &format!("cleared {n} decisions under node {node_id}"),
-    );
-    Ok(n)
+    Ok(Some(g))
 }
 
 /// Per-device duplicate statistics.
@@ -1465,7 +1087,6 @@ pub fn db_export(db: State<Db>, path: String) -> CmdResult<()> {
 pub fn db_import(db: State<Db>, path: String) -> CmdResult<crate::dbio::ImportSummary> {
     let mut conn = db.0.lock().unwrap();
     let summary = crate::dbio::import_merge(&mut conn, Path::new(&path)).map_err(map_err)?;
-    invalidate_scope_cache(&conn);
     let detail = format!(
         "Imported {} workspace(s), {} source(s), {} node(s) from '{path}'",
         summary.workspaces_added, summary.sources_added, summary.nodes_added

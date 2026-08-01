@@ -140,23 +140,6 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             has_dup INTEGER NOT NULL DEFAULT 0,
             dup_pct REAL NOT NULL DEFAULT 0
         );
-
-        -- User decisions about which copy of a duplicated file/folder is the
-        -- definitive one. Keyed on nodes (not match groups) because a dedup run
-        -- rebuilds every group from scratch, while node ids are stable.
-        -- mark = 'keep' (this is the copy to retain) or 'drop' (surplus copy).
-        -- A mark on a directory is inherited by everything in its subtree.
-        CREATE TABLE IF NOT EXISTS node_marks (
-            node_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
-            workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-            mark TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_marks_ws ON node_marks(workspace_id);
-
-        -- Powers subtree-scoped group queries and keeper-mark inheritance, both
-        -- of which match on a rel_path prefix within one source.
-        CREATE INDEX IF NOT EXISTS idx_nodes_path ON nodes(source_id, rel_path);
         "#,
     )?;
     Ok(())

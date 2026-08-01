@@ -241,16 +241,6 @@ pub fn run(
     // Folder-level rollup uses the freshly written file groups.
     let folder_groups = super::rollup::build_folder_groups(conn, workspace_id)?;
 
-    // Drop groups left with fewer than two members. Deleting a source cascades
-    // its `match_members` rows away but leaves the parent group behind, so a
-    // stale one-member "group" would otherwise linger in the review list.
-    conn.execute(
-        "DELETE FROM match_groups
-         WHERE workspace_id = ?1
-           AND (SELECT COUNT(*) FROM match_members mm WHERE mm.group_id = match_groups.id) < 2",
-        params![workspace_id],
-    )?;
-
     // Rebuild the per-node duplicate annotation cache so tree browsing is fast.
     super::rollup::rebuild_annotations(conn, workspace_id)?;
 
