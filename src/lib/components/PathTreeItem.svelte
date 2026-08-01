@@ -13,10 +13,18 @@
         onrename: (node: PathTreeNode, newName: string) => void;
         onrevert: (node: PathTreeNode) => void;
         ondropInto: (parentId: number | null, e: DragEvent) => void;
+        ondelete: (node: PathTreeNode) => void;
     }
 
-    let { node, childrenOf, limit, onrename, onrevert, ondropInto }: Props =
-        $props();
+    let {
+        node,
+        childrenOf,
+        limit,
+        onrename,
+        onrevert,
+        ondropInto,
+        ondelete,
+    }: Props = $props();
 
     const isDir = $derived(node.type === 'directory');
     const kids = $derived(childrenOf(node.id));
@@ -147,6 +155,14 @@
             onclick={startRename}>
             <Icon icon="ph:pencil-simple-fill" />
         </Button>
+        <Button
+            variant="ghost"
+            size="icon"
+            class="size-6 shrink-0 text-muted-foreground hover:text-destructive"
+            aria-label="Remove"
+            onclick={() => ondelete(node)}>
+            <Icon icon="ph:x-bold" />
+        </Button>
     </div>
 
     {#if isDir && expanded}
@@ -158,7 +174,8 @@
                     {limit}
                     {onrename}
                     {onrevert}
-                    {ondropInto} />
+                    {ondropInto}
+                    {ondelete} />
             {/each}
         </div>
     {/if}

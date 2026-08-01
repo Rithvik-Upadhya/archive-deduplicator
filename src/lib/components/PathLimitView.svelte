@@ -9,11 +9,13 @@
     import { Label } from '$lib/components/ui/label';
     import { ScrollArea } from '$lib/components/ui/scroll-area';
     import * as Empty from '$lib/components/ui/empty';
+    import * as AlertDialog from '$lib/components/ui/alert-dialog';
     import { toast } from 'svelte-sonner';
 
     let limit = $state(260);
     let nodes = $state<PathTreeNode[]>([]);
     let loading = $state(false);
+    let deleteTarget = $state<PathTreeNode | null>(null);
 
     async function reload() {
         if (app.activeWorkspaceId == null) return;
@@ -131,6 +133,18 @@
         }
     }
 
+    async function confirmDelete() {
+        const target = deleteTarget;
+        deleteTarget = null;
+        if (!target) return;
+        try {
+            await api.consolidationDeleteNode(target.id);
+            await reload();
+        } catch (err) {
+            toast.error(String(err));
+        }
+    }
+
     const overCount = $derived(
         nodes.filter(n => childrenOf(n.id).length === 0 && n.path_length > limit)
             .length
@@ -217,9 +231,36 @@
                         {limit}
                         onrename={handleRename}
                         onrevert={handleRevert}
-                        ondropInto={handleDrop} />
+                        ondropInto={handleDrop}
+                        ondelete={n => (deleteTarget = n)} />
                 {/each}
             </div>
         </ScrollArea>
     {/if}
 </div>
+
+<AlertDialog.Root
+    open={deleteTarget !== null}
+    onOpenChange={o => {
+        if (!o) deleteTarget = null;
+    }}>
+    <AlertDialog.Content>
+        <AlertDialog.Header>
+            <AlertDialog.Title>Remove from the plan?</AlertDialog.Title>
+            <AlertDialog.Description>
+                “{deleteTarget?.name}”{deleteTarget?.type === 'directory'
+                    ? ' and everything inside it'
+                    : ''} will be removed from the consolidated tree. Your source
+                devices are not touched.
+            </AlertDialog.Description>
+        </AlertDialog.Header>
+        <AlertDialog.Footer>
+            <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+            <AlertDialog.Action
+                onclick={confirmDelete}
+                class="bg-destructive text-white hover:bg-destructive/90">
+                Remove
+            </AlertDialog.Action>
+        </AlertDialog.Footer>
+    </AlertDialog.Content>
+</AlertDialog.Root>
