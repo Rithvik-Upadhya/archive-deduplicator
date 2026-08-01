@@ -2,7 +2,6 @@
 
 export type NodeType = 'directory' | 'file' | 'link';
 export type SourceKind = 'json' | 'scan';
-export type ConsolidationAction = 'keep' | 'move' | 'copy' | 'skip';
 export type ViewName = 'dedup' | 'consolidate' | 'pathlimits';
 
 export interface Workspace {
@@ -87,7 +86,6 @@ export interface ConsolidationNode {
     name: string;
     type: NodeType;
     source_node_id: number | null;
-    action: ConsolidationAction;
     sort_order: number;
 }
 

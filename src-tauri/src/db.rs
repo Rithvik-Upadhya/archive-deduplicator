@@ -95,7 +95,6 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             name TEXT NOT NULL,
             type TEXT NOT NULL,
             source_node_id INTEGER REFERENCES nodes(id) ON DELETE SET NULL,
-            action TEXT NOT NULL DEFAULT 'keep',
             sort_order INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_cnodes_consolidation ON consolidation_nodes(consolidation_id);

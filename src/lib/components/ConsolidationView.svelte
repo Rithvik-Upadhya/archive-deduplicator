@@ -1,11 +1,7 @@
 <script lang="ts">
     import * as api from '$lib/api';
     import { app } from '$lib/stores/app.svelte';
-    import type {
-        ActionLogEntry,
-        ConsolidationAction,
-        ConsolidationNode,
-    } from '$lib/types';
+    import type { ActionLogEntry, ConsolidationNode } from '$lib/types';
     import { save } from '@tauri-apps/plugin-dialog';
     import DeviceTree from './DeviceTree.svelte';
     import ConsolidationNodeItem from './ConsolidationNodeItem.svelte';
@@ -71,24 +67,8 @@
                 name: payload.name,
                 nodeType: payload.type === 'link' ? 'file' : payload.type,
                 sourceNodeId: payload.node_id,
-                action: 'move',
             });
             nodes = [...nodes, created];
-            log = await api.actionLogList(app.activeWorkspaceId);
-        } catch (err) {
-            toast.error(String(err));
-        }
-    }
-
-    async function onaction(nodeId: number, action: ConsolidationAction) {
-        if (app.activeWorkspaceId == null) return;
-        try {
-            await api.consolidationSetAction(
-                app.activeWorkspaceId,
-                nodeId,
-                action
-            );
-            nodes = nodes.map(n => (n.id === nodeId ? { ...n, action } : n));
             log = await api.actionLogList(app.activeWorkspaceId);
         } catch (err) {
             toast.error(String(err));
@@ -143,7 +123,6 @@
                 name,
                 nodeType: 'directory',
                 sourceNodeId: null,
-                action: 'keep',
             });
             nodes = [...nodes, created];
         } catch (err) {
@@ -231,7 +210,6 @@
                         <ConsolidationNodeItem
                             {node}
                             {childrenOf}
-                            {onaction}
                             ondelete={n => (deleteTarget = n)}
                             ondropInto={handleDrop} />
                     {/each}

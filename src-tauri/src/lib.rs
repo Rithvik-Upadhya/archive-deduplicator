@@ -45,7 +45,6 @@ pub fn run() {
             commands::get_device_stats,
             commands::consolidation_get,
             commands::consolidation_add_node,
-            commands::consolidation_set_action,
             commands::consolidation_move_node,
             commands::consolidation_rename_node,
             commands::consolidation_delete_node,

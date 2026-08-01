@@ -4,7 +4,7 @@
 //! signals folded into a 0-100 confidence score. Files below a tunable size are
 //! deprioritized to cut UI noise.
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::collections::HashMap;
 
 /// A file node loaded for matching.
@@ -125,7 +125,7 @@ fn score_pair(a: &FileRow, b: &FileRow, params: &DedupParams) -> (f64, &'static 
     }
 
     let _ = params; // size filtering happens before pairing now
-                    // Zero-byte files are almost pure noise.
+    // Zero-byte files are almost pure noise.
     if a.size == 0 {
         score -= 20.0;
     }

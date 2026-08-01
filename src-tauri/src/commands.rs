@@ -575,7 +575,7 @@ pub fn consolidation_get(
     };
     let mut stmt = conn
         .prepare(
-            "SELECT id, consolidation_id, parent_id, name, type, source_node_id, action, sort_order
+            "SELECT id, consolidation_id, parent_id, name, type, source_node_id, sort_order
              FROM consolidation_nodes WHERE consolidation_id = ?1 ORDER BY parent_id, sort_order",
         )
         .map_err(map_err)?;
@@ -588,8 +588,7 @@ pub fn consolidation_get(
                 name: r.get(3)?,
                 node_type: r.get(4)?,
                 source_node_id: r.get(5)?,
-                action: r.get(6)?,
-                sort_order: r.get(7)?,
+                sort_order: r.get(6)?,
             })
         })
         .map_err(map_err)?
@@ -599,7 +598,6 @@ pub fn consolidation_get(
 }
 
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
 pub fn consolidation_add_node(
     db: State<Db>,
     workspace_id: i64,
@@ -608,7 +606,6 @@ pub fn consolidation_add_node(
     name: String,
     node_type: String,
     source_node_id: Option<i64>,
-    action: String,
 ) -> CmdResult<ConsolidationNode> {
     let conn = db.0.lock().unwrap();
     let sort_order: i64 = conn
@@ -620,9 +617,9 @@ pub fn consolidation_add_node(
         )
         .unwrap_or(0);
     conn.execute(
-        "INSERT INTO consolidation_nodes (consolidation_id, parent_id, name, type, source_node_id, action, sort_order)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![consolidation_id, parent_id, name, node_type, source_node_id, action, sort_order],
+        "INSERT INTO consolidation_nodes (consolidation_id, parent_id, name, type, source_node_id, sort_order)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![consolidation_id, parent_id, name, node_type, source_node_id, sort_order],
     )
     .map_err(map_err)?;
     let id = conn.last_insert_rowid();
@@ -630,7 +627,7 @@ pub fn consolidation_add_node(
         &conn,
         workspace_id,
         "consolidate_add",
-        &format!("Added '{name}' ({action}) to consolidation"),
+        &format!("Added '{name}' to consolidation"),
     );
     Ok(ConsolidationNode {
         id,
@@ -639,31 +636,8 @@ pub fn consolidation_add_node(
         name,
         node_type,
         source_node_id,
-        action,
         sort_order,
     })
-}
-
-#[tauri::command]
-pub fn consolidation_set_action(
-    db: State<Db>,
-    workspace_id: i64,
-    node_id: i64,
-    action: String,
-) -> CmdResult<()> {
-    let conn = db.0.lock().unwrap();
-    conn.execute(
-        "UPDATE consolidation_nodes SET action = ?1 WHERE id = ?2",
-        params![action, node_id],
-    )
-    .map_err(map_err)?;
-    log_action(
-        &conn,
-        workspace_id,
-        "consolidate_action",
-        &format!("Set node {node_id} action to {action}"),
-    );
-    Ok(())
 }
 
 #[tauri::command]
@@ -755,9 +729,9 @@ pub fn action_log_list(
 }
 
 /// Render the consolidation plan as an **end-state guide**: the final target
-/// tree plus a flat list of concrete steps (create folder / move / copy /
-/// skip). Because it is derived from the current tree — not from the change
-/// history — moves that cancelled each other out never appear.
+/// tree plus a flat list of concrete steps (create folder / move). Because it
+/// is derived from the current tree — not from the change history — moves
+/// that cancelled each other out never appear.
 #[tauri::command]
 pub fn export_action_log(db: State<Db>, workspace_id: i64) -> CmdResult<String> {
     let conn = db.0.lock().unwrap();
@@ -784,13 +758,12 @@ pub fn export_action_log(db: State<Db>, workspace_id: i64) -> CmdResult<String> 
         parent_id: Option<i64>,
         name: String,
         node_type: String,
-        action: String,
         source_node_id: Option<i64>,
         sort_order: i64,
     }
     let mut stmt = conn
         .prepare(
-            "SELECT id, parent_id, name, type, action, source_node_id, sort_order
+            "SELECT id, parent_id, name, type, source_node_id, sort_order
              FROM consolidation_nodes WHERE consolidation_id = ?1",
         )
         .map_err(map_err)?;
@@ -801,9 +774,8 @@ pub fn export_action_log(db: State<Db>, workspace_id: i64) -> CmdResult<String> 
                 parent_id: r.get(1)?,
                 name: r.get(2)?,
                 node_type: r.get(3)?,
-                action: r.get(4)?,
-                source_node_id: r.get(5)?,
-                sort_order: r.get(6)?,
+                source_node_id: r.get(4)?,
+                sort_order: r.get(5)?,
             })
         })
         .map_err(map_err)?
@@ -846,11 +818,12 @@ pub fn export_action_log(db: State<Db>, workspace_id: i64) -> CmdResult<String> 
     }
 
     // Depth-first walk producing both the tree rendering and the step list.
+    // Every node in the consolidation tree is wanted (that's why it's there),
+    // so origin-bearing nodes always move and origin-less directories are
+    // freshly created.
     let mut tree = String::new();
     let mut mkdirs: Vec<String> = Vec::new();
     let mut moves: Vec<String> = Vec::new();
-    let mut copies: Vec<String> = Vec::new();
-    let mut skips: Vec<String> = Vec::new();
 
     fn walk(
         parent: Option<i64>,
@@ -861,8 +834,6 @@ pub fn export_action_log(db: State<Db>, workspace_id: i64) -> CmdResult<String> 
         tree: &mut String,
         mkdirs: &mut Vec<String>,
         moves: &mut Vec<String>,
-        copies: &mut Vec<String>,
-        skips: &mut Vec<String>,
     ) {
         let Some(kids) = children.get(&parent) else {
             return;
@@ -873,27 +844,19 @@ pub fn export_action_log(db: State<Db>, workspace_id: i64) -> CmdResult<String> 
             } else {
                 format!("{path}/{}", c.name)
             };
-            let marker = match c.action.as_str() {
-                "skip" => " (skip)",
-                "copy" => " (copy)",
-                _ => "",
-            };
-            tree.push_str(&format!("{prefix}{}{marker}\n", c.name));
+            tree.push_str(&format!("{prefix}{}\n", c.name));
 
             let origin = c
                 .source_node_id
                 .and_then(|sid| src_paths.get(&sid))
                 .map(|(dev, rel)| format!("[{dev}] {rel}"));
-            match (c.node_type.as_str(), c.action.as_str(), origin) {
-                ("directory", "skip", _) => skips.push(format!("{target}/ — leave as is")),
-                ("directory", _, Some(o)) => moves.push(format!("Move folder {o} -> {target}/")),
-                ("directory", _, None) => mkdirs.push(format!("Create folder: {target}/")),
-                (_, "skip", Some(o)) => skips.push(format!("{o} — do not consolidate")),
-                (_, "copy", Some(o)) => copies.push(format!("Copy {o} -> {target}")),
-                (_, _, Some(o)) => moves.push(format!("Move {o} -> {target}")),
+            match (c.node_type.as_str(), origin) {
+                ("directory", Some(o)) => moves.push(format!("Move folder {o} -> {target}/")),
+                ("directory", None) => mkdirs.push(format!("Create folder: {target}/")),
+                (_, Some(o)) => moves.push(format!("Move {o} -> {target}")),
                 _ => {}
             }
-            if c.node_type == "directory" && c.action != "skip" {
+            if c.node_type == "directory" {
                 walk(
                     Some(c.id),
                     &format!("{prefix}  "),
@@ -903,8 +866,6 @@ pub fn export_action_log(db: State<Db>, workspace_id: i64) -> CmdResult<String> 
                     tree,
                     mkdirs,
                     moves,
-                    copies,
-                    skips,
                 );
             }
         }
@@ -918,8 +879,6 @@ pub fn export_action_log(db: State<Db>, workspace_id: i64) -> CmdResult<String> 
         &mut tree,
         &mut mkdirs,
         &mut moves,
-        &mut copies,
-        &mut skips,
     );
 
     out.push_str("## Target tree\n\n");
@@ -940,18 +899,11 @@ pub fn export_action_log(db: State<Db>, workspace_id: i64) -> CmdResult<String> 
         }
         out.push('\n');
     }
-    if !copies.is_empty() {
-        out.push_str("## Step 3 — Copy\n\n");
-        for s in &copies {
-            out.push_str(&format!("- [ ] {s}\n"));
-        }
-        out.push('\n');
-    }
     // Virtual renames recorded in the path-limits step (files/folders inside
     // dragged-in source directories).
     let renames = pathfix::source_renames(&conn, workspace_id).map_err(map_err)?;
     if !renames.is_empty() {
-        out.push_str("## Step 4 — Rename (path-length fixes)\n\n");
+        out.push_str("## Step 3 — Rename (path-length fixes)\n\n");
         let mut pstmt = conn
             .prepare(
                 "SELECT s.device_label, n.rel_path FROM nodes n
@@ -973,13 +925,6 @@ pub fn export_action_log(db: State<Db>, workspace_id: i64) -> CmdResult<String> 
         out.push('\n');
     }
 
-    if !skips.is_empty() {
-        out.push_str("## Skipped (left in place)\n\n");
-        for s in &skips {
-            out.push_str(&format!("- {s}\n"));
-        }
-        out.push('\n');
-    }
     Ok(out)
 }
 

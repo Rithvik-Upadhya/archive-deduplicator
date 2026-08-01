@@ -118,7 +118,6 @@ pub struct ConsolidationNode {
     #[serde(rename = "type")]
     pub node_type: String,
     pub source_node_id: Option<i64>,
-    pub action: String,
     pub sort_order: i64,
 }
 

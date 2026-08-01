@@ -313,10 +313,10 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
             for (&old_cons_id, &new_cons_id) in cons_id_map.clone().iter() {
                 let mut cnode_id_map: HashMap<i64, i64> = HashMap::new();
                 let mut stmt = tx.prepare(
-                    "SELECT id, parent_id, name, type, source_node_id, action, sort_order
+                    "SELECT id, parent_id, name, type, source_node_id, sort_order
                      FROM ext.consolidation_nodes WHERE consolidation_id = ?1 ORDER BY id",
                 )?;
-                let rows: Vec<(i64, Option<i64>, String, String, Option<i64>, String, i64)> = stmt
+                let rows: Vec<(i64, Option<i64>, String, String, Option<i64>, i64)> = stmt
                     .query_map(params![old_cons_id], |r| {
                         Ok((
                             r.get(0)?,
@@ -325,18 +325,17 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                             r.get(3)?,
                             r.get(4)?,
                             r.get(5)?,
-                            r.get(6)?,
                         ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
-                for (old_id, parent_id, name, ntype, source_node_id, action, sort_order) in rows {
+                for (old_id, parent_id, name, ntype, source_node_id, sort_order) in rows {
                     let new_parent_id = parent_id.and_then(|p| cnode_id_map.get(&p).copied());
                     let new_source_node_id =
                         source_node_id.and_then(|s| node_id_map.get(&s).copied());
                     tx.execute(
-                        "INSERT INTO consolidation_nodes (consolidation_id, parent_id, name, type, source_node_id, action, sort_order)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                        params![new_cons_id, new_parent_id, name, ntype, new_source_node_id, action, sort_order],
+                        "INSERT INTO consolidation_nodes (consolidation_id, parent_id, name, type, source_node_id, sort_order)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![new_cons_id, new_parent_id, name, ntype, new_source_node_id, sort_order],
                     )?;
                     cnode_id_map.insert(old_id, tx.last_insert_rowid());
                 }

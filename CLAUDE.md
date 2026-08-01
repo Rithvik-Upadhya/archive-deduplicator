@@ -12,8 +12,8 @@ Everything lives in one local SQLite database, so all state survives a restart.
 The user workflow is three views, in order, and much of the backend design follows from it:
 
 1. **Deduplicate** — import sources, run the matcher, browse match groups and per-device stats.
-2. **Consolidate** — drag nodes from source trees into a target ("end-state") tree, tagging each
-   with keep/move/copy/skip; export the plan as a Markdown guide.
+2. **Consolidate** — drag nodes from source trees into a target ("end-state") tree; export the
+   plan as a Markdown guide.
 3. **Fix Paths** — walk the *consolidated end-state* tree for paths over the Windows 260-char
    limit and rename components until they fit.
 

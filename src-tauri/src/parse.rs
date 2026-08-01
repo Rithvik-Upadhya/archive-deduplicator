@@ -4,7 +4,7 @@
 //! to aggregate.
 
 use crate::model::TreeNode;
-use rusqlite::{params, Transaction};
+use rusqlite::{Transaction, params};
 
 /// An intermediate flattened node produced before insertion, so subtree totals
 /// can be rolled up bottom-up before writing to the database.

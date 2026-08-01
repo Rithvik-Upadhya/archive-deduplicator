@@ -13,7 +13,7 @@
 //! export guide.
 
 use crate::model::{PathComponent, PathLimitEntry};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::collections::HashMap;
 
 /// A consolidation-tree node.
@@ -22,7 +22,6 @@ struct CNode {
     parent_id: Option<i64>,
     name: String,
     node_type: String,
-    action: String,
     source_node_id: Option<i64>,
     sort_order: i64,
 }
@@ -44,7 +43,7 @@ struct FixState {
 
 fn load_cnodes(conn: &Connection, workspace_id: i64) -> rusqlite::Result<Vec<CNode>> {
     let mut stmt = conn.prepare(
-        "SELECT cn.id, cn.parent_id, cn.name, cn.type, cn.action, cn.source_node_id, cn.sort_order
+        "SELECT cn.id, cn.parent_id, cn.name, cn.type, cn.source_node_id, cn.sort_order
          FROM consolidation_nodes cn
          JOIN consolidations c ON c.id = cn.consolidation_id
          WHERE c.workspace_id = ?1",
@@ -55,9 +54,8 @@ fn load_cnodes(conn: &Connection, workspace_id: i64) -> rusqlite::Result<Vec<CNo
             parent_id: r.get(1)?,
             name: r.get(2)?,
             node_type: r.get(3)?,
-            action: r.get(4)?,
-            source_node_id: r.get(5)?,
-            sort_order: r.get(6)?,
+            source_node_id: r.get(4)?,
+            sort_order: r.get(5)?,
         })
     })?;
     rows.collect()
@@ -229,9 +227,6 @@ impl<'a> Walker<'a> {
         };
         for i in list {
             let c = &self.cnodes[i];
-            if c.action == "skip" {
-                continue;
-            }
             let (name, edited) = self.effective("cons", c.id, &c.name);
             let path = if prefix.is_empty() {
                 name.clone()
@@ -290,7 +285,7 @@ pub fn list_over_limit(
     // Source subtrees referenced by directory consolidation nodes.
     let dir_roots: Vec<i64> = cnodes
         .iter()
-        .filter(|c| c.node_type == "directory" && c.action != "skip")
+        .filter(|c| c.node_type == "directory")
         .filter_map(|c| c.source_node_id)
         .collect();
     let subtrees = load_source_subtrees(conn, &dir_roots)?;

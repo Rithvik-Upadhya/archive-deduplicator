@@ -4,7 +4,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
     ActionLogEntry,
-    ConsolidationAction,
     ConsolidationNode,
     DeviceStats,
     GroupPage,
@@ -94,13 +93,7 @@ export const consolidationAddNode = (args: {
     name: string;
     nodeType: NodeType;
     sourceNodeId: number | null;
-    action: ConsolidationAction;
 }) => invoke<ConsolidationNode>('consolidation_add_node', args);
-export const consolidationSetAction = (
-    workspaceId: number,
-    nodeId: number,
-    action: ConsolidationAction,
-) => invoke<void>('consolidation_set_action', { workspaceId, nodeId, action });
 export const consolidationMoveNode = (
     nodeId: number,
     parentId: number | null,

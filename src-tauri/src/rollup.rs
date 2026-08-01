@@ -8,7 +8,7 @@
 //! source. Directories that are almost entirely duplicated are then clustered
 //! with the folders they overlap with.
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::collections::{HashMap, HashSet};
 
 /// A file's location used for folder rollups.
