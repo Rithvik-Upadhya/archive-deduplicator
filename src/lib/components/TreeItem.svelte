@@ -1,11 +1,14 @@
 <script lang="ts">
     import { getTree } from '$lib/api';
-    import type { TreeNode } from '$lib/types';
+    import type { NodeType, TreeNode } from '$lib/types';
     import { DUP_BADGE, dupLevel, formatBytes, pct } from '$lib/util';
+    import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
     import Self from './TreeItem.svelte';
     import Icon from '@iconify/svelte';
     import { Badge } from '$lib/components/ui/badge';
     import { Button } from '$lib/components/ui/button';
+
+    type DragMeta = { name: string; type: NodeType };
 
     interface Props {
         node: TreeNode;
@@ -16,6 +19,9 @@
         onlocate?: (node: TreeNode) => void;
         /** Enables HTML5 drag so nodes can be dropped into a consolidation tree. */
         draggable?: boolean;
+        /** Shared multi-select state, only used when `draggable` is set --
+         *  DedupView's browsing tree stays single-select via `onselect`. */
+        selection?: TreeSelection<DragMeta>;
     }
 
     let {
@@ -24,6 +30,7 @@
         onselect,
         onlocate,
         draggable = false,
+        selection,
     }: Props = $props();
 
     let expanded = $state(false);
@@ -35,13 +42,9 @@
         !!onlocate && (node.has_duplicate || (isDir && node.dup_pct > 0))
     );
 
-    async function toggle() {
-        if (!isDir) {
-            onselect?.(node);
-            return;
-        }
+    async function toggleExpanded() {
         expanded = !expanded;
-        if (expanded && children === null) {
+        if (isDir && expanded && children === null) {
             loading = true;
             try {
                 children = await getTree(workspaceId, node.source_id, node.id);
@@ -51,38 +54,62 @@
         }
     }
 
+    function onRowActivate(e: MouseEvent | KeyboardEvent) {
+        if (selection) {
+            selection.click(node.id, e);
+            return;
+        }
+        // Unchanged DedupView behavior: a directory row toggles expand: a
+        // file row hands off to the duplicate review panel.
+        if (isDir) {
+            toggleExpanded();
+        } else {
+            onselect?.(node);
+        }
+    }
+
+    function onCaretClick(e: MouseEvent) {
+        e.stopPropagation();
+        toggleExpanded();
+    }
+
     function onDragStart(e: DragEvent) {
-        if (!e.dataTransfer) return;
-        e.dataTransfer.setData(
-            'application/x-dedup-node',
-            JSON.stringify({
-                node_id: node.id,
-                name: node.name,
-                type: node.type,
-            })
-        );
+        if (!e.dataTransfer || !selection) return;
+        const ids = selection.dragIds(node.id);
+        const items = ids.map(id => {
+            const meta = selection.getMeta(id);
+            return id === node.id
+                ? { node_id: id, name: node.name, type: node.type }
+                : { node_id: id, name: meta?.name ?? '', type: meta?.type ?? 'file' };
+        });
+        e.dataTransfer.setData('application/x-dedup-node', JSON.stringify({ items }));
         e.dataTransfer.effectAllowed = 'copy';
     }
 </script>
 
 <div class="text-sm">
     <div
-        class="group/row flex cursor-pointer items-center gap-1.5 rounded-sm px-1.5 py-0.5 select-none hover:bg-accent hover:text-accent-foreground"
+        class="group/row flex cursor-pointer items-center gap-1.5 rounded-sm px-1.5 py-0.5 select-none hover:bg-accent hover:text-accent-foreground data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground"
         data-dup={node.has_duplicate}
+        data-selected={selection?.isSelected(node.id) ?? false}
         {draggable}
         role="treeitem"
-        aria-selected="false"
+        aria-selected={selection?.isSelected(node.id) ?? false}
         aria-expanded={isDir ? expanded : undefined}
         tabindex="0"
+        use:selectable={{ selection, id: node.id, meta: { name: node.name, type: node.type } }}
         ondragstart={draggable ? onDragStart : undefined}
-        onclick={toggle}
-        onkeydown={e => e.key === 'Enter' && toggle()}>
-        <span
+        onclick={onRowActivate}
+        onkeydown={e => e.key === 'Enter' && onRowActivate(e)}>
+        <button
+            type="button"
             class="inline-flex w-3 shrink-0 justify-center text-muted-foreground transition-transform duration-150"
             class:rotate-90={expanded}
-            class:invisible={!isDir}>
+            class:invisible={!isDir}
+            aria-label="Toggle"
+            onclick={onCaretClick}>
             <Icon icon="ph:caret-right-bold" />
-        </span>
+        </button>
         <!-- Icons stay neutral: the badge to the right already reports the
              duplicate state, and tinting both turned the tree into a red wall. -->
         <Icon
@@ -151,7 +178,8 @@
                         {workspaceId}
                         {onselect}
                         {onlocate}
-                        {draggable} />
+                        {draggable}
+                        {selection} />
                 {/each}
             {/if}
         </div>

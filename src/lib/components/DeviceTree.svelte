@@ -3,6 +3,7 @@
     import { app } from '$lib/stores/app.svelte';
     import type { Source, TreeNode } from '$lib/types';
     import { DUP_BADGE, dupLevel, formatBytes, pct } from '$lib/util';
+    import type { TreeSelection } from '$lib/stores/selection.svelte';
     import TreeItem from './TreeItem.svelte';
     import Icon from '@iconify/svelte';
     import { Button } from '$lib/components/ui/button';
@@ -12,14 +13,18 @@
     import * as AlertDialog from '$lib/components/ui/alert-dialog';
     import { toast } from 'svelte-sonner';
 
+    type DragMeta = { name: string; type: TreeNode['type'] };
+
     interface Props {
         source: Source;
         onselect?: (node: TreeNode) => void;
         onlocate?: (node: TreeNode) => void;
         draggable?: boolean;
+        selection?: TreeSelection<DragMeta>;
     }
 
-    let { source, onselect, onlocate, draggable = false }: Props = $props();
+    let { source, onselect, onlocate, draggable = false, selection }: Props =
+        $props();
 
     let roots = $state<TreeNode[] | null>(null);
     let expanded = $state(true);
@@ -147,7 +152,8 @@
                             workspaceId={app.activeWorkspaceId!}
                             {onselect}
                             {onlocate}
-                            {draggable} />
+                            {draggable}
+                            {selection} />
                     {/each}
                 {/if}
             </div>

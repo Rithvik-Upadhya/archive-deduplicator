@@ -1,7 +1,8 @@
 <script lang="ts">
     import * as api from '$lib/api';
     import { app } from '$lib/stores/app.svelte';
-    import type { ConsolidationNode } from '$lib/types';
+    import type { ConsolidationNode, NodeType } from '$lib/types';
+    import { TreeSelection } from '$lib/stores/selection.svelte';
     import DeviceTree from './DeviceTree.svelte';
     import ConsolidationNodeItem from './ConsolidationNodeItem.svelte';
     import Icon from '@iconify/svelte';
@@ -16,6 +17,12 @@
     let consolidationId = $state<number | null>(null);
     let nodes = $state<ConsolidationNode[]>([]);
     let rootDragOver = $state(false);
+
+    // Two independent selections: one for the source-device panel, one for
+    // the consolidation tree -- separate id spaces and separate drag
+    // "domains" (drag from source into consolidation, or move within it).
+    const sourceSelection = new TreeSelection<{ name: string; type: NodeType }>();
+    const consSelection = new TreeSelection();
 
     let showNewFolderDialog = $state(false);
     let newFolderName = $state('New Folder');
@@ -100,59 +107,114 @@
         const raw = e.dataTransfer?.getData('application/x-dedup-node');
         if (!raw || consolidationId == null || app.activeWorkspaceId == null)
             return;
-        const payload = JSON.parse(raw) as {
-            node_id: number;
-            name: string;
-            type: 'file' | 'directory' | 'link';
+        const { items } = JSON.parse(raw) as {
+            items: { node_id: number; name: string; type: NodeType }[];
         };
-        try {
-            if (payload.type === 'directory') {
-                const created = await api.consolidationAddSourceSubtree({
-                    consolidationId,
-                    parentId,
-                    sourceNodeId: payload.node_id,
-                });
-                nodes = [...nodes, ...created];
-            } else {
-                const created = await api.consolidationAddNode({
-                    consolidationId,
-                    parentId,
-                    name: payload.name,
-                    nodeType: 'file',
-                    sourceNodeId: payload.node_id,
-                });
-                nodes = [...nodes, created];
+        // Sequential, not Promise.all: each call mutates the same
+        // consolidation tree and appends to `nodes`, so keeping them
+        // ordered avoids interleaved/racy array updates.
+        let allOk = true;
+        for (const item of items) {
+            try {
+                if (item.type === 'directory') {
+                    const created = await api.consolidationAddSourceSubtree({
+                        consolidationId,
+                        parentId,
+                        sourceNodeId: item.node_id,
+                    });
+                    nodes = [...nodes, ...created];
+                } else {
+                    const created = await api.consolidationAddNode({
+                        consolidationId,
+                        parentId,
+                        name: item.name,
+                        nodeType: 'file',
+                        sourceNodeId: item.node_id,
+                    });
+                    nodes = [...nodes, created];
+                }
+            } catch (err) {
+                toast.error(String(err));
+                allOk = false;
             }
-        } catch (err) {
-            toast.error(String(err));
         }
+        // Only clear on full success -- on a partial failure the source
+        // rows weren't touched, so leaving them selected lets the user see
+        // what's left and retry rather than losing track of it.
+        if (allOk) sourceSelection.clear();
     }
 
-    async function handleMoveWithin(nodeId: number, newParentId: number | null) {
-        if (nodeId === newParentId) return;
-        if (newParentId != null && descendantsOf(nodeId).has(newParentId)) {
+    /** Ids in `ids` that lie under some other id also in `ids` -- moving the
+     *  ancestor already carries them along, so moving them again to the
+     *  same target would misplace them out of the just-moved folder. Walks
+     *  each id's own parent chain rather than a per-pair descendant
+     *  closure, to stay O(k*depth) instead of O(k^2). */
+    function topLevelOf(ids: number[]): number[] {
+        const idsSet = new Set(ids);
+        const byId = new Map(nodes.map(n => [n.id, n]));
+        return ids.filter(id => {
+            let pid = byId.get(id)?.parent_id ?? null;
+            while (pid != null) {
+                if (idsSet.has(pid)) return false;
+                pid = byId.get(pid)?.parent_id ?? null;
+            }
+            return true;
+        });
+    }
+
+    /** Combined descendant closure (including the roots) of every id in
+     *  `roots`, computed in one pass via `childrenOf` rather than one
+     *  descendantsOf() call per root. */
+    function descendantsOfAll(roots: number[]): Set<number> {
+        const closure = new Set<number>(roots);
+        const stack = [...roots];
+        while (stack.length) {
+            const id = stack.pop()!;
+            for (const child of childrenOf(id)) {
+                if (!closure.has(child.id)) {
+                    closure.add(child.id);
+                    stack.push(child.id);
+                }
+            }
+        }
+        return closure;
+    }
+
+    async function handleMoveManyWithin(
+        ids: number[],
+        newParentId: number | null
+    ) {
+        const topLevel = topLevelOf(ids);
+        if (
+            newParentId != null &&
+            descendantsOfAll(topLevel).has(newParentId)
+        ) {
             toast.error("Can't move a folder into itself.");
             return;
         }
-        const newSortOrder =
-            Math.max(0, ...childrenOf(newParentId).map(n => n.sort_order)) + 1;
-        try {
-            await api.consolidationMoveNode(nodeId, newParentId, newSortOrder);
-            nodes = nodes.map(n =>
-                n.id === nodeId
-                    ? { ...n, parent_id: newParentId, sort_order: newSortOrder }
-                    : n,
-            );
-        } catch (err) {
-            toast.error(String(err));
+        const base = Math.max(0, ...childrenOf(newParentId).map(n => n.sort_order)) + 1;
+        for (let i = 0; i < topLevel.length; i++) {
+            const nodeId = topLevel[i];
+            const newSortOrder = base + i;
+            try {
+                await api.consolidationMoveNode(nodeId, newParentId, newSortOrder);
+                nodes = nodes.map(n =>
+                    n.id === nodeId
+                        ? { ...n, parent_id: newParentId, sort_order: newSortOrder }
+                        : n,
+                );
+            } catch (err) {
+                toast.error(String(err));
+                break;
+            }
         }
     }
 
     function handleDrop(parentId: number | null, e: DragEvent) {
         const consRaw = e.dataTransfer?.getData('application/x-dedup-cons-node');
         if (consRaw) {
-            const { id } = JSON.parse(consRaw) as { id: number };
-            handleMoveWithin(id, parentId);
+            const { ids } = JSON.parse(consRaw) as { ids: number[] };
+            handleMoveManyWithin(ids, parentId);
             return;
         }
         handleDropFromSource(parentId, e);
@@ -229,7 +291,7 @@
             </Empty.Root>
         {:else}
             {#each app.sources as s (s.id)}
-                <DeviceTree source={s} draggable />
+                <DeviceTree source={s} draggable selection={sourceSelection} />
             {/each}
         {/if}
     </section>
@@ -269,6 +331,7 @@
                         {node}
                         {childrenOf}
                         stats={index.stats}
+                        selection={consSelection}
                         ondelete={n => (deleteTarget = n)}
                         ondropInto={handleDrop}
                         onrename={handleRename} />

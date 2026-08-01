@@ -2,6 +2,7 @@
     import * as api from '$lib/api';
     import { app } from '$lib/stores/app.svelte';
     import type { PathTreeNode } from '$lib/types';
+    import { TreeSelection } from '$lib/stores/selection.svelte';
     import PathTreeItem from './PathTreeItem.svelte';
     import Icon from '@iconify/svelte';
     import { Button } from '$lib/components/ui/button';
@@ -16,6 +17,7 @@
     let nodes = $state<PathTreeNode[]>([]);
     let loading = $state(false);
     let deleteTarget = $state<PathTreeNode | null>(null);
+    const selection = new TreeSelection();
 
     async function reload() {
         if (app.activeWorkspaceId == null) return;
@@ -64,38 +66,60 @@
         return index.get(parentId) ?? [];
     }
 
-    /** BFS descendant closure (including the node itself) — used to block
-     *  dropping a directory into its own descendant. */
-    function descendantsOf(id: number): Set<number> {
-        const set = new Set<number>([id]);
-        let changed = true;
-        while (changed) {
-            changed = false;
-            for (const n of nodes) {
-                if (
-                    n.parent_id != null &&
-                    set.has(n.parent_id) &&
-                    !set.has(n.id)
-                ) {
-                    set.add(n.id);
-                    changed = true;
+    /** Ids in `ids` that lie under some other id also in `ids` -- moving the
+     *  ancestor already carries them along, so moving them again to the
+     *  same target would misplace them out of the just-moved folder. Walks
+     *  each id's own parent chain rather than a per-pair descendant
+     *  closure, to stay O(k*depth) instead of O(k^2). */
+    function topLevelOf(ids: number[]): number[] {
+        const idsSet = new Set(ids);
+        const byId = new Map(nodes.map(n => [n.id, n]));
+        return ids.filter(id => {
+            let pid = byId.get(id)?.parent_id ?? null;
+            while (pid != null) {
+                if (idsSet.has(pid)) return false;
+                pid = byId.get(pid)?.parent_id ?? null;
+            }
+            return true;
+        });
+    }
+
+    /** Combined descendant closure (including the roots) of every id in
+     *  `roots`, computed in one pass via `childrenOf` rather than one
+     *  descendantsOf() call per root. */
+    function descendantsOfAll(roots: number[]): Set<number> {
+        const closure = new Set<number>(roots);
+        const stack = [...roots];
+        while (stack.length) {
+            const id = stack.pop()!;
+            for (const child of childrenOf(id)) {
+                if (!closure.has(child.id)) {
+                    closure.add(child.id);
+                    stack.push(child.id);
                 }
             }
         }
-        return set;
+        return closure;
     }
 
-    async function handleMoveWithin(nodeId: number, newParentId: number | null) {
+    async function handleMoveManyWithin(
+        ids: number[],
+        newParentId: number | null
+    ) {
         if (app.activeWorkspaceId == null) return;
-        if (nodeId === newParentId) return;
-        if (newParentId != null && descendantsOf(nodeId).has(newParentId)) {
+        const topLevel = topLevelOf(ids);
+        if (
+            newParentId != null &&
+            descendantsOfAll(topLevel).has(newParentId)
+        ) {
             toast.error("Can't move a folder into itself.");
             return;
         }
-        const newSortOrder =
-            Math.max(0, ...childrenOf(newParentId).map(n => n.sort_order)) + 1;
+        const base = Math.max(0, ...childrenOf(newParentId).map(n => n.sort_order)) + 1;
         try {
-            await api.consolidationMoveNode(nodeId, newParentId, newSortOrder);
+            for (let i = 0; i < topLevel.length; i++) {
+                await api.consolidationMoveNode(topLevel[i], newParentId, base + i);
+            }
             await reload();
         } catch (err) {
             toast.error(String(err));
@@ -105,8 +129,8 @@
     function handleDrop(parentId: number | null, e: DragEvent) {
         const raw = e.dataTransfer?.getData('application/x-dedup-cons-node');
         if (!raw) return;
-        const { id } = JSON.parse(raw) as { id: number };
-        handleMoveWithin(id, parentId);
+        const { ids } = JSON.parse(raw) as { ids: number[] };
+        handleMoveManyWithin(ids, parentId);
     }
 
     let rootDragOver = $state(false);
@@ -230,6 +254,7 @@
                         {node}
                         {childrenOf}
                         {limit}
+                        {selection}
                         onrename={handleRename}
                         onrevert={handleRevert}
                         ondropInto={handleDrop}

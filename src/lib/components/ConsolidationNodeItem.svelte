@@ -1,6 +1,7 @@
 <script lang="ts">
     import type { ConsolidationNode } from '$lib/types';
     import { formatBytes } from '$lib/util';
+    import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
     import Self from './ConsolidationNodeItem.svelte';
     import Icon from '@iconify/svelte';
     import { Button } from '$lib/components/ui/button';
@@ -10,13 +11,21 @@
         node: ConsolidationNode;
         childrenOf: (parentId: number | null) => ConsolidationNode[];
         stats: Map<number, { size: number; fileCount: number }>;
+        selection: TreeSelection;
         ondelete: (node: ConsolidationNode) => void;
         ondropInto: (parentId: number | null, e: DragEvent) => void;
         onrename: (node: ConsolidationNode, newName: string) => void;
     }
 
-    let { node, childrenOf, stats, ondelete, ondropInto, onrename }: Props =
-        $props();
+    let {
+        node,
+        childrenOf,
+        stats,
+        selection,
+        ondelete,
+        ondropInto,
+        onrename,
+    }: Props = $props();
 
     const isDir = $derived(node.type === 'directory');
     const kids = $derived(childrenOf(node.id));
@@ -44,9 +53,14 @@
         if (!e.dataTransfer || editing) return;
         e.dataTransfer.setData(
             'application/x-dedup-cons-node',
-            JSON.stringify({ id: node.id })
+            JSON.stringify({ ids: selection.dragIds(node.id) })
         );
         e.dataTransfer.effectAllowed = 'move';
+    }
+
+    function onRowClick(e: MouseEvent) {
+        if (editing) return;
+        selection.click(node.id, e);
     }
 
     function startRename() {
@@ -62,14 +76,16 @@
 
 <div class="text-sm">
     <div
-        class="group/row flex items-center gap-1.5 rounded-sm border border-transparent px-1.5 py-0.5 select-none data-[dir=true]:bg-muted/50 data-[drag=true]:border-brand data-[drag=true]:bg-brand/15"
+        class="group/row flex items-center gap-1.5 rounded-sm border border-transparent px-1.5 py-0.5 select-none data-[dir=true]:bg-muted/50 data-[drag=true]:border-brand data-[drag=true]:bg-brand/15 data-[selected=true]:bg-accent"
         data-dir={isDir}
         data-drag={dragOver}
+        data-selected={selection.isSelected(node.id)}
         draggable={!editing}
         role="treeitem"
-        aria-selected="false"
+        aria-selected={selection.isSelected(node.id)}
         aria-expanded={isDir ? expanded : undefined}
         tabindex="0"
+        use:selectable={{ selection, id: node.id }}
         ondragstart={onDragStart}
         ondragover={e => {
             e.preventDefault();
@@ -80,14 +96,18 @@
             e.stopPropagation();
             dragOver = false;
         }}
-        ondrop={onDrop}>
+        ondrop={onDrop}
+        onclick={onRowClick}>
         <button
             type="button"
             class="inline-flex w-3 shrink-0 justify-center text-muted-foreground transition-transform duration-150"
             class:rotate-90={expanded}
             class:invisible={!isDir}
             aria-label="Toggle"
-            onclick={() => (expanded = !expanded)}>
+            onclick={e => {
+                e.stopPropagation();
+                expanded = !expanded;
+            }}>
             <Icon icon="ph:caret-right-bold" />
         </button>
         <Icon
@@ -128,7 +148,10 @@
             size="icon"
             class="size-6 shrink-0 text-muted-foreground hover:text-foreground"
             aria-label="Rename"
-            onclick={startRename}>
+            onclick={e => {
+                e.stopPropagation();
+                startRename();
+            }}>
             <Icon icon="ph:pencil-simple-fill" />
         </Button>
         <Button
@@ -136,7 +159,10 @@
             size="icon"
             class="size-6 shrink-0 text-muted-foreground hover:text-destructive"
             aria-label="Remove"
-            onclick={() => ondelete(node)}>
+            onclick={e => {
+                e.stopPropagation();
+                ondelete(node);
+            }}>
             <Icon icon="ph:x-bold" />
         </Button>
     </div>
@@ -148,6 +174,7 @@
                     node={child}
                     {childrenOf}
                     {stats}
+                    {selection}
                     {ondelete}
                     {ondropInto}
                     {onrename} />
