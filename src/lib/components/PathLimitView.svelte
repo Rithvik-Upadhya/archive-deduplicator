@@ -62,6 +62,53 @@
         return index.get(parentId) ?? [];
     }
 
+    /** BFS descendant closure (including the node itself) — used to block
+     *  dropping a directory into its own descendant. */
+    function descendantsOf(id: number): Set<number> {
+        const set = new Set<number>([id]);
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (const n of nodes) {
+                if (
+                    n.parent_id != null &&
+                    set.has(n.parent_id) &&
+                    !set.has(n.id)
+                ) {
+                    set.add(n.id);
+                    changed = true;
+                }
+            }
+        }
+        return set;
+    }
+
+    async function handleMoveWithin(nodeId: number, newParentId: number | null) {
+        if (app.activeWorkspaceId == null) return;
+        if (nodeId === newParentId) return;
+        if (newParentId != null && descendantsOf(nodeId).has(newParentId)) {
+            toast.error("Can't move a folder into itself.");
+            return;
+        }
+        const newSortOrder =
+            Math.max(0, ...childrenOf(newParentId).map(n => n.sort_order)) + 1;
+        try {
+            await api.consolidationMoveNode(nodeId, newParentId, newSortOrder);
+            await reload();
+        } catch (err) {
+            toast.error(String(err));
+        }
+    }
+
+    function handleDrop(parentId: number | null, e: DragEvent) {
+        const raw = e.dataTransfer?.getData('application/x-dedup-cons-node');
+        if (!raw) return;
+        const { id } = JSON.parse(raw) as { id: number };
+        handleMoveWithin(id, parentId);
+    }
+
+    let rootDragOver = $state(false);
+
     async function handleRename(node: PathTreeNode, newName: string) {
         if (app.activeWorkspaceId == null) return;
         const name = newName.trim();
@@ -148,14 +195,29 @@
             </div>
         {/if}
         <ScrollArea class="min-h-0 grow">
-            <div class="pe-2" role="tree" aria-label="Consolidated tree">
+            <div
+                class="min-h-full rounded-md border border-transparent pe-2 data-[drag=true]:border-brand data-[drag=true]:bg-brand/10"
+                data-drag={rootDragOver}
+                role="tree"
+                aria-label="Consolidated tree"
+                ondragover={e => {
+                    e.preventDefault();
+                    rootDragOver = true;
+                }}
+                ondragleave={() => (rootDragOver = false)}
+                ondrop={e => {
+                    e.preventDefault();
+                    rootDragOver = false;
+                    handleDrop(null, e);
+                }}>
                 {#each childrenOf(null) as node (node.id)}
                     <PathTreeItem
                         {node}
                         {childrenOf}
                         {limit}
                         onrename={handleRename}
-                        onrevert={handleRevert} />
+                        onrevert={handleRevert}
+                        ondropInto={handleDrop} />
                 {/each}
             </div>
         </ScrollArea>

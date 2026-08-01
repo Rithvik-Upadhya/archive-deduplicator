@@ -110,6 +110,7 @@ impl<'a> Walker<'a> {
         node_type: &str,
         edited: bool,
         path_length: i64,
+        sort_order: i64,
     ) {
         let idx = self.out.len();
         self.out.push(PathTreeNode {
@@ -121,6 +122,7 @@ impl<'a> Walker<'a> {
             edited,
             over_limit: false,
             path_length,
+            sort_order,
         });
         self.stack.push(idx);
     }
@@ -165,6 +167,7 @@ impl<'a> Walker<'a> {
                 &node_type,
                 edited,
                 path_length,
+                c.sort_order,
             );
 
             if node_type == "directory" && has_kids {

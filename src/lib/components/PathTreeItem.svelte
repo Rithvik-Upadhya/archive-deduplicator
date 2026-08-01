@@ -12,9 +12,11 @@
         limit: number;
         onrename: (node: PathTreeNode, newName: string) => void;
         onrevert: (node: PathTreeNode) => void;
+        ondropInto: (parentId: number | null, e: DragEvent) => void;
     }
 
-    let { node, childrenOf, limit, onrename, onrevert }: Props = $props();
+    let { node, childrenOf, limit, onrename, onrevert, ondropInto }: Props =
+        $props();
 
     const isDir = $derived(node.type === 'directory');
     const kids = $derived(childrenOf(node.id));
@@ -26,6 +28,7 @@
     let expanded = $state(node.over_limit);
     let editing = $state(false);
     let editValue = $state('');
+    let dragOver = $state(false);
 
     function startRename() {
         editing = true;
@@ -36,17 +39,49 @@
         editing = false;
         onrename(node, editValue);
     }
+
+    function onDragStart(e: DragEvent) {
+        if (!e.dataTransfer || editing) return;
+        e.dataTransfer.setData(
+            'application/x-dedup-cons-node',
+            JSON.stringify({ id: node.id })
+        );
+        e.dataTransfer.effectAllowed = 'move';
+    }
+
+    function onDrop(e: DragEvent) {
+        e.preventDefault();
+        e.stopPropagation();
+        dragOver = false;
+        // Only directories accept children; dropping on a file re-parents
+        // to that file's own parent (i.e. drops as a sibling).
+        if (isDir) {
+            // Otherwise the moved node lands inside a still-collapsed
+            // directory and silently vanishes from view.
+            expanded = true;
+        }
+        ondropInto(isDir ? node.id : node.parent_id, e);
+    }
 </script>
 
 <div class="text-sm">
     <div
-        class="group/row flex items-center gap-1.5 rounded-sm border border-transparent px-1.5 py-0.5 select-none data-[dir=true]:bg-muted/50 data-[over=true]:border-destructive/50 data-[over=true]:bg-destructive/[0.06]"
+        class="group/row flex items-center gap-1.5 rounded-sm border border-transparent px-1.5 py-0.5 select-none data-[dir=true]:bg-muted/50 data-[over=true]:border-destructive/50 data-[over=true]:bg-destructive/[0.06] data-[drag=true]:border-brand data-[drag=true]:bg-brand/15"
         data-dir={isDir}
         data-over={node.over_limit}
+        data-drag={dragOver}
+        draggable={!editing}
         role="treeitem"
         aria-selected="false"
         aria-expanded={isDir ? expanded : undefined}
-        tabindex="0">
+        tabindex="0"
+        ondragstart={onDragStart}
+        ondragover={e => {
+            e.preventDefault();
+            dragOver = true;
+        }}
+        ondragleave={() => (dragOver = false)}
+        ondrop={onDrop}>
         <button
             type="button"
             class="inline-flex w-3 shrink-0 justify-center text-muted-foreground transition-transform duration-150"
@@ -117,7 +152,13 @@
     {#if isDir && expanded}
         <div class="ms-3 border-l border-border ps-1">
             {#each kids as child (child.id)}
-                <Self node={child} {childrenOf} {limit} {onrename} {onrevert} />
+                <Self
+                    node={child}
+                    {childrenOf}
+                    {limit}
+                    {onrename}
+                    {onrevert}
+                    {ondropInto} />
             {/each}
         </div>
     {/if}

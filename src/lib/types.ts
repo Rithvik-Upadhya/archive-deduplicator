@@ -101,6 +101,7 @@ export interface PathTreeNode {
     edited: boolean;
     over_limit: boolean;
     path_length: number;
+    sort_order: number;
 }
 
 export interface DedupProgress {

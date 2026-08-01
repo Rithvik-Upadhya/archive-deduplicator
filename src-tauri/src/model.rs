@@ -167,6 +167,9 @@ pub struct PathTreeNode {
     /// effective path from the tree root. Computed for every node; only
     /// meaningful to *display* on leaves.
     pub path_length: i64,
+    /// consolidation_nodes.sort_order, passed through so the frontend can
+    /// compute a correct append position when moving a node via drag-drop.
+    pub sort_order: i64,
 }
 
 /// Progress payload emitted while a long-running dedup pass is executing.
