@@ -73,9 +73,13 @@
         ondragstart={onDragStart}
         ondragover={e => {
             e.preventDefault();
+            e.stopPropagation();
             dragOver = true;
         }}
-        ondragleave={() => (dragOver = false)}
+        ondragleave={e => {
+            e.stopPropagation();
+            dragOver = false;
+        }}
         ondrop={onDrop}>
         <button
             type="button"
