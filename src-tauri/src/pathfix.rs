@@ -243,7 +243,10 @@ impl<'a> Walker<'a> {
             });
 
             let has_cons_kids = self.children.contains_key(&Some(c.id));
-            let src_subtree = if c.node_type == "directory" {
+            // Only walk the virtual source subtree when there are no real
+            // cons-node children — otherwise a materialized directory (which
+            // has both) would have every leaf reported twice.
+            let src_subtree = if c.node_type == "directory" && !has_cons_kids {
                 c.source_node_id.filter(|sid| {
                     self.subtrees
                         .get(sid)
@@ -282,14 +285,6 @@ pub fn list_over_limit(
     }
     let state = load_state(conn, workspace_id)?;
 
-    // Source subtrees referenced by directory consolidation nodes.
-    let dir_roots: Vec<i64> = cnodes
-        .iter()
-        .filter(|c| c.node_type == "directory")
-        .filter_map(|c| c.source_node_id)
-        .collect();
-    let subtrees = load_source_subtrees(conn, &dir_roots)?;
-
     let mut children: HashMap<Option<i64>, Vec<usize>> = HashMap::new();
     for (i, c) in cnodes.iter().enumerate() {
         children.entry(c.parent_id).or_default().push(i);
@@ -297,6 +292,19 @@ pub fn list_over_limit(
     for v in children.values_mut() {
         v.sort_by_key(|&i| cnodes[i].sort_order);
     }
+
+    // Source subtrees referenced by directory consolidation nodes. Only
+    // directories with NO real materialized children still need their
+    // source subtree walked virtually (legacy pre-refactor drags) — a
+    // directory with real cons-node children already has its descendants
+    // present as rows, so virtually walking its source subtree too would
+    // double-count every leaf underneath.
+    let dir_roots: Vec<i64> = cnodes
+        .iter()
+        .filter(|c| c.node_type == "directory" && !children.contains_key(&Some(c.id)))
+        .filter_map(|c| c.source_node_id)
+        .collect();
+    let subtrees = load_source_subtrees(conn, &dir_roots)?;
 
     let mut walker = Walker {
         children: &children,
@@ -411,4 +419,176 @@ pub fn set_resolved(
         params![workspace_id, kind, ref_id, resolved as i64],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{db, parse};
+
+    const NESTED_TREE: &str = r#"[{"type":"directory","name":"/vol","dev":10,"contents":[
+        {"type":"directory","name":"photos","inode":1,"dev":10,"contents":[
+            {"type":"directory","name":"2024","inode":2,"dev":10,"contents":[
+                {"type":"file","name":"a.jpg","inode":3,"dev":10,"size":500000,"time":"2024-01-01_10:00:00"},
+                {"type":"file","name":"b.jpg","inode":4,"dev":10,"size":800000,"time":"2024-01-01_10:05:00"}
+            ]}
+        ]}
+    ]}]"#;
+
+    /// Build an in-memory workspace with one source (the nested photos tree)
+    /// and an empty consolidation. Returns (conn, workspace_id, source_id, consolidation_id).
+    fn setup() -> (Connection, i64, i64, i64) {
+        let mut conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (name, created_at, updated_at) VALUES ('w', 't', 't')",
+            [],
+        )
+        .unwrap();
+        let ws = conn.last_insert_rowid();
+
+        let flat = parse::parse_tree_json(NESTED_TREE).unwrap();
+        let tx = conn.transaction().unwrap();
+        tx.execute(
+            "INSERT INTO sources (workspace_id, kind, label, device_label, imported_at, total_size, file_count)
+             VALUES (?1, 'json', 'disc-a', 'disc-a', 't', ?2, ?3)",
+            params![ws, flat.total_size, flat.file_count],
+        )
+        .unwrap();
+        let source_id = tx.last_insert_rowid();
+        parse::insert_nodes(&tx, source_id, &flat).unwrap();
+        tx.commit().unwrap();
+
+        conn.execute(
+            "INSERT INTO consolidations (workspace_id, name) VALUES (?1, 'Consolidated')",
+            params![ws],
+        )
+        .unwrap();
+        let consolidation_id = conn.last_insert_rowid();
+
+        (conn, ws, source_id, consolidation_id)
+    }
+
+    fn node_id(conn: &Connection, source_id: i64, rel_path: &str) -> i64 {
+        conn.query_row(
+            "SELECT id FROM nodes WHERE source_id = ?1 AND rel_path = ?2",
+            params![source_id, rel_path],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn insert_cnode(
+        conn: &Connection,
+        consolidation_id: i64,
+        parent_id: Option<i64>,
+        name: &str,
+        node_type: &str,
+        source_node_id: Option<i64>,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO consolidation_nodes (consolidation_id, parent_id, name, type, source_node_id, sort_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+            params![consolidation_id, parent_id, name, node_type, source_node_id],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn materialized_directory_is_not_double_counted() {
+        let (conn, ws, source_id, consolidation_id) = setup();
+        let photos_src = node_id(&conn, source_id, "photos");
+        let year_src = node_id(&conn, source_id, "photos/2024");
+        let a_src = node_id(&conn, source_id, "photos/2024/a.jpg");
+        let b_src = node_id(&conn, source_id, "photos/2024/b.jpg");
+
+        // Mirror exactly what materialize_subtree produces: real cons-node
+        // rows for every level, each still carrying its source_node_id.
+        let photos_id = insert_cnode(
+            &conn,
+            consolidation_id,
+            None,
+            "photos",
+            "directory",
+            Some(photos_src),
+        );
+        let year_id = insert_cnode(
+            &conn,
+            consolidation_id,
+            Some(photos_id),
+            "2024",
+            "directory",
+            Some(year_src),
+        );
+        insert_cnode(
+            &conn,
+            consolidation_id,
+            Some(year_id),
+            "a.jpg",
+            "file",
+            Some(a_src),
+        );
+        insert_cnode(
+            &conn,
+            consolidation_id,
+            Some(year_id),
+            "b.jpg",
+            "file",
+            Some(b_src),
+        );
+
+        let entries = list_over_limit(&conn, ws, 0).unwrap();
+        let a_count = entries
+            .iter()
+            .filter(|e| e.effective_path.ends_with("a.jpg"))
+            .count();
+        let b_count = entries
+            .iter()
+            .filter(|e| e.effective_path.ends_with("b.jpg"))
+            .count();
+        assert_eq!(
+            a_count, 1,
+            "a.jpg should be reported exactly once, got {entries:?}"
+        );
+        assert_eq!(
+            b_count, 1,
+            "b.jpg should be reported exactly once, got {entries:?}"
+        );
+    }
+
+    #[test]
+    fn legacy_directory_without_cons_children_still_walks_source() {
+        let (conn, ws, source_id, consolidation_id) = setup();
+        let photos_src = node_id(&conn, source_id, "photos");
+
+        // Legacy pre-refactor shape: a single cons-node row for the dragged
+        // directory, no real children — everything below is virtual.
+        insert_cnode(
+            &conn,
+            consolidation_id,
+            None,
+            "photos",
+            "directory",
+            Some(photos_src),
+        );
+
+        let entries = list_over_limit(&conn, ws, 0).unwrap();
+        let a_count = entries
+            .iter()
+            .filter(|e| e.effective_path.ends_with("a.jpg"))
+            .count();
+        let b_count = entries
+            .iter()
+            .filter(|e| e.effective_path.ends_with("b.jpg"))
+            .count();
+        assert_eq!(
+            a_count, 1,
+            "legacy virtual walk should still find a.jpg exactly once"
+        );
+        assert_eq!(
+            b_count, 1,
+            "legacy virtual walk should still find b.jpg exactly once"
+        );
+    }
 }

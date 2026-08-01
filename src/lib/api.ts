@@ -92,6 +92,11 @@ export const consolidationAddNode = (args: {
     nodeType: NodeType;
     sourceNodeId: number | null;
 }) => invoke<ConsolidationNode>('consolidation_add_node', args);
+export const consolidationAddSourceSubtree = (args: {
+    consolidationId: number;
+    parentId: number | null;
+    sourceNodeId: number;
+}) => invoke<ConsolidationNode[]>('consolidation_add_source_subtree', args);
 export const consolidationMoveNode = (
     nodeId: number,
     parentId: number | null,

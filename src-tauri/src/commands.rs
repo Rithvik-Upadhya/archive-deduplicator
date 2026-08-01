@@ -555,20 +555,33 @@ pub fn consolidation_get(
     };
     let mut stmt = conn
         .prepare(
-            "SELECT id, consolidation_id, parent_id, name, type, source_node_id, sort_order
-             FROM consolidation_nodes WHERE consolidation_id = ?1 ORDER BY parent_id, sort_order",
+            "SELECT cn.id, cn.consolidation_id, cn.parent_id, cn.name, cn.type,
+                    cn.source_node_id, cn.sort_order, n.size, s.device_label, n.rel_path
+             FROM consolidation_nodes cn
+             LEFT JOIN nodes n ON n.id = cn.source_node_id
+             LEFT JOIN sources s ON s.id = n.source_id
+             WHERE cn.consolidation_id = ?1
+             ORDER BY cn.parent_id, cn.sort_order",
         )
         .map_err(map_err)?;
     let rows = stmt
         .query_map(params![id], |r| {
+            let node_type: String = r.get(4)?;
             Ok(ConsolidationNode {
                 id: r.get(0)?,
                 consolidation_id: r.get(1)?,
                 parent_id: r.get(2)?,
                 name: r.get(3)?,
-                node_type: r.get(4)?,
+                node_type: node_type.clone(),
                 source_node_id: r.get(5)?,
                 sort_order: r.get(6)?,
+                size: if node_type == "directory" {
+                    None
+                } else {
+                    r.get(7)?
+                },
+                origin_device: r.get(8)?,
+                origin_path: r.get(9)?,
             })
         })
         .map_err(map_err)?
@@ -602,15 +615,50 @@ pub fn consolidation_add_node(
     )
     .map_err(map_err)?;
     let id = conn.last_insert_rowid();
-    Ok(ConsolidationNode {
-        id,
-        consolidation_id,
-        parent_id,
-        name,
-        node_type,
-        source_node_id,
-        sort_order,
-    })
+    conn.query_row(
+        "SELECT cn.id, cn.consolidation_id, cn.parent_id, cn.name, cn.type,
+                cn.source_node_id, cn.sort_order, n.size, s.device_label, n.rel_path
+         FROM consolidation_nodes cn
+         LEFT JOIN nodes n ON n.id = cn.source_node_id
+         LEFT JOIN sources s ON s.id = n.source_id
+         WHERE cn.id = ?1",
+        params![id],
+        |r| {
+            let node_type: String = r.get(4)?;
+            Ok(ConsolidationNode {
+                id: r.get(0)?,
+                consolidation_id: r.get(1)?,
+                parent_id: r.get(2)?,
+                name: r.get(3)?,
+                node_type: node_type.clone(),
+                source_node_id: r.get(5)?,
+                sort_order: r.get(6)?,
+                size: if node_type == "directory" {
+                    None
+                } else {
+                    r.get(7)?
+                },
+                origin_device: r.get(8)?,
+                origin_path: r.get(9)?,
+            })
+        },
+    )
+    .map_err(map_err)
+}
+
+/// Drag-drop a source *directory* wholesale: materializes its entire subtree
+/// as real `consolidation_nodes` rows (root + every descendant), so every
+/// file/folder inside becomes individually movable/renamable/deletable.
+#[tauri::command]
+pub fn consolidation_add_source_subtree(
+    db: State<Db>,
+    consolidation_id: i64,
+    parent_id: Option<i64>,
+    source_node_id: i64,
+) -> CmdResult<Vec<ConsolidationNode>> {
+    let mut conn = db.0.lock().unwrap();
+    crate::consolidate::materialize_subtree(&mut conn, consolidation_id, parent_id, source_node_id)
+        .map_err(map_err)
 }
 
 #[tauri::command]
@@ -634,6 +682,15 @@ pub fn consolidation_rename_node(db: State<Db>, node_id: i64, name: String) -> C
     let conn = db.0.lock().unwrap();
     conn.execute(
         "UPDATE consolidation_nodes SET name = ?1 WHERE id = ?2",
+        params![name, node_id],
+    )
+    .map_err(map_err)?;
+    // Keep the Path-limits view in sync: it prefers pathfix_state.new_name
+    // over consolidation_nodes.name whenever a row exists (e.g. this node was
+    // already renamed once from that view). This UPDATE is a no-op when no
+    // such row exists yet, which is the common case.
+    conn.execute(
+        "UPDATE pathfix_state SET new_name = ?1 WHERE kind = 'cons' AND ref_id = ?2",
         params![name, node_id],
     )
     .map_err(map_err)?;

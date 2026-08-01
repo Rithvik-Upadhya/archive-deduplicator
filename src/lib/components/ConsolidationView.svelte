@@ -40,13 +40,63 @@
         }
     });
 
+    // Indexed view over the flat node list: parent -> sorted children, plus
+    // bottom-up folder stats (file count / total size) folded from every
+    // descendant file. Recomputed only when `nodes` changes.
+    const index = $derived.by(() => {
+        const byParent = new Map<number | null, ConsolidationNode[]>();
+        for (const n of nodes) {
+            const bucket = byParent.get(n.parent_id) ?? [];
+            bucket.push(n);
+            byParent.set(n.parent_id, bucket);
+        }
+        for (const bucket of byParent.values()) {
+            bucket.sort((a, b) => a.sort_order - b.sort_order);
+        }
+
+        const stats = new Map<number, { size: number; fileCount: number }>();
+        const byId = new Map(nodes.map(n => [n.id, n]));
+        for (const n of nodes) {
+            if (n.type !== 'file') continue;
+            const size = n.size ?? 0;
+            let pid = n.parent_id;
+            while (pid != null) {
+                const cur = stats.get(pid) ?? { size: 0, fileCount: 0 };
+                cur.size += size;
+                cur.fileCount += 1;
+                stats.set(pid, cur);
+                pid = byId.get(pid)?.parent_id ?? null;
+            }
+        }
+        return { byParent, stats };
+    });
+
     function childrenOf(parentId: number | null): ConsolidationNode[] {
-        return nodes
-            .filter(n => n.parent_id === parentId)
-            .sort((a, b) => a.sort_order - b.sort_order);
+        return index.byParent.get(parentId) ?? [];
     }
 
-    async function handleDrop(parentId: number | null, e: DragEvent) {
+    /** BFS descendant closure (including the node itself) — shared by
+     *  move-cycle prevention and delete. */
+    function descendantsOf(id: number): Set<number> {
+        const set = new Set<number>([id]);
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (const n of nodes) {
+                if (
+                    n.parent_id != null &&
+                    set.has(n.parent_id) &&
+                    !set.has(n.id)
+                ) {
+                    set.add(n.id);
+                    changed = true;
+                }
+            }
+        }
+        return set;
+    }
+
+    async function handleDropFromSource(parentId: number | null, e: DragEvent) {
         const raw = e.dataTransfer?.getData('application/x-dedup-node');
         if (!raw || consolidationId == null || app.activeWorkspaceId == null)
             return;
@@ -56,14 +106,64 @@
             type: 'file' | 'directory' | 'link';
         };
         try {
-            const created = await api.consolidationAddNode({
-                consolidationId,
-                parentId,
-                name: payload.name,
-                nodeType: payload.type === 'link' ? 'file' : payload.type,
-                sourceNodeId: payload.node_id,
-            });
-            nodes = [...nodes, created];
+            if (payload.type === 'directory') {
+                const created = await api.consolidationAddSourceSubtree({
+                    consolidationId,
+                    parentId,
+                    sourceNodeId: payload.node_id,
+                });
+                nodes = [...nodes, ...created];
+            } else {
+                const created = await api.consolidationAddNode({
+                    consolidationId,
+                    parentId,
+                    name: payload.name,
+                    nodeType: 'file',
+                    sourceNodeId: payload.node_id,
+                });
+                nodes = [...nodes, created];
+            }
+        } catch (err) {
+            toast.error(String(err));
+        }
+    }
+
+    async function handleMoveWithin(nodeId: number, newParentId: number | null) {
+        if (nodeId === newParentId) return;
+        if (newParentId != null && descendantsOf(nodeId).has(newParentId)) {
+            toast.error("Can't move a folder into itself.");
+            return;
+        }
+        const newSortOrder =
+            Math.max(0, ...childrenOf(newParentId).map(n => n.sort_order)) + 1;
+        try {
+            await api.consolidationMoveNode(nodeId, newParentId, newSortOrder);
+            nodes = nodes.map(n =>
+                n.id === nodeId
+                    ? { ...n, parent_id: newParentId, sort_order: newSortOrder }
+                    : n,
+            );
+        } catch (err) {
+            toast.error(String(err));
+        }
+    }
+
+    function handleDrop(parentId: number | null, e: DragEvent) {
+        const consRaw = e.dataTransfer?.getData('application/x-dedup-cons-node');
+        if (consRaw) {
+            const { id } = JSON.parse(consRaw) as { id: number };
+            handleMoveWithin(id, parentId);
+            return;
+        }
+        handleDropFromSource(parentId, e);
+    }
+
+    async function handleRename(node: ConsolidationNode, newName: string) {
+        const name = newName.trim();
+        if (!name || name === node.name) return;
+        try {
+            await api.consolidationRenameNode(node.id, name);
+            nodes = nodes.map(n => (n.id === node.id ? { ...n, name } : n));
         } catch (err) {
             toast.error(String(err));
         }
@@ -73,22 +173,7 @@
         const target = deleteTarget;
         deleteTarget = null;
         if (!target) return;
-        // Remove the node and its descendants locally.
-        const toRemove = new Set<number>([target.id]);
-        let changed = true;
-        while (changed) {
-            changed = false;
-            for (const n of nodes) {
-                if (
-                    n.parent_id != null &&
-                    toRemove.has(n.parent_id) &&
-                    !toRemove.has(n.id)
-                ) {
-                    toRemove.add(n.id);
-                    changed = true;
-                }
-            }
-        }
+        const toRemove = descendantsOf(target.id);
         try {
             await api.consolidationDeleteNode(target.id);
             nodes = nodes.filter(n => !toRemove.has(n.id));
@@ -183,8 +268,10 @@
                     <ConsolidationNodeItem
                         {node}
                         {childrenOf}
+                        stats={index.stats}
                         ondelete={n => (deleteTarget = n)}
-                        ondropInto={handleDrop} />
+                        ondropInto={handleDrop}
+                        onrename={handleRename} />
                 {/each}
             {/if}
         </div>

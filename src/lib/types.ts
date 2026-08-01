@@ -87,6 +87,9 @@ export interface ConsolidationNode {
     type: NodeType;
     source_node_id: number | null;
     sort_order: number;
+    size: number | null;
+    origin_device: string | null;
+    origin_path: string | null;
 }
 
 export type PathComponentKind = 'cons' | 'source';

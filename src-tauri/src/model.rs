@@ -119,6 +119,15 @@ pub struct ConsolidationNode {
     pub node_type: String,
     pub source_node_id: Option<i64>,
     pub sort_order: i64,
+    /// File size in bytes; only meaningful when `node_type == "file"`.
+    #[serde(default)]
+    pub size: Option<i64>,
+    /// `sources.device_label` of the origin device, when dragged from a source.
+    #[serde(default)]
+    pub origin_device: Option<String>,
+    /// `nodes.rel_path` (full path from the source root) of the origin node.
+    #[serde(default)]
+    pub origin_path: Option<String>,
 }
 
 /// Per-source (device) statistics summary.
