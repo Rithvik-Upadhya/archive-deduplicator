@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { untrack } from 'svelte';
     import type { PathTreeNode } from '$lib/types';
     import Self from './PathTreeItem.svelte';
     import Icon from '@iconify/svelte';
@@ -33,7 +34,7 @@
     // One-time initialization, not a reactive re-sync: a branch that only
     // becomes over-limit after the slider moves shouldn't retroactively
     // snap open, and one the user collapsed shouldn't reopen.
-    let expanded = $state(node.over_limit);
+    let expanded = $state(untrack(() => node.over_limit));
     let editing = $state(false);
     let editValue = $state('');
     let dragOver = $state(false);

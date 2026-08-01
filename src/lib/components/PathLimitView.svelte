@@ -214,6 +214,7 @@
                 data-drag={rootDragOver}
                 role="tree"
                 aria-label="Consolidated tree"
+                tabindex="0"
                 ondragover={e => {
                     e.preventDefault();
                     rootDragOver = true;
