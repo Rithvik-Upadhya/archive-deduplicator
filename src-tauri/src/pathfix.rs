@@ -412,22 +412,3 @@ pub fn set_resolved(
     )?;
     Ok(())
 }
-
-/// Virtual source-node renames (id, original, new) for the export guide.
-pub fn source_renames(
-    conn: &Connection,
-    workspace_id: i64,
-) -> rusqlite::Result<Vec<(i64, String, String)>> {
-    let mut stmt = conn.prepare(
-        "SELECT ref_id, original_name, new_name FROM pathfix_state
-         WHERE workspace_id = ?1 AND kind = 'source' AND new_name != ''",
-    )?;
-    let rows = stmt.query_map(params![workspace_id], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-        ))
-    })?;
-    rows.collect()
-}

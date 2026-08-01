@@ -100,17 +100,11 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_cnodes_consolidation ON consolidation_nodes(consolidation_id);
         CREATE INDEX IF NOT EXISTS idx_cnodes_parent ON consolidation_nodes(parent_id);
 
-        CREATE TABLE IF NOT EXISTS action_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-            ts TEXT NOT NULL,
-            op TEXT NOT NULL,
-            detail TEXT NOT NULL DEFAULT ''
-        );
-        CREATE INDEX IF NOT EXISTS idx_log_ws ON action_log(workspace_id);
-
         -- Legacy source-based path edits table (superseded by pathfix_state).
         DROP TABLE IF EXISTS pathfix_edits;
+
+        -- Legacy audit trail / guide-export feature, removed.
+        DROP TABLE IF EXISTS action_log;
 
         -- Path-limit fixing state for the consolidated end-state tree.
         -- kind = 'cons' (ref_id -> consolidation_nodes.id) or

@@ -12,8 +12,7 @@ Everything lives in one local SQLite database, so all state survives a restart.
 The user workflow is three views, in order, and much of the backend design follows from it:
 
 1. **Deduplicate** — import sources, run the matcher, browse match groups and per-device stats.
-2. **Consolidate** — drag nodes from source trees into a target ("end-state") tree; export the
-   plan as a Markdown guide.
+2. **Consolidate** — drag nodes from source trees into a target ("end-state") tree.
 3. **Fix Paths** — walk the *consolidated end-state* tree for paths over the Windows 260-char
    limit and rename components until they fit.
 
@@ -103,9 +102,6 @@ parse.rs / scan.rs  →  nodes table  →  dedup.rs  →  rollup.rs  →  dup_an
   incompatible change needs an explicit `DROP`/`ALTER` line there (see the `pathfix_edits` drop).
   The connection is a single `Mutex<Connection>` in Tauri managed state (`Db`), so every command
   locks it; don't hold the lock across an `await`.
-
-`export_action_log` derives the guide from the **current tree**, not from `action_log` history —
-so planning moves that cancelled out never show up. Keep it that way.
 
 ### Frontend
 

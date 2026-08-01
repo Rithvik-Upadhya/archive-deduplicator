@@ -3,7 +3,6 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import type {
-    ActionLogEntry,
     ConsolidationNode,
     DeviceStats,
     GroupPage,
@@ -87,7 +86,6 @@ export const getDeviceStats = (workspaceId: number) =>
 export const consolidationGet = (workspaceId: number) =>
     invoke<[number, ConsolidationNode[]]>('consolidation_get', { workspaceId });
 export const consolidationAddNode = (args: {
-    workspaceId: number;
     consolidationId: number;
     parentId: number | null;
     name: string;
@@ -99,23 +97,10 @@ export const consolidationMoveNode = (
     parentId: number | null,
     sortOrder: number,
 ) => invoke<void>('consolidation_move_node', { nodeId, parentId, sortOrder });
-export const consolidationRenameNode = (
-    workspaceId: number,
-    nodeId: number,
-    name: string,
-) => invoke<void>('consolidation_rename_node', { workspaceId, nodeId, name });
+export const consolidationRenameNode = (nodeId: number, name: string) =>
+    invoke<void>('consolidation_rename_node', { nodeId, name });
 export const consolidationDeleteNode = (nodeId: number) =>
     invoke<void>('consolidation_delete_node', { nodeId });
-
-// --- Action log ---
-
-export const actionLogList = (workspaceId: number, opPrefix?: string) =>
-    invoke<ActionLogEntry[]>('action_log_list', {
-        workspaceId,
-        opPrefix: opPrefix ?? null,
-    });
-export const exportActionLog = (workspaceId: number) =>
-    invoke<string>('export_action_log', { workspaceId });
 
 // --- Path limits (on the consolidated end-state tree) ---
 
@@ -146,11 +131,6 @@ export const appStateGet = (key: string) =>
     invoke<string | null>('app_state_get', { key });
 export const appStateSet = (key: string, value: string) =>
     invoke<void>('app_state_set', { key, value });
-
-// --- File export ---
-
-export const writeTextFile = (path: string, contents: string) =>
-    invoke<void>('write_text_file', { path, contents });
 
 // --- Database export / import ---
 

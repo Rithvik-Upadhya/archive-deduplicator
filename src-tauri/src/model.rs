@@ -121,16 +121,6 @@ pub struct ConsolidationNode {
     pub sort_order: i64,
 }
 
-/// An entry in the change/guide log.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActionLogEntry {
-    pub id: i64,
-    pub workspace_id: i64,
-    pub ts: String,
-    pub op: String,
-    pub detail: String,
-}
-
 /// Per-source (device) statistics summary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceStats {

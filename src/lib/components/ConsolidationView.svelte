@@ -1,14 +1,12 @@
 <script lang="ts">
     import * as api from '$lib/api';
     import { app } from '$lib/stores/app.svelte';
-    import type { ActionLogEntry, ConsolidationNode } from '$lib/types';
-    import { save } from '@tauri-apps/plugin-dialog';
+    import type { ConsolidationNode } from '$lib/types';
     import DeviceTree from './DeviceTree.svelte';
     import ConsolidationNodeItem from './ConsolidationNodeItem.svelte';
     import Icon from '@iconify/svelte';
     import { Button } from '$lib/components/ui/button';
     import { Input } from '$lib/components/ui/input';
-    import { ScrollArea } from '$lib/components/ui/scroll-area';
     import * as Dialog from '$lib/components/ui/dialog';
     import * as AlertDialog from '$lib/components/ui/alert-dialog';
     import * as Field from '$lib/components/ui/field';
@@ -17,7 +15,6 @@
 
     let consolidationId = $state<number | null>(null);
     let nodes = $state<ConsolidationNode[]>([]);
-    let log = $state<ActionLogEntry[]>([]);
     let rootDragOver = $state(false);
 
     let showNewFolderDialog = $state(false);
@@ -29,7 +26,6 @@
         const [cid, cnodes] = await api.consolidationGet(app.activeWorkspaceId);
         consolidationId = cid;
         nodes = cnodes;
-        log = await api.actionLogList(app.activeWorkspaceId);
     }
 
     // Reload whenever the active workspace changes.
@@ -61,7 +57,6 @@
         };
         try {
             const created = await api.consolidationAddNode({
-                workspaceId: app.activeWorkspaceId,
                 consolidationId,
                 parentId,
                 name: payload.name,
@@ -69,7 +64,6 @@
                 sourceNodeId: payload.node_id,
             });
             nodes = [...nodes, created];
-            log = await api.actionLogList(app.activeWorkspaceId);
         } catch (err) {
             toast.error(String(err));
         }
@@ -117,7 +111,6 @@
         showNewFolderDialog = false;
         try {
             const created = await api.consolidationAddNode({
-                workspaceId: app.activeWorkspaceId,
                 consolidationId,
                 parentId: null,
                 name,
@@ -129,126 +122,72 @@
             toast.error(String(err));
         }
     }
-
-    async function exportGuide() {
-        if (app.activeWorkspaceId == null) return;
-        try {
-            const text = await api.exportActionLog(app.activeWorkspaceId);
-            const path = await save({
-                defaultPath: 'consolidation-guide.md',
-                filters: [{ name: 'Markdown', extensions: ['md'] }],
-            });
-            if (!path) return;
-            await api.writeTextFile(path, text);
-            toast.success('Guide exported.');
-        } catch (err) {
-            toast.error(String(err));
-        }
-    }
 </script>
 
-<div class="grid min-h-0 grow grid-rows-[1fr_auto] gap-4 overflow-hidden">
-    <div class="grid min-h-0 grid-cols-2 gap-4">
-        <!-- Source devices -->
-        <section class="flex min-h-0 min-w-0 flex-col overflow-hidden pe-1">
-            <h2 class="section-label mb-2 shrink-0">
-                Source devices — drag files &amp; folders →
-            </h2>
-            {#if app.sources.length === 0}
-                <Empty.Root class="border border-dashed">
-                    <Empty.Header>
-                        <Empty.Media variant="icon">
-                            <Icon icon="ph:hard-drives-fill" />
-                        </Empty.Media>
-                        <Empty.Title>No devices</Empty.Title>
-                        <Empty.Description>
-                            Add devices first in the Deduplicate view.
-                        </Empty.Description>
-                    </Empty.Header>
-                </Empty.Root>
-            {:else}
-                {#each app.sources as s (s.id)}
-                    <DeviceTree source={s} draggable />
-                {/each}
-            {/if}
-        </section>
+<div class="grid min-h-0 grow grid-cols-2 gap-4 overflow-hidden">
+    <!-- Source devices -->
+    <section class="flex min-h-0 min-w-0 flex-col overflow-hidden pe-1">
+        <h2 class="section-label mb-2 shrink-0">
+            Source devices — drag files &amp; folders →
+        </h2>
+        {#if app.sources.length === 0}
+            <Empty.Root class="border border-dashed">
+                <Empty.Header>
+                    <Empty.Media variant="icon">
+                        <Icon icon="ph:hard-drives-fill" />
+                    </Empty.Media>
+                    <Empty.Title>No devices</Empty.Title>
+                    <Empty.Description>
+                        Add devices first in the Deduplicate view.
+                    </Empty.Description>
+                </Empty.Header>
+            </Empty.Root>
+        {:else}
+            {#each app.sources as s (s.id)}
+                <DeviceTree source={s} draggable />
+            {/each}
+        {/if}
+    </section>
 
-        <!-- Consolidated target tree -->
-        <section class="flex min-h-0 min-w-0 flex-col overflow-hidden">
-            <div class="mb-2 flex items-center justify-between gap-2">
-                <h2 class="section-label">Consolidated tree</h2>
-                <Button
-                    variant="outline"
-                    size="sm"
-                    onclick={openNewFolderDialog}>
-                    <Icon icon="ph:folder-plus-fill" />
-                    <span>Folder</span>
-                </Button>
-            </div>
-            <div
-                class="min-h-32 grow overflow-y-auto rounded-md border-2 border-dashed p-2 transition-colors data-[drag=true]:border-brand data-[drag=true]:bg-brand/10"
-                data-drag={rootDragOver}
-                role="tree"
-                aria-label="Consolidated tree"
-                tabindex="0"
-                ondragover={e => {
-                    e.preventDefault();
-                    rootDragOver = true;
-                }}
-                ondragleave={() => (rootDragOver = false)}
-                ondrop={e => {
-                    e.preventDefault();
-                    rootDragOver = false;
-                    handleDrop(null, e);
-                }}>
-                {#if childrenOf(null).length === 0}
-                    <p class="p-4 text-center text-sm text-muted-foreground">
-                        Drop files or folders here to build your target tree.
-                    </p>
-                {:else}
-                    {#each childrenOf(null) as node (node.id)}
-                        <ConsolidationNodeItem
-                            {node}
-                            {childrenOf}
-                            ondelete={n => (deleteTarget = n)}
-                            ondropInto={handleDrop} />
-                    {/each}
-                {/if}
-            </div>
-        </section>
-    </div>
-
-    <!-- Change log -->
-    <section class="flex max-h-[28vh] min-h-0 flex-col border-t pt-2">
-        <div class="mb-1 flex items-center justify-between gap-2">
-            <h2 class="section-label">Change log</h2>
-            <Button variant="outline" size="sm" onclick={exportGuide}>
-                <Icon icon="ph:export-fill" />
-                <span>Export Guide</span>
+    <!-- Consolidated target tree -->
+    <section class="flex min-h-0 min-w-0 flex-col overflow-hidden">
+        <div class="mb-2 flex items-center justify-between gap-2">
+            <h2 class="section-label">Consolidated tree</h2>
+            <Button variant="outline" size="sm" onclick={openNewFolderDialog}>
+                <Icon icon="ph:folder-plus-fill" />
+                <span>Folder</span>
             </Button>
         </div>
-        <ScrollArea class="min-h-0 grow">
-            {#if log.length === 0}
-                <p class="py-2 text-xs text-muted-foreground">
-                    No changes recorded yet.
+        <div
+            class="min-h-32 grow overflow-y-auto rounded-md border-2 border-dashed p-2 transition-colors data-[drag=true]:border-brand data-[drag=true]:bg-brand/10"
+            data-drag={rootDragOver}
+            role="tree"
+            aria-label="Consolidated tree"
+            tabindex="0"
+            ondragover={e => {
+                e.preventDefault();
+                rootDragOver = true;
+            }}
+            ondragleave={() => (rootDragOver = false)}
+            ondrop={e => {
+                e.preventDefault();
+                rootDragOver = false;
+                handleDrop(null, e);
+            }}>
+            {#if childrenOf(null).length === 0}
+                <p class="p-4 text-center text-sm text-muted-foreground">
+                    Drop files or folders here to build your target tree.
                 </p>
             {:else}
-                <ul class="flex flex-col">
-                    {#each log as entry (entry.id)}
-                        <li
-                            class="flex gap-3 border-b border-border py-1 text-xs last:border-b-0">
-                            <span
-                                class="shrink-0 whitespace-nowrap text-muted-foreground"
-                                >{entry.ts}</span>
-                            <span
-                                class="shrink-0 font-medium whitespace-nowrap text-muted-foreground"
-                                >{entry.op}</span>
-                            <span class="truncate">{entry.detail}</span>
-                        </li>
-                    {/each}
-                </ul>
+                {#each childrenOf(null) as node (node.id)}
+                    <ConsolidationNodeItem
+                        {node}
+                        {childrenOf}
+                        ondelete={n => (deleteTarget = n)}
+                        ondropInto={handleDrop} />
+                {/each}
             {/if}
-        </ScrollArea>
+        </div>
     </section>
 </div>
 

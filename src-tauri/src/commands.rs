@@ -149,13 +149,6 @@ pub fn import_tree_json(
     parse::insert_nodes(&tx, source_id, &flat).map_err(map_err)?;
     tx.commit().map_err(map_err)?;
 
-    log_action(
-        &conn,
-        workspace_id,
-        "import_json",
-        &format!("Imported '{label}' ({} files)", flat.file_count),
-    );
-
     Ok(Source {
         id: source_id,
         workspace_id,
@@ -193,13 +186,6 @@ pub fn scan_folder(
     let source_id = tx.last_insert_rowid();
     parse::insert_nodes(&tx, source_id, &flat).map_err(map_err)?;
     tx.commit().map_err(map_err)?;
-
-    log_action(
-        &conn,
-        workspace_id,
-        "scan_folder",
-        &format!("Scanned '{path}' as '{label}' ({} files)", flat.file_count),
-    );
 
     Ok(Source {
         id: source_id,
@@ -323,12 +309,6 @@ pub fn run_dedup(
     );
     let mut conn = db.0.lock().unwrap();
     let count = crate::dedup::run(&mut conn, workspace_id, params).map_err(map_err)?;
-    log_action(
-        &conn,
-        workspace_id,
-        "run_dedup",
-        &format!("Found {count} duplicate groups"),
-    );
     let _ = app.emit(
         "dedup:progress",
         DedupProgress {
@@ -600,7 +580,6 @@ pub fn consolidation_get(
 #[tauri::command]
 pub fn consolidation_add_node(
     db: State<Db>,
-    workspace_id: i64,
     consolidation_id: i64,
     parent_id: Option<i64>,
     name: String,
@@ -623,12 +602,6 @@ pub fn consolidation_add_node(
     )
     .map_err(map_err)?;
     let id = conn.last_insert_rowid();
-    log_action(
-        &conn,
-        workspace_id,
-        "consolidate_add",
-        &format!("Added '{name}' to consolidation"),
-    );
     Ok(ConsolidationNode {
         id,
         consolidation_id,
@@ -657,24 +630,13 @@ pub fn consolidation_move_node(
 }
 
 #[tauri::command]
-pub fn consolidation_rename_node(
-    db: State<Db>,
-    workspace_id: i64,
-    node_id: i64,
-    name: String,
-) -> CmdResult<()> {
+pub fn consolidation_rename_node(db: State<Db>, node_id: i64, name: String) -> CmdResult<()> {
     let conn = db.0.lock().unwrap();
     conn.execute(
         "UPDATE consolidation_nodes SET name = ?1 WHERE id = ?2",
         params![name, node_id],
     )
     .map_err(map_err)?;
-    log_action(
-        &conn,
-        workspace_id,
-        "consolidate_rename",
-        &format!("Renamed consolidation node to '{name}'"),
-    );
     Ok(())
 }
 
@@ -687,245 +649,6 @@ pub fn consolidation_delete_node(db: State<Db>, node_id: i64) -> CmdResult<()> {
     )
     .map_err(map_err)?;
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Action log
-// ---------------------------------------------------------------------------
-
-fn log_action(conn: &rusqlite::Connection, workspace_id: i64, op: &str, detail: &str) {
-    let _ = conn.execute(
-        "INSERT INTO action_log (workspace_id, ts, op, detail) VALUES (?1, ?2, ?3, ?4)",
-        params![workspace_id, now(), op, detail],
-    );
-}
-
-#[tauri::command]
-pub fn action_log_list(
-    db: State<Db>,
-    workspace_id: i64,
-    op_prefix: Option<String>,
-) -> CmdResult<Vec<ActionLogEntry>> {
-    let conn = db.0.lock().unwrap();
-    let prefix = format!("{}%", op_prefix.unwrap_or_default());
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, workspace_id, ts, op, detail FROM action_log
-             WHERE workspace_id = ?1 AND op LIKE ?2 ORDER BY id DESC LIMIT 500",
-        )
-        .map_err(map_err)?;
-    let rows = stmt
-        .query_map(params![workspace_id, prefix], |r| {
-            Ok(ActionLogEntry {
-                id: r.get(0)?,
-                workspace_id: r.get(1)?,
-                ts: r.get(2)?,
-                op: r.get(3)?,
-                detail: r.get(4)?,
-            })
-        })
-        .map_err(map_err)?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(map_err)
-}
-
-/// Render the consolidation plan as an **end-state guide**: the final target
-/// tree plus a flat list of concrete steps (create folder / move). Because it
-/// is derived from the current tree — not from the change history — moves
-/// that cancelled each other out never appear.
-#[tauri::command]
-pub fn export_action_log(db: State<Db>, workspace_id: i64) -> CmdResult<String> {
-    let conn = db.0.lock().unwrap();
-    let mut out = String::from("# Archive Deduplicator — Consolidation Guide\n\n");
-    out.push_str(
-        "This guide describes the desired END STATE only. Perform the steps in\norder; intermediate moves made while planning have already been folded in.\n\n",
-    );
-
-    let cid: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM consolidations WHERE workspace_id = ?1 LIMIT 1",
-            params![workspace_id],
-            |r| r.get(0),
-        )
-        .ok();
-    let Some(cid) = cid else {
-        out.push_str("_No consolidation tree defined._\n");
-        return Ok(out);
-    };
-
-    // Load the whole consolidation tree.
-    struct CNode {
-        id: i64,
-        parent_id: Option<i64>,
-        name: String,
-        node_type: String,
-        source_node_id: Option<i64>,
-        sort_order: i64,
-    }
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, parent_id, name, type, source_node_id, sort_order
-             FROM consolidation_nodes WHERE consolidation_id = ?1",
-        )
-        .map_err(map_err)?;
-    let cnodes: Vec<CNode> = stmt
-        .query_map(params![cid], |r| {
-            Ok(CNode {
-                id: r.get(0)?,
-                parent_id: r.get(1)?,
-                name: r.get(2)?,
-                node_type: r.get(3)?,
-                source_node_id: r.get(4)?,
-                sort_order: r.get(5)?,
-            })
-        })
-        .map_err(map_err)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(map_err)?;
-
-    if cnodes.is_empty() {
-        out.push_str("_The consolidation tree is empty._\n");
-        return Ok(out);
-    }
-
-    // Resolve source node origin paths (device + rel path).
-    let mut src_paths: HashMap<i64, (String, String)> = HashMap::new();
-    {
-        let mut stmt = conn
-            .prepare(
-                "SELECT n.id, s.device_label, n.rel_path FROM nodes n
-                 JOIN sources s ON s.id = n.source_id
-                 WHERE n.id = ?1",
-            )
-            .map_err(map_err)?;
-        for c in &cnodes {
-            if let Some(sid) = c.source_node_id {
-                if let Ok(row) = stmt.query_row(params![sid], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                }) {
-                    src_paths.insert(sid, row);
-                }
-            }
-        }
-    }
-
-    // Build children index and compute target paths.
-    let mut children: HashMap<Option<i64>, Vec<&CNode>> = HashMap::new();
-    for c in &cnodes {
-        children.entry(c.parent_id).or_default().push(c);
-    }
-    for v in children.values_mut() {
-        v.sort_by_key(|c| c.sort_order);
-    }
-
-    // Depth-first walk producing both the tree rendering and the step list.
-    // Every node in the consolidation tree is wanted (that's why it's there),
-    // so origin-bearing nodes always move and origin-less directories are
-    // freshly created.
-    let mut tree = String::new();
-    let mut mkdirs: Vec<String> = Vec::new();
-    let mut moves: Vec<String> = Vec::new();
-
-    fn walk(
-        parent: Option<i64>,
-        prefix: &str,
-        path: &str,
-        children: &HashMap<Option<i64>, Vec<&CNode>>,
-        src_paths: &HashMap<i64, (String, String)>,
-        tree: &mut String,
-        mkdirs: &mut Vec<String>,
-        moves: &mut Vec<String>,
-    ) {
-        let Some(kids) = children.get(&parent) else {
-            return;
-        };
-        for c in kids {
-            let target = if path.is_empty() {
-                c.name.clone()
-            } else {
-                format!("{path}/{}", c.name)
-            };
-            tree.push_str(&format!("{prefix}{}\n", c.name));
-
-            let origin = c
-                .source_node_id
-                .and_then(|sid| src_paths.get(&sid))
-                .map(|(dev, rel)| format!("[{dev}] {rel}"));
-            match (c.node_type.as_str(), origin) {
-                ("directory", Some(o)) => moves.push(format!("Move folder {o} -> {target}/")),
-                ("directory", None) => mkdirs.push(format!("Create folder: {target}/")),
-                (_, Some(o)) => moves.push(format!("Move {o} -> {target}")),
-                _ => {}
-            }
-            if c.node_type == "directory" {
-                walk(
-                    Some(c.id),
-                    &format!("{prefix}  "),
-                    &target,
-                    children,
-                    src_paths,
-                    tree,
-                    mkdirs,
-                    moves,
-                );
-            }
-        }
-    }
-    walk(
-        None,
-        "- ",
-        "",
-        &children,
-        &src_paths,
-        &mut tree,
-        &mut mkdirs,
-        &mut moves,
-    );
-
-    out.push_str("## Target tree\n\n");
-    out.push_str(&tree);
-    out.push('\n');
-
-    if !mkdirs.is_empty() {
-        out.push_str("## Step 1 — Create folders\n\n");
-        for s in &mkdirs {
-            out.push_str(&format!("- [ ] {s}\n"));
-        }
-        out.push('\n');
-    }
-    if !moves.is_empty() {
-        out.push_str("## Step 2 — Move\n\n");
-        for s in &moves {
-            out.push_str(&format!("- [ ] {s}\n"));
-        }
-        out.push('\n');
-    }
-    // Virtual renames recorded in the path-limits step (files/folders inside
-    // dragged-in source directories).
-    let renames = pathfix::source_renames(&conn, workspace_id).map_err(map_err)?;
-    if !renames.is_empty() {
-        out.push_str("## Step 3 — Rename (path-length fixes)\n\n");
-        let mut pstmt = conn
-            .prepare(
-                "SELECT s.device_label, n.rel_path FROM nodes n
-                 JOIN sources s ON s.id = n.source_id WHERE n.id = ?1",
-            )
-            .map_err(map_err)?;
-        for (id, orig, new) in &renames {
-            let loc = pstmt
-                .query_row(params![id], |r| {
-                    Ok(format!(
-                        "[{}] {}",
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?
-                    ))
-                })
-                .unwrap_or_default();
-            out.push_str(&format!("- [ ] Rename {loc} : '{orig}' -> '{new}'\n"));
-        }
-        out.push('\n');
-    }
-
-    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -957,12 +680,6 @@ pub fn pathfix_rename(
 ) -> CmdResult<()> {
     let conn = db.0.lock().unwrap();
     pathfix::rename(&conn, workspace_id, &kind, node_id, &new_name).map_err(map_err)?;
-    log_action(
-        &conn,
-        workspace_id,
-        "pathfix_rename",
-        &format!("Renamed {kind} node {node_id} to '{new_name}'"),
-    );
     Ok(())
 }
 
@@ -1007,12 +724,6 @@ pub fn app_state_set(db: State<Db>, key: String, value: String) -> CmdResult<()>
     Ok(())
 }
 
-/// Write text to a file chosen by the user (used to export the guide log).
-#[tauri::command]
-pub fn write_text_file(path: String, contents: String) -> CmdResult<()> {
-    std::fs::write(&path, contents).map_err(map_err)
-}
-
 // ---------------------------------------------------------------------------
 // Database export / import
 // ---------------------------------------------------------------------------
@@ -1031,13 +742,5 @@ pub fn db_export(db: State<Db>, path: String) -> CmdResult<()> {
 #[tauri::command]
 pub fn db_import(db: State<Db>, path: String) -> CmdResult<crate::dbio::ImportSummary> {
     let mut conn = db.0.lock().unwrap();
-    let summary = crate::dbio::import_merge(&mut conn, Path::new(&path)).map_err(map_err)?;
-    let detail = format!(
-        "Imported {} workspace(s), {} source(s), {} node(s) from '{path}'",
-        summary.workspaces_added, summary.sources_added, summary.nodes_added
-    );
-    for ws_id in &summary.new_workspace_ids {
-        log_action(&conn, *ws_id, "db_import", &detail);
-    }
-    Ok(summary)
+    crate::dbio::import_merge(&mut conn, Path::new(&path)).map_err(map_err)
 }

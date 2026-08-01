@@ -89,14 +89,6 @@ export interface ConsolidationNode {
     sort_order: number;
 }
 
-export interface ActionLogEntry {
-    id: number;
-    workspace_id: number;
-    ts: string;
-    op: string;
-    detail: string;
-}
-
 export type PathComponentKind = 'cons' | 'source';
 
 export interface PathComponent {

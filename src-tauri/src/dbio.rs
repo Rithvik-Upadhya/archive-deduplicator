@@ -375,24 +375,6 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                     // simply be recomputed next time path limits are checked.
                 }
             }
-
-            // --- action_log ---
-            {
-                let mut stmt = tx.prepare(
-                    "SELECT ts, op, detail FROM ext.action_log WHERE workspace_id = ?1 ORDER BY id",
-                )?;
-                let rows: Vec<(String, String, String)> = stmt
-                    .query_map(params![old_ws_id], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                for (ts, op, detail) in rows {
-                    tx.execute(
-                        "INSERT INTO action_log (workspace_id, ts, op, detail) VALUES (?1, ?2, ?3, ?4)",
-                        params![new_ws_id, ts, op, detail],
-                    )?;
-                }
-            }
         }
 
         Ok(ImportSummary {
