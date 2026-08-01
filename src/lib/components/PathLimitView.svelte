@@ -31,7 +31,11 @@
     // returns the whole tree, and the slider can fire ~32 distinct values
     // while being dragged.
     let debounceHandle: ReturnType<typeof setTimeout> | undefined;
-    let loadedFor = $state<string | null>(null);
+    // Plain (non-reactive) on purpose: it's only compared inside this same
+    // effect, never read elsewhere. Making it $state would cause writing to
+    // it here to re-trigger this very effect, and the cleanup below would
+    // then cancel the just-scheduled reload before it ever fires.
+    let loadedFor: string | null = null;
     $effect(() => {
         const key = `${app.activeWorkspaceId}:${limit}`;
         if (app.activeWorkspaceId != null && key !== loadedFor) {
