@@ -92,24 +92,15 @@ export interface ConsolidationNode {
     origin_path: string | null;
 }
 
-export type PathComponentKind = 'cons' | 'source';
-
-export interface PathComponent {
-    node_id: number;
-    kind: PathComponentKind;
+export interface PathTreeNode {
+    id: number;
+    parent_id: number | null;
     name: string;
     original_name: string;
     type: NodeType;
     edited: boolean;
-}
-
-export interface PathLimitEntry {
-    node_id: number;
-    leaf_kind: PathComponentKind;
-    effective_path: string;
-    length: number;
-    resolved: boolean;
-    components: PathComponent[];
+    over_limit: boolean;
+    path_length: number;
 }
 
 export interface DedupProgress {

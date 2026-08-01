@@ -10,8 +10,7 @@ import type {
     ImportSummary,
     MatchGroup,
     NodeType,
-    PathComponentKind,
-    PathLimitEntry,
+    PathTreeNode,
     Source,
     TreeNode,
     Workspace,
@@ -109,26 +108,13 @@ export const consolidationDeleteNode = (nodeId: number) =>
 
 // --- Path limits (on the consolidated end-state tree) ---
 
-export const pathfixList = (workspaceId: number, limit: number) =>
-    invoke<PathLimitEntry[]>('pathfix_list', { workspaceId, limit });
+export const pathfixTree = (workspaceId: number, limit: number) =>
+    invoke<PathTreeNode[]>('pathfix_tree', { workspaceId, limit });
 export const pathfixRename = (
     workspaceId: number,
-    kind: PathComponentKind,
     nodeId: number,
     newName: string,
-) => invoke<void>('pathfix_rename', { workspaceId, kind, nodeId, newName });
-export const pathfixSetResolved = (
-    workspaceId: number,
-    kind: PathComponentKind,
-    nodeId: number,
-    resolved: boolean,
-) =>
-    invoke<void>('pathfix_set_resolved', {
-        workspaceId,
-        kind,
-        nodeId,
-        resolved,
-    });
+) => invoke<void>('pathfix_rename', { workspaceId, nodeId, newName });
 
 // --- App state ---
 

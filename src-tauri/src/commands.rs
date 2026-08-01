@@ -712,44 +712,27 @@ pub fn consolidation_delete_node(db: State<Db>, node_id: i64) -> CmdResult<()> {
 // Path-limit view
 // ---------------------------------------------------------------------------
 
-/// List over-limit paths in the consolidated end-state tree (step 3 of the
-/// workflow: dedup → consolidate → fix path limits).
+/// Build the consolidated end-state tree annotated with path-length
+/// guidance (step 3: dedup → consolidate → fix path limits). Every node is
+/// returned, not just over-limit ones; `over_limit` marks every node on an
+/// offending root-to-leaf chain.
 #[tauri::command]
-pub fn pathfix_list(
-    db: State<Db>,
-    workspace_id: i64,
-    limit: i64,
-) -> CmdResult<Vec<PathLimitEntry>> {
+pub fn pathfix_tree(db: State<Db>, workspace_id: i64, limit: i64) -> CmdResult<Vec<PathTreeNode>> {
     let conn = db.0.lock().unwrap();
-    pathfix::list_over_limit(&conn, workspace_id, limit).map_err(map_err)
+    pathfix::build_tree(&conn, workspace_id, limit).map_err(map_err)
 }
 
-/// Rename one component of an over-limit path. `kind` is "cons" for
-/// consolidation-tree nodes or "source" for nodes inside a dragged-in source
-/// directory (stored as a virtual rename). Empty name reverts the edit.
+/// Rename a node in the consolidated end-state tree. Empty name reverts the edit.
 #[tauri::command]
 pub fn pathfix_rename(
     db: State<Db>,
     workspace_id: i64,
-    kind: String,
     node_id: i64,
     new_name: String,
 ) -> CmdResult<()> {
     let conn = db.0.lock().unwrap();
-    pathfix::rename(&conn, workspace_id, &kind, node_id, &new_name).map_err(map_err)?;
+    pathfix::rename(&conn, workspace_id, node_id, &new_name).map_err(map_err)?;
     Ok(())
-}
-
-#[tauri::command]
-pub fn pathfix_set_resolved(
-    db: State<Db>,
-    workspace_id: i64,
-    kind: String,
-    node_id: i64,
-    resolved: bool,
-) -> CmdResult<()> {
-    let conn = db.0.lock().unwrap();
-    pathfix::set_resolved(&conn, workspace_id, &kind, node_id, resolved).map_err(map_err)
 }
 
 // ---------------------------------------------------------------------------

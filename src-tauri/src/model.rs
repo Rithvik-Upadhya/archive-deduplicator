@@ -141,34 +141,32 @@ pub struct DeviceStats {
     pub duplicated_pct: f64,
 }
 
-/// One editable component (folder or file) of an over-limit path in the
-/// consolidated (end-state) tree. `kind` says which table the id refers to:
-/// "cons" -> consolidation_nodes, "source" -> nodes (virtual rename edit).
+/// One node in the consolidated end-state tree, annotated with path-length
+/// guidance. Produced by `pathfix::build_tree`. The frontend renders a real
+/// nested tree from this flat-with-parent-links list (same idiom as
+/// `ConsolidationNode`), instead of the old flat breadcrumb list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PathComponent {
-    pub node_id: i64,
-    pub kind: String,
+pub struct PathTreeNode {
+    /// consolidation_nodes.id.
+    pub id: i64,
+    /// Parent's id. `None` only for a tree root.
+    pub parent_id: Option<i64>,
     /// Effective name (rename edit applied when present).
     pub name: String,
-    /// Original name before any edit.
+    /// Name before any edit.
     pub original_name: String,
     #[serde(rename = "type")]
     pub node_type: String,
     pub edited: bool,
-}
-
-/// A branch of the consolidated end-state tree whose full path exceeds a
-/// length limit (default 260 for Windows).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PathLimitEntry {
-    /// Leaf id (in the table indicated by `leaf_kind`).
-    pub node_id: i64,
-    pub leaf_kind: String,
-    pub effective_path: String,
-    pub length: i64,
-    pub resolved: bool,
-    /// Every component of the path from root to leaf, each editable.
-    pub components: Vec<PathComponent>,
+    /// True if this node lies on the root-to-leaf chain of ANY leaf whose
+    /// full effective path exceeds the configured limit. Propagated to every
+    /// ancestor of such a leaf, not just the node where cumulative length
+    /// first crosses the threshold.
+    pub over_limit: bool,
+    /// Character length (Unicode-scalar count) of this node's own full
+    /// effective path from the tree root. Computed for every node; only
+    /// meaningful to *display* on leaves.
+    pub path_length: i64,
 }
 
 /// Progress payload emitted while a long-running dedup pass is executing.
