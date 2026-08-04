@@ -2,7 +2,12 @@
     import { getGroupForNode } from '$lib/api';
     import { app } from '$lib/stores/app.svelte';
     import { taskTray } from '$lib/stores/tasks.svelte';
-    import type { DedupProgress, GroupSort, MatchGroup, TreeNode } from '$lib/types';
+    import type {
+        DedupProgress,
+        GroupSort,
+        MatchGroup,
+        TreeNode,
+    } from '$lib/types';
     import { confidenceTone, formatBytes, formatTime, pct } from '$lib/util';
     import DeviceTree from './DeviceTree.svelte';
     import SourceManager from './SourceManager.svelte';
@@ -93,24 +98,6 @@
 <SourceManager />
 <div class="grid min-h-0 grow grid-cols-[1fr] gap-4 overflow-hidden mt-8">
     <div class="flex min-h-0 min-w-0 flex-col gap-6 overflow-hidden">
-        {#if app.dedupStale}
-            <Alert.Root class="flex-row items-center gap-3">
-                <Icon icon="ph:warning-fill" class="text-warn" />
-                <Alert.Description class="grow">
-                    Sources or analysis settings changed since the last run —
-                    results may be out of date.
-                </Alert.Description>
-                <Button
-                    size="sm"
-                    disabled={taskTray.hasActive('dedup')}
-                    onclick={runDedup}>
-                    {taskTray.hasActive('dedup')
-                        ? 'Analyzing…'
-                        : 'Re-run Analysis'}
-                </Button>
-            </Alert.Root>
-        {/if}
-
         <!-- Tuning controls -->
         <div class="flex flex-wrap items-end gap-6">
             <div class="flex min-w-48 flex-col gap-1.5">
@@ -149,13 +136,34 @@
                     Hide weaker matches
                 </span>
             </div>
-            <Button disabled={taskTray.hasActive('dedup')} onclick={runDedup}>
-                <Icon icon="ph:magnifying-glass-bold" />
-                <span
-                    >{taskTray.hasActive('dedup')
-                        ? 'Analyzing…'
-                        : 'Find Duplicates'}</span>
-            </Button>
+            {#if app.dedupStale}
+                <Alert.Root class="flex-row items-center gap-1.5 w-auto">
+                    <Alert.Description>
+                        <span class="flex flex-row items-center gap-2">
+                            <Icon icon="ph:warning-fill" class="text-warn" />
+                            Results may be out of date.
+                        </span>
+                    </Alert.Description>
+                    <Button
+                        size="sm"
+                        disabled={taskTray.hasActive('dedup')}
+                        onclick={runDedup}>
+                        {taskTray.hasActive('dedup')
+                            ? 'Analyzing…'
+                            : 'Re-run Analysis'}
+                    </Button>
+                </Alert.Root>
+            {:else}
+                <Button
+                    disabled={taskTray.hasActive('dedup')}
+                    onclick={runDedup}>
+                    <Icon icon="ph:magnifying-glass-bold" />
+                    <span
+                        >{taskTray.hasActive('dedup')
+                            ? 'Analyzing…'
+                            : 'Find Duplicates'}</span>
+                </Button>
+            {/if}
         </div>
 
         <!-- Work area: trees + duplicate review -->
@@ -173,8 +181,7 @@
                                 </Empty.Media>
                                 <Empty.Title>No devices</Empty.Title>
                                 <Empty.Description>
-                                    Add devices to browse their
-                                    trees.
+                                    Add devices to browse their trees.
                                 </Empty.Description>
                             </Empty.Header>
                         </Empty.Root>

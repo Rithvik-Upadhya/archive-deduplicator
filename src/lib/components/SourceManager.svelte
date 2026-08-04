@@ -119,7 +119,7 @@
     }
 </script>
 
-<div class="flex min-w-0 flex-row gap-3">
+<div class="flex min-w-0 w-full flex-row gap-3">
     <div class="flex flex-col gap-2 border-r-1 pr-3">
         <Button
             variant="outline"
@@ -164,139 +164,145 @@
             </Empty.Header>
         </Empty.Root>
     {:else}
-        <ul class="flex flex-row gap-1.5 grow overflow-x-auto">
-            {#each app.sources as s (s.id)}
-                <li
-                    class="group/device flex min-w-[380px] w-[380px] flex-col gap-1 rounded-md border bg-card px-2 py-1.5 transition-colors hover:border-brand/40 {s.excluded
-                        ? 'opacity-60'
-                        : ''}">
-                    <div class="flex min-w-0 items-center gap-1">
-                        <Icon
-                            icon="ph:hard-drive-fill"
-                            class="shrink-0 text-brand" />
-                        {#if editingId === s.id}
-                            <!-- svelte-ignore a11y_autofocus -->
-                            <Input
-                                autofocus
-                                class="h-7 text-sm"
-                                bind:value={editValue}
-                                onblur={() => commitEdit(s.id, s.device_label)}
-                                onkeydown={e => {
-                                    if (e.key === 'Enter')
-                                        commitEdit(s.id, s.device_label);
-                                    if (e.key === 'Escape') editingId = null;
-                                }} />
-                        {:else}
-                            <span
-                                class="flex-1 truncate text-sm font-medium"
-                                title={s.device_label}>{s.device_label}</span>
-                            <Button
-                                variant="ghost"
-                                size="icon"
-                                class="size-6 shrink-0 opacity-0 transition-opacity group-hover/device:opacity-100 {s.excluded
-                                    ? 'text-muted-foreground'
-                                    : ''}"
-                                aria-pressed={s.excluded}
-                                title={s.excluded
-                                    ? 'Include in analysis'
-                                    : 'Exclude from analysis'}
-                                onclick={() => toggleExcluded(s)}>
-                                <Icon
-                                    icon={s.excluded
-                                        ? 'ph:eye-slash-fill'
-                                        : 'ph:eye-fill'} />
-                                <span class="sr-only"
-                                    >{s.excluded
+        <div class="overflow-x-auto">
+            <ul class="grid grid-flow-col gap-1.5 min-w-0">
+                {#each app.sources as s (s.id)}
+                    <li
+                        class="group/device flex min-w-0 w-[280px] flex-col gap-1 rounded-md border bg-card px-2 py-1.5 transition-colors hover:border-brand/40 {s.excluded
+                            ? 'opacity-60'
+                            : ''}">
+                        <div class="flex min-w-0 items-center gap-1">
+                            <Icon
+                                icon="ph:hard-drive-fill"
+                                class="shrink-0 text-brand" />
+                            {#if editingId === s.id}
+                                <!-- svelte-ignore a11y_autofocus -->
+                                <Input
+                                    autofocus
+                                    class="h-6 text-sm"
+                                    bind:value={editValue}
+                                    onblur={() =>
+                                        commitEdit(s.id, s.device_label)}
+                                    onkeydown={e => {
+                                        if (e.key === 'Enter')
+                                            commitEdit(s.id, s.device_label);
+                                        if (e.key === 'Escape')
+                                            editingId = null;
+                                    }} />
+                            {:else}
+                                <span
+                                    class="flex-1 truncate text-sm font-medium"
+                                    title={s.device_label}
+                                    >{s.device_label}</span>
+                                <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    class="size-6 shrink-0 opacity-0 transition-opacity group-hover/device:opacity-100 {s.excluded
+                                        ? 'text-muted-foreground'
+                                        : ''}"
+                                    aria-pressed={s.excluded}
+                                    title={s.excluded
                                         ? 'Include in analysis'
-                                        : 'Exclude from analysis'}</span>
-                            </Button>
-                            <DropdownMenu.Root>
-                                <DropdownMenu.Trigger>
-                                    {#snippet child({
-                                        props,
-                                    }: {
-                                        props: Record<string, unknown>;
-                                    })}
-                                        <Button
-                                            {...props}
-                                            variant="ghost"
-                                            size="icon"
-                                            class="size-6 opacity-0 transition-opacity group-hover/device:opacity-100"
-                                            disabled={app.workspaces.length <=
-                                                1}
-                                            title="Copy to workspace">
-                                            <Icon icon="ph:copy-fill" />
-                                            <span class="sr-only"
-                                                >Copy to workspace</span>
-                                        </Button>
-                                    {/snippet}
-                                </DropdownMenu.Trigger>
-                                <DropdownMenu.Content align="end">
-                                    <DropdownMenu.Group>
-                                        <DropdownMenu.GroupHeading
-                                            >Copy to</DropdownMenu.GroupHeading>
-                                        {#each app.workspaces.filter(w => w.id !== app.activeWorkspaceId) as ws (ws.id)}
-                                            <DropdownMenu.Item
-                                                onSelect={() =>
-                                                    copyToWorkspace(s, ws)}>
-                                                <span class="truncate"
-                                                    >{ws.name}</span>
-                                            </DropdownMenu.Item>
-                                        {/each}
-                                    </DropdownMenu.Group>
-                                </DropdownMenu.Content>
-                            </DropdownMenu.Root>
-                            <Button
-                                variant="ghost"
-                                size="icon"
-                                class="size-6 opacity-0 transition-opacity group-hover/device:opacity-100"
-                                title="Rename device"
-                                onclick={() => startEdit(s.id, s.device_label)}>
-                                <Icon icon="ph:pencil-simple-fill" />
-                                <span class="sr-only">Rename device</span>
-                            </Button>
-                            <Button
-                                variant="ghost"
-                                size="icon"
-                                class="size-6 text-muted-foreground opacity-0 transition-opacity group-hover/device:opacity-100 hover:text-destructive"
-                                title="Remove device"
-                                onclick={() =>
-                                    (deleteTarget = {
-                                        id: s.id,
-                                        label: s.device_label,
-                                    })}>
-                                <Icon icon="ph:trash-fill" />
-                                <span class="sr-only">Remove device</span>
-                            </Button>
-                        {/if}
-                    </div>
-                    <Progress
-                        value={pct(s.duplicated_pct)}
-                        class="h-1 {DUP_BAR[
-                            dupLevel(pct(s.duplicated_pct))
-                        ]}" />
-                    <div
-                        class="flex items-center justify-between font-heading text-[0.7rem] tabular-nums text-muted-foreground">
-                        <span>{formatBytes(s.total_size)}</span>
-                        {#if s.excluded}
-                            <Badge
-                                variant="outline"
-                                class="px-1.5 py-0 text-[0.65rem]">
-                                Excluded
-                            </Badge>
-                        {:else}
-                            <Badge
-                                variant="outline"
-                                class="px-1.5 py-0 text-[0.65rem] {DUP_BADGE[
-                                    dupLevel(pct(s.duplicated_pct))
-                                ]}">
-                                {pct(s.duplicated_pct)}% dup
-                            </Badge>
-                        {/if}
-                    </div>
-                </li>
-            {/each}
-        </ul>
+                                        : 'Exclude from analysis'}
+                                    onclick={() => toggleExcluded(s)}>
+                                    <Icon
+                                        icon={s.excluded
+                                            ? 'ph:eye-slash-fill'
+                                            : 'ph:eye-fill'} />
+                                    <span class="sr-only"
+                                        >{s.excluded
+                                            ? 'Include in analysis'
+                                            : 'Exclude from analysis'}</span>
+                                </Button>
+                                <DropdownMenu.Root>
+                                    <DropdownMenu.Trigger>
+                                        {#snippet child({
+                                            props,
+                                        }: {
+                                            props: Record<string, unknown>;
+                                        })}
+                                            <Button
+                                                {...props}
+                                                variant="ghost"
+                                                size="icon"
+                                                class="size-6 opacity-0 transition-opacity disabled:opacity-0 group-hover/device:opacity-100"
+                                                disabled={app.workspaces
+                                                    .length <= 1}
+                                                title="Copy to workspace">
+                                                <Icon icon="ph:copy-fill" />
+                                                <span class="sr-only"
+                                                    >Copy to workspace</span>
+                                            </Button>
+                                        {/snippet}
+                                    </DropdownMenu.Trigger>
+                                    <DropdownMenu.Content align="end">
+                                        <DropdownMenu.Group>
+                                            <DropdownMenu.GroupHeading
+                                                >Copy to</DropdownMenu.GroupHeading>
+                                            {#each app.workspaces.filter(w => w.id !== app.activeWorkspaceId) as ws (ws.id)}
+                                                <DropdownMenu.Item
+                                                    onSelect={() =>
+                                                        copyToWorkspace(s, ws)}>
+                                                    <span class="truncate"
+                                                        >{ws.name}</span>
+                                                </DropdownMenu.Item>
+                                            {/each}
+                                        </DropdownMenu.Group>
+                                    </DropdownMenu.Content>
+                                </DropdownMenu.Root>
+                                <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    class="size-6 opacity-0 transition-opacity group-hover/device:opacity-100"
+                                    title="Rename device"
+                                    onclick={() =>
+                                        startEdit(s.id, s.device_label)}>
+                                    <Icon icon="ph:pencil-simple-fill" />
+                                    <span class="sr-only">Rename device</span>
+                                </Button>
+                                <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    class="size-6 text-muted-foreground opacity-0 transition-opacity group-hover/device:opacity-100 hover:text-destructive"
+                                    title="Remove device"
+                                    onclick={() =>
+                                        (deleteTarget = {
+                                            id: s.id,
+                                            label: s.device_label,
+                                        })}>
+                                    <Icon icon="ph:trash-fill" />
+                                    <span class="sr-only">Remove device</span>
+                                </Button>
+                            {/if}
+                        </div>
+                        <Progress
+                            value={pct(s.duplicated_pct)}
+                            class="h-1 {DUP_BAR[
+                                dupLevel(pct(s.duplicated_pct))
+                            ]}" />
+                        <div
+                            class="flex items-center justify-between font-heading text-[0.7rem] tabular-nums text-muted-foreground">
+                            <span>{formatBytes(s.total_size)}</span>
+                            {#if s.excluded}
+                                <Badge
+                                    variant="outline"
+                                    class="px-1.5 py-0 text-[0.65rem]">
+                                    Excluded
+                                </Badge>
+                            {:else}
+                                <Badge
+                                    variant="outline"
+                                    class="px-1.5 py-0 text-[0.65rem] {DUP_BADGE[
+                                        dupLevel(pct(s.duplicated_pct))
+                                    ]}">
+                                    {pct(s.duplicated_pct)}% dup
+                                </Badge>
+                            {/if}
+                        </div>
+                    </li>
+                {/each}
+            </ul>
+        </div>
     {/if}
 </div>
 

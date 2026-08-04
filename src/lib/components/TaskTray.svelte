@@ -20,8 +20,7 @@
     <!-- Offset above the sonner toaster's default bottom-right corner so a
          transient toast (rename/delete/copy confirmations) doesn't overlap a
          standing task card. -->
-    <div
-        class="fixed right-4 bottom-20 z-40 flex w-80 flex-col-reverse gap-2">
+    <div class="fixed right-4 bottom-4 z-40 flex w-80 flex-col-reverse gap-2">
         {#each taskTray.tasks as task (task.id)}
             <Card.Root class="gap-2 py-3 shadow-lg">
                 <Card.Content class="flex flex-col gap-2 px-3">
