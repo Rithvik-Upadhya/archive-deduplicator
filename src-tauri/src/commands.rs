@@ -9,7 +9,7 @@ use chrono::Utc;
 use rusqlite::params;
 use std::collections::HashMap;
 use std::path::Path;
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -135,88 +135,108 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
 }
 
 /// Import a `tree` JSON document as a new source, flattening it into `nodes`.
+///
+/// Runs on a dedicated blocking thread via `spawn_blocking` rather than
+/// inline: Tauri calls non-async commands directly on whatever thread is
+/// servicing the IPC message (see `tauri-macros`' `body_blocking`), which on
+/// desktop is the webview's main thread -- a synchronous command of any
+/// real duration freezes the whole UI, not just the DB. Making the command
+/// `async` and doing the actual work inside `spawn_blocking` keeps parsing
+/// and the DB write off that thread.
 #[tauri::command]
-pub fn import_tree_json(
-    db: State<Db>,
+pub async fn import_tree_json(
+    app: tauri::AppHandle,
     workspace_id: i64,
     json_text: String,
     label: String,
 ) -> CmdResult<Source> {
-    let flat = parse::parse_tree_json(&json_text)?;
-    let mut conn = db.0.lock().unwrap();
-    let ts = now();
-    let device_label = label.clone();
-    let tx = conn.transaction().map_err(map_err)?;
-    tx.execute(
-        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count)
-         VALUES (?1, 'json', ?2, ?3, NULL, ?4, ?5, ?6, ?7)",
-        params![workspace_id, label, device_label, flat.root_dev, ts, flat.total_size, flat.file_count],
-    )
-    .map_err(map_err)?;
-    let source_id = tx.last_insert_rowid();
-    parse::insert_nodes(&tx, source_id, &flat).map_err(map_err)?;
-    tx.commit().map_err(map_err)?;
+    tauri::async_runtime::spawn_blocking(move || -> CmdResult<Source> {
+        let flat = parse::parse_tree_json(&json_text)?;
+        let db = app.state::<Db>();
+        let mut conn = db.0.lock().unwrap();
+        let ts = now();
+        let device_label = label.clone();
+        let tx = conn.transaction().map_err(map_err)?;
+        tx.execute(
+            "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count)
+             VALUES (?1, 'json', ?2, ?3, NULL, ?4, ?5, ?6, ?7)",
+            params![workspace_id, label, device_label, flat.root_dev, ts, flat.total_size, flat.file_count],
+        )
+        .map_err(map_err)?;
+        let source_id = tx.last_insert_rowid();
+        parse::insert_nodes(&tx, source_id, &flat).map_err(map_err)?;
+        tx.commit().map_err(map_err)?;
 
-    Ok(Source {
-        id: source_id,
-        workspace_id,
-        kind: "json".into(),
-        label,
-        device_label,
-        orig_root_path: None,
-        dev_id: flat.root_dev,
-        imported_at: ts,
-        total_size: flat.total_size,
-        file_count: flat.file_count,
-        excluded: false,
-        duplicated_pct: 0.0,
-        cross_dup_size: 0,
-        cross_dup_file_count: 0,
+        Ok(Source {
+            id: source_id,
+            workspace_id,
+            kind: "json".into(),
+            label,
+            device_label,
+            orig_root_path: None,
+            dev_id: flat.root_dev,
+            imported_at: ts,
+            total_size: flat.total_size,
+            file_count: flat.file_count,
+            excluded: false,
+            duplicated_pct: 0.0,
+            cross_dup_size: 0,
+            cross_dup_file_count: 0,
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Scan a local folder as a new source (works without the `tree` binary).
+/// See `import_tree_json`'s doc comment for why this runs inside
+/// `spawn_blocking` -- this one matters even more, since a folder walk on a
+/// slow disk is the whole reason progress reporting exists here.
 #[tauri::command]
-pub fn scan_folder(
+pub async fn scan_folder(
     app: tauri::AppHandle,
-    db: State<Db>,
     workspace_id: i64,
     path: String,
     label: String,
 ) -> CmdResult<Source> {
-    let flat = scan::scan_folder(Path::new(&path), |current| {
-        let _ = app.emit("scan:progress", ScanProgress { current });
-    })?;
-    let mut conn = db.0.lock().unwrap();
-    let ts = now();
-    let device_label = label.clone();
-    let tx = conn.transaction().map_err(map_err)?;
-    tx.execute(
-        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count)
-         VALUES (?1, 'scan', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![workspace_id, label, device_label, path, flat.root_dev, ts, flat.total_size, flat.file_count],
-    )
-    .map_err(map_err)?;
-    let source_id = tx.last_insert_rowid();
-    parse::insert_nodes(&tx, source_id, &flat).map_err(map_err)?;
-    tx.commit().map_err(map_err)?;
+    tauri::async_runtime::spawn_blocking(move || -> CmdResult<Source> {
+        let flat = scan::scan_folder(Path::new(&path), |current| {
+            let _ = app.emit("scan:progress", ScanProgress { current });
+        })?;
+        let db = app.state::<Db>();
+        let mut conn = db.0.lock().unwrap();
+        let ts = now();
+        let device_label = label.clone();
+        let tx = conn.transaction().map_err(map_err)?;
+        tx.execute(
+            "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count)
+             VALUES (?1, 'scan', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![workspace_id, label, device_label, path, flat.root_dev, ts, flat.total_size, flat.file_count],
+        )
+        .map_err(map_err)?;
+        let source_id = tx.last_insert_rowid();
+        parse::insert_nodes(&tx, source_id, &flat).map_err(map_err)?;
+        tx.commit().map_err(map_err)?;
 
-    Ok(Source {
-        id: source_id,
-        workspace_id,
-        kind: "scan".into(),
-        label,
-        device_label,
-        orig_root_path: Some(path),
-        dev_id: flat.root_dev,
-        imported_at: ts,
-        total_size: flat.total_size,
-        file_count: flat.file_count,
-        excluded: false,
-        duplicated_pct: 0.0,
-        cross_dup_size: 0,
-        cross_dup_file_count: 0,
+        Ok(Source {
+            id: source_id,
+            workspace_id,
+            kind: "scan".into(),
+            label,
+            device_label,
+            orig_root_path: Some(path),
+            dev_id: flat.root_dev,
+            imported_at: ts,
+            total_size: flat.total_size,
+            file_count: flat.file_count,
+            excluded: false,
+            duplicated_pct: 0.0,
+            cross_dup_size: 0,
+            cross_dup_file_count: 0,
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -334,16 +354,24 @@ pub fn get_tree(
 
 /// Run the full duplicate-detection pass with the given tuning parameters.
 ///
-/// Opens its own connection instead of locking the shared `Db` mutex: this
-/// pass can run for a while, and under WAL mode a dedicated writer
-/// connection doesn't block readers on `Db` (get_tree, source_list, etc.),
-/// so the rest of the app stays responsive while it runs -- see the
+/// Runs inside `spawn_blocking` -- see `import_tree_json`'s doc comment for
+/// why a plain (non-async) command isn't enough: Tauri calls it directly on
+/// the thread servicing the IPC message, which on desktop is the webview's
+/// main thread, so anything but a trivially fast command freezes the whole
+/// UI, not just the DB.
+///
+/// It also opens its own connection rather than locking the shared `Db`
+/// mutex: this pass can run for a while, and under WAL mode a dedicated
+/// writer connection doesn't block readers on `Db` (get_tree, source_list,
+/// etc.) even from other threads, so the rest of the app stays responsive
+/// while it runs -- see the
 /// `wal_mode_lets_a_reader_proceed_during_an_open_writer_transaction` test
-/// in `db.rs` for the property this depends on.
+/// in `db.rs` for the property this depends on. Both fixes are needed: the
+/// dedicated connection alone doesn't help if the whole command still runs
+/// on the main thread.
 #[tauri::command]
-pub fn run_dedup(
+pub async fn run_dedup(
     app: tauri::AppHandle,
-    db_path: State<crate::db::DbPath>,
     workspace_id: i64,
     min_size_bytes: i64,
     min_confidence: f64,
@@ -352,18 +380,23 @@ pub fn run_dedup(
         min_size_bytes,
         min_confidence,
     };
-    let mut conn = crate::db::open(&db_path.0).map_err(map_err)?;
-    crate::dedup::run_with_progress(&mut conn, workspace_id, params, |phase, current, total| {
-        let _ = app.emit(
-            "dedup:progress",
-            DedupProgress {
-                phase: phase.into(),
-                current,
-                total,
-            },
-        );
+    tauri::async_runtime::spawn_blocking(move || -> CmdResult<usize> {
+        let db_path = app.state::<crate::db::DbPath>().0.clone();
+        let mut conn = crate::db::open(&db_path).map_err(map_err)?;
+        crate::dedup::run_with_progress(&mut conn, workspace_id, params, |phase, current, total| {
+            let _ = app.emit(
+                "dedup:progress",
+                DedupProgress {
+                    phase: phase.into(),
+                    current,
+                    total,
+                },
+            );
+        })
+        .map_err(map_err)
     })
-    .map_err(map_err)
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Return a page of match groups for a workspace, filtered by confidence,
