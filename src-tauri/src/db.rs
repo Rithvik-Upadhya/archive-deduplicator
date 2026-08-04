@@ -7,6 +7,11 @@ use std::sync::Mutex;
 /// Managed database handle stored in Tauri state.
 pub struct Db(pub Mutex<Connection>);
 
+/// The on-disk path of the managed database, stored alongside `Db` so a
+/// command can open its own dedicated connection (e.g. `run_dedup`, which
+/// must not hold `Db`'s mutex for the duration of a long-running pass).
+pub struct DbPath(pub std::path::PathBuf);
+
 /// Open (creating if needed) the database at `path` and ensure the schema exists.
 pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     if let Some(parent) = path.parent() {
@@ -15,6 +20,7 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     init_schema(&conn)?;
     Ok(conn)
 }
@@ -150,4 +156,63 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         "#,
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `run_dedup` opens its own connection instead of locking the shared
+    /// `Db` mutex, so other commands stay responsive while it runs. That only
+    /// works if WAL mode genuinely lets a reader proceed while a second
+    /// connection holds an open write transaction on the same file -- this
+    /// test is the empirical proof, not just a comment.
+    #[test]
+    fn wal_mode_lets_a_reader_proceed_during_an_open_writer_transaction() {
+        let path = std::env::temp_dir().join(format!(
+            "archive-dedup-wal-test-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _cleanup = CleanupOnDrop(path.clone());
+
+        let writer = open(&path).unwrap();
+        writer
+            .execute(
+                "INSERT INTO workspaces (name, created_at, updated_at) VALUES ('w', 't', 't')",
+                [],
+            )
+            .unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        writer
+            .execute(
+                "INSERT INTO workspaces (name, created_at, updated_at) VALUES ('w2', 't', 't')",
+                [],
+            )
+            .unwrap();
+        // The write transaction above is deliberately left open (no COMMIT).
+
+        let reader = open(&path).unwrap();
+        let count: i64 = reader
+            .query_row("SELECT COUNT(*) FROM workspaces", [], |r| r.get(0))
+            .expect("reader must not block/fail while a writer transaction is open under WAL");
+        assert_eq!(
+            count, 1,
+            "reader sees only the committed row, not the open transaction's"
+        );
+
+        writer.execute_batch("COMMIT").unwrap();
+    }
+
+    struct CleanupOnDrop(std::path::PathBuf);
+    impl Drop for CleanupOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+            let _ = std::fs::remove_file(self.0.with_extension("sqlite-wal"));
+            let _ = std::fs::remove_file(self.0.with_extension("sqlite-shm"));
+        }
+    }
 }

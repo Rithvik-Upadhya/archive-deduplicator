@@ -1,7 +1,8 @@
 <script lang="ts">
     import { getGroupForNode } from '$lib/api';
     import { app } from '$lib/stores/app.svelte';
-    import type { GroupSort, MatchGroup, TreeNode } from '$lib/types';
+    import { taskTray } from '$lib/stores/tasks.svelte';
+    import type { DedupProgress, GroupSort, MatchGroup, TreeNode } from '$lib/types';
     import { confidenceTone, formatBytes, formatTime, pct } from '$lib/util';
     import DeviceTree from './DeviceTree.svelte';
     import SourceManager from './SourceManager.svelte';
@@ -15,7 +16,7 @@
     import * as Empty from '$lib/components/ui/empty';
     import * as Resizable from '$lib/components/ui/resizable/index.js';
     import * as ToggleGroup from '$lib/components/ui/toggle-group';
-    import { toast } from 'svelte-sonner';
+    import { listen } from '@tauri-apps/api/event';
 
     let selectedNode = $state<TreeNode | null>(null);
     let selectedGroup = $state<MatchGroup | null>(null);
@@ -48,11 +49,21 @@
     }
 
     async function runDedup() {
+        const taskId = taskTray.start('dedup', 'Finding duplicates…');
+        const unlisten = await listen<DedupProgress>('dedup:progress', e => {
+            taskTray.update(taskId, {
+                phase: e.payload.phase,
+                current: e.payload.current,
+                total: e.payload.total,
+            });
+        });
         try {
             await app.runDedup();
-            toast.success('Analysis complete.');
+            taskTray.resolve(taskId, 'success', 'Analysis complete.');
         } catch (err) {
-            toast.error(String(err));
+            taskTray.resolve(taskId, 'error', String(err));
+        } finally {
+            unlisten();
         }
     }
 
@@ -89,8 +100,13 @@
                     Sources or analysis settings changed since the last run —
                     results may be out of date.
                 </Alert.Description>
-                <Button size="sm" disabled={app.running} onclick={runDedup}>
-                    {app.running ? 'Analyzing…' : 'Re-run Analysis'}
+                <Button
+                    size="sm"
+                    disabled={taskTray.hasActive('dedup')}
+                    onclick={runDedup}>
+                    {taskTray.hasActive('dedup')
+                        ? 'Analyzing…'
+                        : 'Re-run Analysis'}
                 </Button>
             </Alert.Root>
         {/if}
@@ -133,9 +149,12 @@
                     Hide weaker matches
                 </span>
             </div>
-            <Button disabled={app.running} onclick={runDedup}>
+            <Button disabled={taskTray.hasActive('dedup')} onclick={runDedup}>
                 <Icon icon="ph:magnifying-glass-bold" />
-                <span>{app.running ? 'Analyzing…' : 'Find Duplicates'}</span>
+                <span
+                    >{taskTray.hasActive('dedup')
+                        ? 'Analyzing…'
+                        : 'Find Duplicates'}</span>
             </Button>
         </div>
 

@@ -52,7 +52,6 @@ class AppState {
      *  refetch -- e.g. after a dedup rerun changes duplicate annotations. */
     treeVersion = $state(0);
 
-    running = $state(false);
     loading = $state(true);
 
     /** Guards against `init()` running more than once. */
@@ -201,6 +200,19 @@ class AppState {
         await this.setDedupStale(true);
     }
 
+    async copySourceToWorkspace(sourceId: number, targetWorkspaceId: number) {
+        await api.sourceCopyToWorkspace(sourceId, targetWorkspaceId);
+        if (targetWorkspaceId === this.activeWorkspaceId) {
+            await this.setDedupStale(true);
+            await this.loadWorkspace();
+        } else {
+            // setDedupStale only writes for the active workspace -- the
+            // target isn't active, so flag it directly so loadWorkspace
+            // picks up dedup_stale='1' next time the user switches into it.
+            await api.workspaceStateSet(targetWorkspaceId, 'dedup_stale', '1');
+        }
+    }
+
     async deleteSource(sourceId: number) {
         await api.sourceDelete(sourceId);
         await this.setDedupStale(true);
@@ -209,19 +221,14 @@ class AppState {
 
     async runDedup() {
         if (this.activeWorkspaceId == null) return;
-        this.running = true;
-        try {
-            await this.saveTuning();
-            await api.runDedup(
-                this.activeWorkspaceId,
-                this.minSizeKb * 1024,
-                this.minConfidence,
-            );
-            await this.setDedupStale(false);
-            await this.loadWorkspace();
-        } finally {
-            this.running = false;
-        }
+        await this.saveTuning();
+        await api.runDedup(
+            this.activeWorkspaceId,
+            this.minSizeKb * 1024,
+            this.minConfidence,
+        );
+        await this.setDedupStale(false);
+        await this.loadWorkspace();
     }
 
     /** Reload the first page of groups using the current filters. */

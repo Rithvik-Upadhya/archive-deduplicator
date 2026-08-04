@@ -178,12 +178,15 @@ pub fn import_tree_json(
 /// Scan a local folder as a new source (works without the `tree` binary).
 #[tauri::command]
 pub fn scan_folder(
+    app: tauri::AppHandle,
     db: State<Db>,
     workspace_id: i64,
     path: String,
     label: String,
 ) -> CmdResult<Source> {
-    let flat = scan::scan_folder(Path::new(&path))?;
+    let flat = scan::scan_folder(Path::new(&path), |current| {
+        let _ = app.emit("scan:progress", ScanProgress { current });
+    })?;
     let mut conn = db.0.lock().unwrap();
     let ts = now();
     let device_label = label.clone();
@@ -235,6 +238,18 @@ pub fn source_set_excluded(db: State<Db>, source_id: i64, excluded: bool) -> Cmd
         params![excluded as i64, source_id],
     )
     .map_err(map_err)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn source_copy_to_workspace(
+    db: State<Db>,
+    source_id: i64,
+    target_workspace_id: i64,
+) -> CmdResult<()> {
+    let mut conn = db.0.lock().unwrap();
+    crate::dbio::copy_source_to_workspace(&mut conn, source_id, target_workspace_id)
+        .map_err(map_err)?;
     Ok(())
 }
 
@@ -318,10 +333,17 @@ pub fn get_tree(
 // ---------------------------------------------------------------------------
 
 /// Run the full duplicate-detection pass with the given tuning parameters.
+///
+/// Opens its own connection instead of locking the shared `Db` mutex: this
+/// pass can run for a while, and under WAL mode a dedicated writer
+/// connection doesn't block readers on `Db` (get_tree, source_list, etc.),
+/// so the rest of the app stays responsive while it runs -- see the
+/// `wal_mode_lets_a_reader_proceed_during_an_open_writer_transaction` test
+/// in `db.rs` for the property this depends on.
 #[tauri::command]
 pub fn run_dedup(
     app: tauri::AppHandle,
-    db: State<Db>,
+    db_path: State<crate::db::DbPath>,
     workspace_id: i64,
     min_size_bytes: i64,
     min_confidence: f64,
@@ -330,25 +352,18 @@ pub fn run_dedup(
         min_size_bytes,
         min_confidence,
     };
-    let _ = app.emit(
-        "dedup:progress",
-        DedupProgress {
-            phase: "matching".into(),
-            current: 0,
-            total: 1,
-        },
-    );
-    let mut conn = db.0.lock().unwrap();
-    let count = crate::dedup::run(&mut conn, workspace_id, params).map_err(map_err)?;
-    let _ = app.emit(
-        "dedup:progress",
-        DedupProgress {
-            phase: "done".into(),
-            current: 1,
-            total: 1,
-        },
-    );
-    Ok(count)
+    let mut conn = crate::db::open(&db_path.0).map_err(map_err)?;
+    crate::dedup::run_with_progress(&mut conn, workspace_id, params, |phase, current, total| {
+        let _ = app.emit(
+            "dedup:progress",
+            DedupProgress {
+                phase: phase.into(),
+                current,
+                total,
+            },
+        );
+    })
+    .map_err(map_err)
 }
 
 /// Return a page of match groups for a workspace, filtered by confidence,

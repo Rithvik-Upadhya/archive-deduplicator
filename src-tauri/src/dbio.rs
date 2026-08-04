@@ -422,3 +422,263 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
         }
     }
 }
+
+/// Copy a single source (and its full `nodes` subtree) into another
+/// workspace, leaving the original untouched. Reuses the same id-remap
+/// pattern as `import_merge`'s `sources`/`nodes` handling above: nodes are
+/// read `ORDER BY id` and inserted one at a time, relying on the invariant
+/// that a parent row's autoincrement id is always lower than its children's
+/// (true for both scan and JSON-import insertion order) so each node's new
+/// parent id is already in `node_id_map` by the time it's needed -- no
+/// recursion or multi-pass fixup required.
+///
+/// Deliberately does not copy `match_groups`/`match_members` (workspace-
+/// scoped dedup results computed against a specific set of sources -- a
+/// foreign source's members don't belong in them) or `dup_annot` (cheap to
+/// skip; `get_tree`'s `COALESCE(d.has_dup, 0)` already renders a missing
+/// annotation as "not a duplicate", which is the honest state until the
+/// destination workspace re-runs analysis).
+pub fn copy_source_to_workspace(
+    conn: &mut Connection,
+    source_id: i64,
+    target_workspace_id: i64,
+) -> rusqlite::Result<i64> {
+    let tx = conn.transaction()?;
+
+    let (kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded): (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<i64>,
+        String,
+        i64,
+        i64,
+        i64,
+    ) = tx.query_row(
+        "SELECT kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded
+         FROM sources WHERE id = ?1",
+        params![source_id],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+            ))
+        },
+    )?;
+
+    tx.execute(
+        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            target_workspace_id,
+            kind,
+            label,
+            device_label,
+            orig_root_path,
+            dev_id,
+            imported_at,
+            total_size,
+            file_count,
+            excluded
+        ],
+    )?;
+    let new_source_id = tx.last_insert_rowid();
+
+    let rows: Vec<(
+        i64,
+        Option<i64>,
+        String,
+        String,
+        String,
+        i64,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        i64,
+        i64,
+        i64,
+    )> = {
+        let mut stmt = tx.prepare(
+            "SELECT id, parent_id, name, rel_path, type, size, mtime, inode, dev, depth, subtree_size, subtree_file_count
+             FROM nodes WHERE source_id = ?1 ORDER BY id",
+        )?;
+        stmt.query_map(params![source_id], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
+                r.get(10)?,
+                r.get(11)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    let mut node_id_map: HashMap<i64, i64> = HashMap::new();
+    for (
+        old_id,
+        parent_id,
+        name,
+        rel_path,
+        node_type,
+        size,
+        mtime,
+        inode,
+        dev,
+        depth,
+        subtree_size,
+        subtree_file_count,
+    ) in rows
+    {
+        let new_parent_id = parent_id.and_then(|p| node_id_map.get(&p).copied());
+        tx.execute(
+            "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, mtime, inode, dev, depth, subtree_size, subtree_file_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                new_source_id,
+                new_parent_id,
+                name,
+                rel_path,
+                node_type,
+                size,
+                mtime,
+                inode,
+                dev,
+                depth,
+                subtree_size,
+                subtree_file_count
+            ],
+        )?;
+        node_id_map.insert(old_id, tx.last_insert_rowid());
+    }
+
+    tx.commit()?;
+    Ok(new_source_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+
+    fn setup_two_workspaces() -> (Connection, i64, i64) {
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (name, created_at, updated_at) VALUES ('a', 't', 't')",
+            [],
+        )
+        .unwrap();
+        let ws_a = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO workspaces (name, created_at, updated_at) VALUES ('b', 't', 't')",
+            [],
+        )
+        .unwrap();
+        let ws_b = conn.last_insert_rowid();
+        (conn, ws_a, ws_b)
+    }
+
+    #[test]
+    fn copy_preserves_node_count_and_hierarchy_into_the_target_workspace() {
+        let (mut conn, ws_a, ws_b) = setup_two_workspaces();
+        conn.execute(
+            "INSERT INTO sources (workspace_id, kind, label, device_label, imported_at, total_size, file_count)
+             VALUES (?1, 'scan', 'disc-a', 'disc-a', 't', 100, 1)",
+            params![ws_a],
+        )
+        .unwrap();
+        let source_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, subtree_size, subtree_file_count)
+             VALUES (?1, NULL, 'photos', 'photos', 'directory', 0, 100, 1)",
+            params![source_id],
+        )
+        .unwrap();
+        let dir_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, subtree_size, subtree_file_count)
+             VALUES (?1, ?2, 'a.jpg', 'photos/a.jpg', 'file', 100, 100, 1)",
+            params![source_id, dir_id],
+        )
+        .unwrap();
+
+        let new_source_id = copy_source_to_workspace(&mut conn, source_id, ws_b).unwrap();
+
+        let node_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE source_id = ?1",
+                params![new_source_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(node_count, 2, "both the directory and the file were copied");
+
+        // Walk the copied leaf's parent chain up to confirm the hierarchy
+        // survived the id remap, not just the row count.
+        let (leaf_parent, leaf_source): (Option<i64>, i64) = conn
+            .query_row(
+                "SELECT parent_id, source_id FROM nodes WHERE source_id = ?1 AND name = 'a.jpg'",
+                params![new_source_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(leaf_source, new_source_id);
+        let parent_id = leaf_parent.expect("leaf must have a copied parent");
+        let (parent_parent, parent_name): (Option<i64>, String) = conn
+            .query_row(
+                "SELECT parent_id, name FROM nodes WHERE id = ?1",
+                params![parent_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(parent_name, "photos");
+        assert!(
+            parent_parent.is_none(),
+            "the copied directory is a root node"
+        );
+
+        // No dedup state leaks into the target workspace.
+        let group_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM match_groups WHERE workspace_id = ?1",
+                params![ws_b],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(group_count, 0);
+
+        // The original source and its nodes are untouched.
+        let orig_node_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE source_id = ?1",
+                params![source_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orig_node_count, 2);
+        let orig_ws: i64 = conn
+            .query_row(
+                "SELECT workspace_id FROM sources WHERE id = ?1",
+                params![source_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orig_ws, ws_a);
+    }
+}

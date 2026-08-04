@@ -66,3 +66,21 @@ export function confidenceTone(percent: number): string {
     if (percent >= 75) return 'text-foreground';
     return 'text-warn';
 }
+
+/* --- Task tray -------------------------------------------------------- */
+
+import type { TaskStatus } from './stores/tasks.svelte';
+
+/** Icon + text colour for a task tray card's status glyph. */
+export const TASK_STATUS_ICON: Record<TaskStatus, { icon: string; class: string }> = {
+    running: { icon: 'ph:spinner-gap-fill', class: 'animate-spin text-muted-foreground' },
+    success: { icon: 'ph:check-circle-fill', class: 'text-ok' },
+    error: { icon: 'ph:x-circle-fill', class: 'text-destructive' },
+};
+
+/** Fill for the `Progress` indicator on a determinate task tray card. */
+export const TASK_STATUS_BAR: Record<TaskStatus, string> = {
+    running: '[&_[data-slot=progress-indicator]]:bg-muted-foreground/70',
+    success: '[&_[data-slot=progress-indicator]]:bg-ok',
+    error: '[&_[data-slot=progress-indicator]]:bg-destructive',
+};

@@ -1,6 +1,9 @@
 <script lang="ts">
     import { app } from '$lib/stores/app.svelte';
+    import { taskTray } from '$lib/stores/tasks.svelte';
     import { open } from '@tauri-apps/plugin-dialog';
+    import { listen } from '@tauri-apps/api/event';
+    import type { ScanProgress, Workspace } from '$lib/types';
     import { DUP_BADGE, DUP_BAR, dupLevel, formatBytes, pct } from '$lib/util';
     import Icon from '@iconify/svelte';
     import { Button } from '$lib/components/ui/button';
@@ -9,10 +12,10 @@
     import { Progress } from '$lib/components/ui/progress';
     import * as Empty from '$lib/components/ui/empty';
     import * as AlertDialog from '$lib/components/ui/alert-dialog';
+    import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
     import { Separator } from '$lib/components/ui/separator';
     import { toast } from 'svelte-sonner';
 
-    let busy = $state(false);
     let editingId = $state<number | null>(null);
     let editValue = $state('');
     let deleteTarget = $state<{ id: number; label: string } | null>(null);
@@ -55,22 +58,37 @@
         }
     }
 
+    async function copyToWorkspace(s: { id: number; device_label: string }, ws: Workspace) {
+        try {
+            await app.copySourceToWorkspace(s.id, ws.id);
+            toast.success(`Copied “${s.device_label}” to “${ws.name}”.`, {
+                description: 'Duplicate results will need re-running there.',
+            });
+        } catch (err) {
+            toast.error(String(err));
+        }
+    }
+
     async function onUpload(e: Event) {
         const input = e.target as HTMLInputElement;
         const files = input.files;
         if (!files || files.length === 0) return;
-        busy = true;
+        const taskId = taskTray.start(
+            'scan',
+            files.length === 1
+                ? `Importing “${files[0].name}”…`
+                : `Importing ${files.length} tree files…`,
+        );
         try {
             for (const file of Array.from(files)) {
                 const text = await file.text();
                 const label = file.name.replace(/\.json$/i, '');
                 await app.importJson(text, label);
             }
-            toast.success(`Imported ${files.length} tree file(s).`);
+            taskTray.resolve(taskId, 'success', `Imported ${files.length} tree file(s).`);
         } catch (err) {
-            toast.error(String(err));
+            taskTray.resolve(taskId, 'error', String(err));
         } finally {
-            busy = false;
             input.value = '';
         }
     }
@@ -79,14 +97,17 @@
         const selected = await open({ directory: true, multiple: false });
         if (!selected || typeof selected !== 'string') return;
         const label = selected.split('/').pop() || selected;
-        busy = true;
+        const taskId = taskTray.start('scan', `Scanning “${label}”…`);
+        const unlisten = await listen<ScanProgress>('scan:progress', e => {
+            taskTray.update(taskId, { current: e.payload.current });
+        });
         try {
             await app.scanFolder(selected, label);
-            toast.success(`Scanned “${label}”.`);
+            taskTray.resolve(taskId, 'success', `Scanned “${label}”.`);
         } catch (err) {
-            toast.error(String(err));
+            taskTray.resolve(taskId, 'error', String(err));
         } finally {
-            busy = false;
+            unlisten();
         }
     }
 </script>
@@ -96,7 +117,7 @@
         <Button
             variant="outline"
             class="justify-start"
-            disabled={busy}
+            disabled={taskTray.hasActive('scan')}
             onclick={() => fileInput?.click()}>
             <Icon icon="ph:file-plus-fill" />
             <span>Import Tree File</span>
@@ -112,22 +133,12 @@
         <Button
             variant="outline"
             class="justify-start"
-            disabled={busy}
+            disabled={taskTray.hasActive('scan')}
             onclick={onScan}>
             <Icon icon="ph:folder-open-fill" />
             <span>Scan Folder</span>
         </Button>
     </div>
-
-    {#if busy}
-        <p
-            class="flex items-center gap-2 text-xs text-muted-foreground"
-            aria-live="polite"
-            style="writing-mode: sideways-lr;">
-            <Icon icon="ph:spinner-gap-fill" class="animate-spin" />
-            Working…
-        </p>
-    {/if}
 
     <h2 class="section-label text-center" style="writing-mode: sideways-lr;">
         Devices
@@ -192,6 +203,42 @@
                                         ? 'Include in analysis'
                                         : 'Exclude from analysis'}</span>
                             </Button>
+                            <DropdownMenu.Root>
+                                <DropdownMenu.Trigger>
+                                    {#snippet child({
+                                        props,
+                                    }: {
+                                        props: Record<string, unknown>;
+                                    })}
+                                        <Button
+                                            {...props}
+                                            variant="ghost"
+                                            size="icon"
+                                            class="size-6 opacity-0 transition-opacity group-hover/device:opacity-100"
+                                            disabled={app.workspaces.length <=
+                                                1}
+                                            title="Copy to workspace">
+                                            <Icon icon="ph:copy-fill" />
+                                            <span class="sr-only"
+                                                >Copy to workspace</span>
+                                        </Button>
+                                    {/snippet}
+                                </DropdownMenu.Trigger>
+                                <DropdownMenu.Content align="end">
+                                    <DropdownMenu.Group>
+                                        <DropdownMenu.GroupHeading
+                                            >Copy to</DropdownMenu.GroupHeading>
+                                        {#each app.workspaces.filter(w => w.id !== app.activeWorkspaceId) as ws (ws.id)}
+                                            <DropdownMenu.Item
+                                                onSelect={() =>
+                                                    copyToWorkspace(s, ws)}>
+                                                <span class="truncate"
+                                                    >{ws.name}</span>
+                                            </DropdownMenu.Item>
+                                        {/each}
+                                    </DropdownMenu.Group>
+                                </DropdownMenu.Content>
+                            </DropdownMenu.Root>
                             <Button
                                 variant="ghost"
                                 size="icon"

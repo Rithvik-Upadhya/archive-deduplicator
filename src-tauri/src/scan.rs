@@ -58,7 +58,14 @@ fn inode_dev(_path: &Path, _meta: &std::fs::Metadata) -> (Option<i64>, Option<i6
 
 /// Recursively scan `root`, returning a flattened node list rooted at the
 /// entries directly under `root` (matching `parse_tree_json` semantics).
-pub fn scan_folder(root: &Path) -> Result<Flattened, String> {
+///
+/// `on_progress` is called every 200 entries with the running count so far.
+/// There's no meaningful "total": `WalkDir` doesn't know the file count up
+/// front, and computing one would mean walking the tree twice -- directly
+/// counter to the fact that the slow part here is the per-file `metadata()`
+/// stat, not the (cheap) directory listing. Progress is therefore
+/// indeterminate by design, not an oversight.
+pub fn scan_folder(root: &Path, mut on_progress: impl FnMut(u64)) -> Result<Flattened, String> {
     if !root.is_dir() {
         return Err(format!("Not a directory: {}", root.display()));
     }
@@ -73,11 +80,16 @@ pub fn scan_folder(root: &Path) -> Result<Flattened, String> {
     // Map from absolute path -> index in `flat.nodes` for parent resolution.
     let mut index_by_path: HashMap<std::path::PathBuf, usize> = HashMap::new();
 
+    let mut scanned: u64 = 0;
     for entry in WalkDir::new(root).min_depth(1).follow_links(false) {
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue,
         };
+        scanned += 1;
+        if scanned.is_multiple_of(200) {
+            on_progress(scanned);
+        }
         let path = entry.path();
         let meta = match entry.metadata() {
             Ok(m) => m,
@@ -131,6 +143,7 @@ pub fn scan_folder(root: &Path) -> Result<Flattened, String> {
             flat.file_count += 1;
         }
     }
+    on_progress(scanned);
 
     rollup(&mut flat);
     Ok(flat)

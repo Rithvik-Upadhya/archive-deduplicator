@@ -207,3 +207,10 @@ pub struct DedupProgress {
     pub current: u64,
     pub total: u64,
 }
+
+/// Progress payload emitted while a folder scan is executing. There is no
+/// `total` -- see the doc comment on `scan::scan_folder` for why.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScanProgress {
+    pub current: u64,
+}

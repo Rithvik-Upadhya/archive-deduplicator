@@ -142,12 +142,24 @@ fn same_minute(a: &str, b: &str) -> bool {
 
 /// Run the full dedup pass for a workspace: clears prior groups, rebuilds file
 /// groups, then folder-level groups, all inside one transaction.
-pub fn run(
+///
+/// Calls `on_phase(name, current, total)` at each of the five natural phase
+/// boundaries below (plus a final "done" tick), so a caller with a progress
+/// UI can report something better than silence during a long pass. Kept as a
+/// generic closure rather than a `tauri`-specific type so this module stays
+/// free of any Tauri dependency -- `commands.rs` is the only place that turns
+/// a tick into an emitted event. Tests that don't care about progress pass a
+/// no-op closure.
+pub fn run_with_progress(
     conn: &mut Connection,
     workspace_id: i64,
     params: DedupParams,
+    mut on_phase: impl FnMut(&str, u64, u64),
 ) -> rusqlite::Result<usize> {
+    const TOTAL_PHASES: u64 = 5;
+
     // Load parent-name lookup and all files for the workspace.
+    on_phase("loading", 0, TOTAL_PHASES);
     let parent_names = load_parent_names(conn, workspace_id)?;
     let files = load_files(conn, workspace_id, &parent_names)?;
 
@@ -162,6 +174,7 @@ pub fn run(
         by_size.entry(f.size).or_default().push(i);
     }
 
+    on_phase("matching", 1, TOTAL_PHASES);
     let mut uf = UnionFind::new(files.len());
     // Confidence of the strongest edge each node participated in.
     let mut best_edge: Vec<f64> = vec![0.0; files.len()];
@@ -202,6 +215,7 @@ pub fn run(
         }
     }
 
+    on_phase("grouping", 2, TOTAL_PHASES);
     let tx = conn.transaction()?;
     // Clear previous results for this workspace.
     tx.execute(
@@ -239,11 +253,14 @@ pub fn run(
     tx.commit()?;
 
     // Folder-level rollup uses the freshly written file groups.
+    on_phase("folder_rollup", 3, TOTAL_PHASES);
     let folder_groups = super::rollup::build_folder_groups(conn, workspace_id)?;
 
     // Rebuild the per-node duplicate annotation cache so tree browsing is fast.
+    on_phase("annotating", 4, TOTAL_PHASES);
     super::rollup::rebuild_annotations(conn, workspace_id)?;
 
+    on_phase("done", TOTAL_PHASES, TOTAL_PHASES);
     Ok(group_count + folder_groups)
 }
 
@@ -353,7 +370,7 @@ mod tests {
     fn detects_cross_source_file_duplicates() {
         let mut conn = setup_two_identical_sources();
         let ws = 1;
-        let count = run(&mut conn, ws, DedupParams::default()).unwrap();
+        let count = run_with_progress(&mut conn, ws, DedupParams::default(), |_, _, _| {}).unwrap();
         // Expect at least the two file groups (a.jpg, b.jpg) plus a folder group.
         assert!(count >= 2, "expected duplicate groups, got {count}");
 
@@ -410,7 +427,7 @@ mod tests {
             min_size_bytes: 4096,
             min_confidence: 60.0,
         };
-        run(&mut conn, ws, params).unwrap();
+        run_with_progress(&mut conn, ws, params, |_, _, _| {}).unwrap();
         let file_groups: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM match_groups WHERE workspace_id = ?1 AND kind = 'file'",
@@ -467,7 +484,7 @@ mod tests {
         )
         .unwrap();
 
-        run(&mut conn, ws, DedupParams::default()).unwrap();
+        run_with_progress(&mut conn, ws, DedupParams::default(), |_, _, _| {}).unwrap();
 
         let a_member_count: i64 = conn
             .query_row(

@@ -9,7 +9,7 @@ mod pathfix;
 mod rollup;
 mod scan;
 
-use db::Db;
+use db::{Db, DbPath};
 use std::sync::Mutex;
 use tauri::Manager;
 
@@ -27,6 +27,7 @@ pub fn run() {
             let db_path = dir.join("dedup.sqlite");
             let conn = db::open(&db_path).expect("failed to open database");
             app.manage(Db(Mutex::new(conn)));
+            app.manage(DbPath(db_path));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -39,6 +40,7 @@ pub fn run() {
             commands::scan_folder,
             commands::source_rename_device,
             commands::source_set_excluded,
+            commands::source_copy_to_workspace,
             commands::source_delete,
             commands::get_tree,
             commands::run_dedup,

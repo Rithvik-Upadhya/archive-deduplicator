@@ -117,6 +117,10 @@ export interface DedupProgress {
     total: number;
 }
 
+export interface ScanProgress {
+    current: number;
+}
+
 export interface ImportSummary {
     workspaces_added: number;
     sources_added: number;
