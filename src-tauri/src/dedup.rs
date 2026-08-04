@@ -82,8 +82,33 @@ const MAX_GROUP_SIZE: usize = 32;
 /// compared at all. 2000^2 = 4M comparisons is not actually slow in Rust;
 /// this exists to name and bound a pathological case (e.g. very many
 /// identically-sized files) rather than because realistic scoring is
-/// expensive.
+/// expensive. This bound is sized around *quadratic* work (the tier C/D
+/// exact-name promotion check) -- it is deliberately NOT reused for tier E's
+/// clique search below, which has a completely different cost shape.
 const BUCKET_SAFETY_CAP: usize = 2000;
+
+/// Cap on how many same-(size, extension, parent-folder) candidates tier E's
+/// clique search will even attempt. Unlike `BUCKET_SAFETY_CAP`, this bounds a
+/// step whose cost is combinatorial, not quadratic: enumerating every
+/// maximal clique in a graph is worst-case exponential in vertex count (the
+/// Moon-Moser bound: a dense n-vertex graph can have up to 3^(n/3) maximal
+/// cliques), so `BUCKET_SAFETY_CAP` itself is nowhere near safe here. Real
+/// archives routinely produce dense graphs at this step -- many cameras and
+/// phones all use the same folder name (`DCIM`), so every same-size,
+/// same-extension file across every such folder in the workspace lands in
+/// one cluster, and if their mtimes also cluster within the tolerance
+/// windows, most pairs pass the edge test and the graph is close to
+/// complete, which is exactly where clique enumeration is most expensive.
+const MAX_CLIQUE_CANDIDATES: usize = 300;
+
+/// Hard ceiling on Bron-Kerbosch recursive calls, independent of
+/// `MAX_CLIQUE_CANDIDATES`: vertex count alone doesn't bound the cost of a
+/// dense graph, since even a few hundred fully-connected vertices can take
+/// arbitrarily long to fully enumerate. Exceeding the budget aborts the
+/// search for that one cluster -- treated exactly like an oversized group
+/// (see `MAX_GROUP_SIZE`): no tier-E groups are persisted from it, which
+/// only costs disk space, never a false positive.
+const CLIQUE_WORK_BUDGET: u32 = 200_000;
 
 /// The evidence support an mtime comparison provides. `None` is deliberately
 /// *not* a veto: a reset or unrelated mtime must never block a match on its
@@ -135,11 +160,17 @@ fn ext(name: &str) -> String {
 }
 
 /// Enumerate every maximal clique (size >= 2) of `vertices` under `edge`,
-/// via the simplest (no-pivot) form of Bron-Kerbosch. Vertex sets here are
-/// always small (bounded by `BUCKET_SAFETY_CAP` and, in practice, far
-/// smaller -- a same-size/extension/parent-folder cluster), so the classic
-/// worst-case complexity of clique enumeration is a non-issue.
-fn maximal_cliques(vertices: &[usize], edge: impl Fn(usize, usize) -> bool) -> Vec<Vec<usize>> {
+/// via the simplest (no-pivot) form of Bron-Kerbosch, or `None` if
+/// `CLIQUE_WORK_BUDGET` is exhausted first -- vertex count bounds the size
+/// of the adjacency structure but not the cost of enumerating cliques over
+/// it, so a dense graph can still exceed the budget well under
+/// `MAX_CLIQUE_CANDIDATES` vertices. Callers must treat `None` exactly like
+/// an oversized group: skip it, don't persist anything from it.
+fn maximal_cliques(
+    vertices: &[usize],
+    edge: impl Fn(usize, usize) -> bool,
+    budget: u32,
+) -> Option<Vec<Vec<usize>>> {
     let mut adj: HashMap<usize, BTreeSet<usize>> = HashMap::new();
     for &v in vertices {
         adj.entry(v).or_default();
@@ -155,22 +186,40 @@ fn maximal_cliques(vertices: &[usize], edge: impl Fn(usize, usize) -> bool) -> V
     }
     let p: BTreeSet<usize> = vertices.iter().copied().collect();
     let mut cliques = Vec::new();
-    bron_kerbosch(&mut Vec::new(), p, BTreeSet::new(), &adj, &mut cliques);
-    cliques
+    let mut budget = budget;
+    bron_kerbosch(
+        &mut Vec::new(),
+        p,
+        BTreeSet::new(),
+        &adj,
+        &mut cliques,
+        &mut budget,
+    )?;
+    Some(cliques)
 }
 
+/// Returns `None` as soon as `budget` runs out, unwinding the whole search
+/// (via `?` at each recursive call) rather than returning a partial result:
+/// which subset of the true maximal cliques gets found first depends on
+/// `BTreeSet` iteration order, so a partial enumeration would be an
+/// arbitrary, non-obvious sample rather than a meaningful one -- dropping
+/// the whole cluster is simpler to reason about and consistent with this
+/// matcher's "when ambiguous or expensive to verify, drop rather than guess"
+/// design.
 fn bron_kerbosch(
     r: &mut Vec<usize>,
     mut p: BTreeSet<usize>,
     mut x: BTreeSet<usize>,
     adj: &HashMap<usize, BTreeSet<usize>>,
     cliques: &mut Vec<Vec<usize>>,
-) {
+    budget: &mut u32,
+) -> Option<()> {
+    *budget = budget.checked_sub(1)?;
     if p.is_empty() && x.is_empty() {
         if r.len() >= 2 {
             cliques.push(r.clone());
         }
-        return;
+        return Some(());
     }
     for v in p.clone() {
         let neighbors = &adj[&v];
@@ -181,11 +230,13 @@ fn bron_kerbosch(
             x.intersection(neighbors).copied().collect(),
             adj,
             cliques,
-        );
+            budget,
+        )?;
         r.pop();
         p.remove(&v);
         x.insert(v);
     }
+    Some(())
 }
 
 /// Every pair among `group` (indices into `files`) satisfies `Strong` mtime
@@ -262,14 +313,26 @@ fn resolve_groups_in_bucket(files: &[FileRow], idxs: &[usize]) -> Vec<(Tier, Vec
                 .push(i);
         }
         for cluster in by_parent.into_values() {
-            if cluster.len() < 2 || cluster.len() > BUCKET_SAFETY_CAP {
+            // See `MAX_CLIQUE_CANDIDATES`: this is deliberately much tighter
+            // than `BUCKET_SAFETY_CAP` above, since clique enumeration's
+            // cost is combinatorial, not quadratic.
+            if cluster.len() < 2 || cluster.len() > MAX_CLIQUE_CANDIDATES {
                 continue;
             }
-            let cliques = maximal_cliques(&cluster, |a, b| {
-                files[a].name != files[b].name
-                    && compare_mtime(files[a].mtime.as_deref(), files[b].mtime.as_deref())
-                        != MtimeMatch::None
-            });
+            let Some(cliques) = maximal_cliques(
+                &cluster,
+                |a, b| {
+                    files[a].name != files[b].name
+                        && compare_mtime(files[a].mtime.as_deref(), files[b].mtime.as_deref())
+                            != MtimeMatch::None
+                },
+                CLIQUE_WORK_BUDGET,
+            ) else {
+                // Work budget exhausted: this cluster's edge graph is too
+                // dense to safely enumerate. Drop it, same as an oversized
+                // group -- not a false positive, just a missed one.
+                continue;
+            };
             for clique in cliques {
                 if clique.len() > MAX_GROUP_SIZE {
                     continue;
@@ -857,6 +920,65 @@ mod tests {
             group_rows(&conn, ws).is_empty(),
             "a {}-member name-group must be dropped, not persisted",
             MAX_GROUP_SIZE + 1
+        );
+    }
+
+    #[test]
+    fn clique_search_aborts_when_work_budget_is_exhausted() {
+        // A complete graph on 4 vertices has exactly one maximal clique but
+        // still takes more than a single recursive call to find -- an
+        // artificially tiny budget must abort rather than return a wrong or
+        // partial answer.
+        let vertices = vec![0usize, 1, 2, 3];
+        let result = maximal_cliques(&vertices, |_, _| true, 1);
+        assert!(
+            result.is_none(),
+            "a budget of 1 must not be enough to finish even a 4-vertex complete graph"
+        );
+    }
+
+    #[test]
+    fn clique_search_finds_the_clique_when_budget_is_sufficient() {
+        let vertices = vec![0usize, 1, 2, 3];
+        let result = maximal_cliques(&vertices, |_, _| true, CLIQUE_WORK_BUDGET).unwrap();
+        assert_eq!(result, vec![vec![0, 1, 2, 3]]);
+    }
+
+    #[test]
+    fn oversized_dense_parent_cluster_is_skipped_quickly() {
+        // A cluster larger than MAX_CLIQUE_CANDIDATES, with every mtime
+        // identical (so the edge graph would be complete -- the shape real
+        // archives produce when many devices share a folder name like
+        // "DCIM" and photos cluster in time) must be skipped outright
+        // rather than attempt clique enumeration at all.
+        let mut rows: Vec<(String, i64, Option<String>, String)> = Vec::new();
+        for i in 0..(MAX_CLIQUE_CANDIDATES + 50) {
+            rows.push((
+                format!("file{i}.jpg"),
+                123_456,
+                Some("2024-01-01_10:00:00".to_string()),
+                "DCIM".to_string(),
+            ));
+        }
+        let borrowed: Vec<(&str, i64, Option<&str>, &str)> = rows
+            .iter()
+            .map(|(n, s, m, p)| (n.as_str(), *s, m.as_deref(), p.as_str()))
+            .collect();
+        let mut conn = setup_files(&borrowed);
+        let ws = 1;
+
+        let start = std::time::Instant::now();
+        run_with_progress(&mut conn, ws, DedupParams::default(), |_, _, _| {}).unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "an oversized dense parent cluster must be skipped quickly, took {elapsed:?}"
+        );
+        assert!(
+            group_rows(&conn, ws).is_empty(),
+            "no groups should form: names all differ (no tier C/D match) and \
+             the parent cluster exceeds MAX_CLIQUE_CANDIDATES (dropped, not analyzed)"
         );
     }
 }
