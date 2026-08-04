@@ -46,6 +46,10 @@ pub struct Source {
     pub imported_at: String,
     pub total_size: i64,
     pub file_count: i64,
+    /// When true, this source is left out of the matcher (and its tree panels
+    /// are hidden) until re-included, without deleting any of its data.
+    #[serde(default)]
+    pub excluded: bool,
     /// Percentage (0-100) of this device's bytes that appear duplicated elsewhere.
     #[serde(default)]
     pub duplicated_pct: f64,

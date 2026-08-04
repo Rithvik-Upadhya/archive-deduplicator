@@ -38,6 +38,7 @@ pub fn run() {
             commands::import_tree_json,
             commands::scan_folder,
             commands::source_rename_device,
+            commands::source_set_excluded,
             commands::source_delete,
             commands::get_tree,
             commands::run_dedup,

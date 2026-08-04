@@ -662,6 +662,34 @@ mod tests {
     }
 
     #[test]
+    fn excluding_a_sources_only_partner_clears_cross_dup_on_the_other() {
+        // Simulates a rerun after `dedup::run` stops loading an excluded
+        // source's nodes: its match group no longer exists, so its former
+        // partner's file must stop reading as cross_dup (and reappear under
+        // the "exclusive to this device" filter).
+        let (mut conn, ws, src_a, src_b) = setup();
+        let a = insert_node(&conn, src_a, None, "photo.jpg", "file", 100);
+        let b = insert_node(&conn, src_b, None, "photo.jpg", "file", 100);
+        insert_file_group(&conn, ws, &[a, b]);
+        rebuild_annotations(&mut conn, ws).unwrap();
+        assert_eq!(annot(&conn, b).unwrap().2, 1, "starts as cross_dup");
+
+        conn.execute(
+            "DELETE FROM match_groups WHERE workspace_id = ?1",
+            params![ws],
+        )
+        .unwrap();
+        rebuild_annotations(&mut conn, ws).unwrap();
+
+        assert_eq!(cross_dup_of(&conn, b), 0, "no longer cross_dup");
+        assert_eq!(
+            annot(&conn, b).map(|row| row.0).unwrap_or(0),
+            0,
+            "no longer a duplicate at all"
+        );
+    }
+
+    #[test]
     fn file_duplicated_within_one_source_is_not_cross_dup() {
         let (mut conn, ws, src_a, _src_b) = setup();
         let a = insert_node(&conn, src_a, None, "copy1.jpg", "file", 100);

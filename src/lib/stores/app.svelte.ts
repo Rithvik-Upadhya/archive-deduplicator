@@ -62,6 +62,11 @@ class AppState {
         return this.workspaces.find((w) => w.id === this.activeWorkspaceId) ?? null;
     }
 
+    /** Sources not excluded from analysis -- what tree panels should render. */
+    get visibleSources(): Source[] {
+        return this.sources.filter((s) => !s.excluded);
+    }
+
     async init() {
         if (this.started) return;
         this.started = true;
@@ -186,6 +191,14 @@ class AppState {
         this.deviceStats = this.deviceStats.map((d) =>
             d.source_id === sourceId ? { ...d, device_label: label } : d,
         );
+    }
+
+    async setSourceExcluded(sourceId: number, excluded: boolean) {
+        await api.sourceSetExcluded(sourceId, excluded);
+        this.sources = this.sources.map((s) =>
+            s.id === sourceId ? { ...s, excluded } : s,
+        );
+        await this.setDedupStale(true);
     }
 
     async deleteSource(sourceId: number) {

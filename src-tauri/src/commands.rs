@@ -93,7 +93,7 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
         rollup::cross_dup_size_by_source(&conn, workspace_id).map_err(map_err)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count
+            "SELECT id, workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded
              FROM sources WHERE workspace_id = ?1 ORDER BY id",
         )
         .map_err(map_err)?;
@@ -110,6 +110,7 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
                 imported_at: r.get(7)?,
                 total_size: r.get(8)?,
                 file_count: r.get(9)?,
+                excluded: r.get::<_, i64>(10)? != 0,
                 duplicated_pct: 0.0,
                 cross_dup_size: 0,
                 cross_dup_file_count: 0,
@@ -167,6 +168,7 @@ pub fn import_tree_json(
         imported_at: ts,
         total_size: flat.total_size,
         file_count: flat.file_count,
+        excluded: false,
         duplicated_pct: 0.0,
         cross_dup_size: 0,
         cross_dup_file_count: 0,
@@ -207,6 +209,7 @@ pub fn scan_folder(
         imported_at: ts,
         total_size: flat.total_size,
         file_count: flat.file_count,
+        excluded: false,
         duplicated_pct: 0.0,
         cross_dup_size: 0,
         cross_dup_file_count: 0,
@@ -219,6 +222,17 @@ pub fn source_rename_device(db: State<Db>, source_id: i64, device_label: String)
     conn.execute(
         "UPDATE sources SET device_label = ?1 WHERE id = ?2",
         params![device_label, source_id],
+    )
+    .map_err(map_err)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn source_set_excluded(db: State<Db>, source_id: i64, excluded: bool) -> CmdResult<()> {
+    let conn = db.0.lock().unwrap();
+    conn.execute(
+        "UPDATE sources SET excluded = ?1 WHERE id = ?2",
+        params![excluded as i64, source_id],
     )
     .map_err(map_err)?;
     Ok(())

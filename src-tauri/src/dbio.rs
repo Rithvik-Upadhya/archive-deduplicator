@@ -108,7 +108,7 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
             let mut src_id_map: HashMap<i64, i64> = HashMap::new();
             {
                 let mut stmt = tx.prepare(
-                    "SELECT id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count
+                    "SELECT id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded
                      FROM ext.sources WHERE workspace_id = ?1",
                 )?;
                 let rows: Vec<(
@@ -119,6 +119,7 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                     Option<String>,
                     Option<i64>,
                     String,
+                    i64,
                     i64,
                     i64,
                 )> = stmt
@@ -133,6 +134,7 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                             r.get(6)?,
                             r.get(7)?,
                             r.get(8)?,
+                            r.get(9)?,
                         ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -146,12 +148,13 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                     imported_at,
                     total_size,
                     file_count,
+                    excluded,
                 ) in rows
                 {
                     tx.execute(
-                        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                        params![new_ws_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count],
+                        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                        params![new_ws_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded],
                     )?;
                     let new_id = tx.last_insert_rowid();
                     src_id_map.insert(old_id, new_id);

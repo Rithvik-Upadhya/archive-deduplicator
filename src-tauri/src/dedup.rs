@@ -256,7 +256,7 @@ fn load_parent_names(
     let mut stmt = conn.prepare(
         "SELECT n.id, n.name FROM nodes n
          JOIN sources s ON s.id = n.source_id
-         WHERE s.workspace_id = ?1 AND n.type = 'directory'",
+         WHERE s.workspace_id = ?1 AND n.type = 'directory' AND s.excluded = 0",
     )?;
     let rows = stmt.query_map(params![workspace_id], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
@@ -278,7 +278,7 @@ fn load_files(
         "SELECT n.id, n.source_id, n.parent_id, n.name, n.size, n.mtime, n.inode, n.dev
          FROM nodes n
          JOIN sources s ON s.id = n.source_id
-         WHERE s.workspace_id = ?1 AND n.type = 'file'",
+         WHERE s.workspace_id = ?1 AND n.type = 'file' AND s.excluded = 0",
     )?;
     let rows = stmt.query_map(params![workspace_id], |r| {
         let parent_id: Option<i64> = r.get(2)?;
@@ -419,5 +419,82 @@ mod tests {
             )
             .unwrap();
         assert_eq!(file_groups, 0, "tiny files should be deprioritized out");
+    }
+
+    #[test]
+    fn excluded_source_is_left_out_of_matching() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (name, created_at, updated_at) VALUES ('w', 't', 't')",
+            [],
+        )
+        .unwrap();
+        let ws = conn.last_insert_rowid();
+
+        // disc-a and disc-b share an identical file; disc-c holds something
+        // unrelated, so it never factors into this test either way.
+        let shared_json = r#"[{"type":"directory","name":"/vol","dev":10,"contents":[
+            {"type":"file","name":"shared.jpg","inode":2,"dev":10,"size":500000,"time":"2024-01-01_10:00:00"}
+        ]}]"#;
+        let other_json = r#"[{"type":"directory","name":"/vol","dev":10,"contents":[
+            {"type":"file","name":"other.jpg","inode":2,"dev":10,"size":900000,"time":"2024-01-01_10:00:00"}
+        ]}]"#;
+
+        let mut source_id = |label: &str, dev: i64, json: &str| -> i64 {
+            let flat =
+                parse::parse_tree_json(&json.replace("\"dev\":10", &format!("\"dev\":{dev}")))
+                    .unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute(
+                "INSERT INTO sources (workspace_id, kind, label, device_label, imported_at, total_size, file_count)
+                 VALUES (?1, 'json', ?2, ?2, 't', ?3, ?4)",
+                params![ws, label, flat.total_size, flat.file_count],
+            )
+            .unwrap();
+            let sid = tx.last_insert_rowid();
+            parse::insert_nodes(&tx, sid, &flat).unwrap();
+            tx.commit().unwrap();
+            sid
+        };
+        let src_a = source_id("disc-a", 10, shared_json);
+        let _src_b = source_id("disc-b", 20, shared_json);
+        let _src_c = source_id("disc-c", 30, other_json);
+
+        conn.execute(
+            "UPDATE sources SET excluded = 1 WHERE id = ?1",
+            params![src_a],
+        )
+        .unwrap();
+
+        run(&mut conn, ws, DedupParams::default()).unwrap();
+
+        let a_member_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM match_members mm
+                 JOIN nodes n ON n.id = mm.node_id
+                 WHERE n.source_id = ?1",
+                params![src_a],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            a_member_count, 0,
+            "excluded source must have no match members"
+        );
+
+        // disc-b's copy of shared.jpg has no remaining partner (its only
+        // match was on the excluded disc-a), so no file group should exist.
+        let file_groups: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM match_groups WHERE workspace_id = ?1 AND kind = 'file'",
+                params![ws],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            file_groups, 0,
+            "disc-b's file should be unmatched once disc-a is excluded"
+        );
     }
 }

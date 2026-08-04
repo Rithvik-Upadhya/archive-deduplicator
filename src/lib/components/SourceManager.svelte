@@ -35,6 +35,14 @@
         }
     }
 
+    async function toggleExcluded(s: { id: number; excluded: boolean }) {
+        try {
+            await app.setSourceExcluded(s.id, !s.excluded);
+        } catch (err) {
+            toast.error(String(err));
+        }
+    }
+
     async function confirmDelete() {
         const target = deleteTarget;
         deleteTarget = null;
@@ -141,7 +149,9 @@
         <ul class="flex flex-row gap-1.5 grow overflow-x-auto">
             {#each app.sources as s (s.id)}
                 <li
-                    class="group/device flex flex-col gap-1 rounded-md border bg-card px-2 py-1.5 transition-colors hover:border-brand/40">
+                    class="group/device flex flex-col gap-1 rounded-md border bg-card px-2 py-1.5 transition-colors hover:border-brand/40 {s.excluded
+                        ? 'opacity-60'
+                        : ''}">
                     <div class="flex min-w-0 items-center gap-1">
                         <Icon
                             icon="ph:hard-drive-fill"
@@ -162,6 +172,26 @@
                             <span
                                 class="flex-1 truncate text-sm font-medium"
                                 title={s.device_label}>{s.device_label}</span>
+                            <Button
+                                variant="ghost"
+                                size="icon"
+                                class="size-6 shrink-0 {s.excluded
+                                    ? 'text-muted-foreground'
+                                    : ''}"
+                                aria-pressed={s.excluded}
+                                title={s.excluded
+                                    ? 'Include in analysis'
+                                    : 'Exclude from analysis'}
+                                onclick={() => toggleExcluded(s)}>
+                                <Icon
+                                    icon={s.excluded
+                                        ? 'ph:eye-slash-fill'
+                                        : 'ph:eye-fill'} />
+                                <span class="sr-only"
+                                    >{s.excluded
+                                        ? 'Include in analysis'
+                                        : 'Exclude from analysis'}</span>
+                            </Button>
                             <Button
                                 variant="ghost"
                                 size="icon"
@@ -194,13 +224,21 @@
                     <div
                         class="flex items-center justify-between font-heading text-[0.7rem] tabular-nums text-muted-foreground">
                         <span>{formatBytes(s.total_size)}</span>
-                        <Badge
-                            variant="outline"
-                            class="px-1.5 py-0 text-[0.65rem] {DUP_BADGE[
-                                dupLevel(pct(s.duplicated_pct))
-                            ]}">
-                            {pct(s.duplicated_pct)}% dup
-                        </Badge>
+                        {#if s.excluded}
+                            <Badge
+                                variant="outline"
+                                class="px-1.5 py-0 text-[0.65rem]">
+                                Excluded
+                            </Badge>
+                        {:else}
+                            <Badge
+                                variant="outline"
+                                class="px-1.5 py-0 text-[0.65rem] {DUP_BADGE[
+                                    dupLevel(pct(s.duplicated_pct))
+                                ]}">
+                                {pct(s.duplicated_pct)}% dup
+                            </Badge>
+                        {/if}
                     </div>
                 </li>
             {/each}

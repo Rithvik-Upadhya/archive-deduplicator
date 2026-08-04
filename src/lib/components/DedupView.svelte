@@ -146,7 +146,7 @@
             <Resizable.Pane>
                 <div class="flex h-full min-w-0 flex-col overflow-hidden pe-1">
                     <h2 class="section-label mb-2 shrink-0">Device trees</h2>
-                    {#if app.sources.length === 0}
+                    {#if app.visibleSources.length === 0}
                         <Empty.Root class="border border-dashed">
                             <Empty.Header>
                                 <Empty.Media variant="icon">
@@ -154,7 +154,7 @@
                                 </Empty.Media>
                                 <Empty.Title>No devices</Empty.Title>
                                 <Empty.Description>
-                                    Add devices from the left to browse their
+                                    Add devices to browse their
                                     trees.
                                 </Empty.Description>
                             </Empty.Header>
@@ -162,7 +162,7 @@
                     {:else}
                         <div
                             class="flex flex-col overflow-y-auto overflow-x-hidden">
-                            {#each app.sources as s (s.id)}
+                            {#each app.visibleSources as s (s.id)}
                                 <DeviceTree source={s} {onselect} {onlocate} />
                             {/each}
                         </div>

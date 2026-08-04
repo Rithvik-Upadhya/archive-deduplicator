@@ -40,7 +40,8 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             dev_id INTEGER,
             imported_at TEXT NOT NULL,
             total_size INTEGER NOT NULL DEFAULT 0,
-            file_count INTEGER NOT NULL DEFAULT 0
+            file_count INTEGER NOT NULL DEFAULT 0,
+            excluded INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS nodes (

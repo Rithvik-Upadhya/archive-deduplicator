@@ -22,6 +22,7 @@ export interface Source {
     imported_at: string;
     total_size: number;
     file_count: number;
+    excluded: boolean;
     duplicated_pct: number;
     cross_dup_size: number;
     cross_dup_file_count: number;

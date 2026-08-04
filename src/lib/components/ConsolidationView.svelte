@@ -291,7 +291,7 @@
         <h2 class="section-label mb-2 shrink-0">
             Source devices — drag files &amp; folders →
         </h2>
-        {#if app.sources.length === 0}
+        {#if app.visibleSources.length === 0}
             <Empty.Root class="border border-dashed">
                 <Empty.Header>
                     <Empty.Media variant="icon">
@@ -305,7 +305,7 @@
             </Empty.Root>
         {:else}
             <div class="flex flex-col overflow-y-auto overflow-x-hidden">
-                {#each app.sources as s (s.id)}
+                {#each app.visibleSources as s (s.id)}
                     <DeviceTree
                         source={s}
                         draggable

@@ -39,6 +39,8 @@ export const scanFolder = (workspaceId: number, path: string, label: string) =>
     invoke<Source>('scan_folder', { workspaceId, path, label });
 export const sourceRenameDevice = (sourceId: number, deviceLabel: string) =>
     invoke<void>('source_rename_device', { sourceId, deviceLabel });
+export const sourceSetExcluded = (sourceId: number, excluded: boolean) =>
+    invoke<void>('source_set_excluded', { sourceId, excluded });
 export const sourceDelete = (sourceId: number) =>
     invoke<void>('source_delete', { sourceId });
 
