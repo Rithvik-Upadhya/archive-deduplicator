@@ -157,7 +157,7 @@ fn load_file_locs(conn: &Connection, workspace_id: i64) -> rusqlite::Result<Vec<
     let mut stmt = conn.prepare(
         "SELECT n.id, n.source_id, n.parent_id, n.size FROM nodes n
          JOIN sources s ON s.id = n.source_id
-         WHERE s.workspace_id = ?1 AND n.type = 'file'",
+         WHERE s.workspace_id = ?1 AND n.type = 'file' AND n.alias_of IS NULL",
     )?;
     let rows = stmt.query_map(params![workspace_id], |r| {
         Ok(FileLoc {
@@ -184,7 +184,7 @@ fn load_leaf_locs(conn: &Connection, workspace_id: i64) -> rusqlite::Result<Vec<
     let mut stmt = conn.prepare(
         "SELECT n.id, n.parent_id, n.type FROM nodes n
          JOIN sources s ON s.id = n.source_id
-         WHERE s.workspace_id = ?1 AND n.type IN ('file', 'link')",
+         WHERE s.workspace_id = ?1 AND n.type IN ('file', 'link') AND n.alias_of IS NULL",
     )?;
     let rows = stmt.query_map(params![workspace_id], |r| {
         Ok(LeafLoc {

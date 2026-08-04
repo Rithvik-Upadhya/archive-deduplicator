@@ -175,7 +175,13 @@
                 class="ms-auto shrink-0 font-heading text-xs tabular-nums whitespace-nowrap text-muted-foreground">
                 {formatBytes(node.size)}
             </span>
-            {#if node.has_duplicate}
+            {#if node.is_hardlink}
+                <Badge
+                    variant="outline"
+                    class="shrink-0 border-muted-foreground/45 px-1 py-0 font-heading text-[0.65rem] text-muted-foreground"
+                    title="This is a hardlink: one physical file also known by another name on this device. Not a duplicate -- deleting one name doesn't free any space until every name is gone."
+                    >link</Badge>
+            {:else if node.has_duplicate}
                 <Badge
                     variant="outline"
                     class="shrink-0 border-brand/45 px-1 py-0 font-heading text-[0.65rem] text-brand"

@@ -4,7 +4,7 @@
 use crate::db::Db;
 use crate::dedup::DedupParams;
 use crate::model::*;
-use crate::{parse, pathfix, rollup, scan};
+use crate::{links, parse, pathfix, rollup, scan};
 use chrono::Utc;
 use rusqlite::params;
 use std::collections::HashMap;
@@ -93,7 +93,7 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
         rollup::cross_dup_size_by_source(&conn, workspace_id).map_err(map_err)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded
+            "SELECT id, workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes
              FROM sources WHERE workspace_id = ?1 ORDER BY id",
         )
         .map_err(map_err)?;
@@ -114,6 +114,8 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
                 duplicated_pct: 0.0,
                 cross_dup_size: 0,
                 cross_dup_file_count: 0,
+                physical_size: r.get(11)?,
+                alias_bytes: r.get(12)?,
             })
         })
         .map_err(map_err)?;
@@ -165,6 +167,8 @@ pub async fn import_tree_json(
         .map_err(map_err)?;
         let source_id = tx.last_insert_rowid();
         parse::insert_nodes(&tx, source_id, &flat).map_err(map_err)?;
+        let (physical_size, alias_bytes) =
+            links::collapse_hardlinks_and_recompute(&tx, source_id).map_err(map_err)?;
         tx.commit().map_err(map_err)?;
 
         Ok(Source {
@@ -182,6 +186,8 @@ pub async fn import_tree_json(
             duplicated_pct: 0.0,
             cross_dup_size: 0,
             cross_dup_file_count: 0,
+            physical_size,
+            alias_bytes,
         })
     })
     .await
@@ -216,6 +222,8 @@ pub async fn scan_folder(
         .map_err(map_err)?;
         let source_id = tx.last_insert_rowid();
         parse::insert_nodes(&tx, source_id, &flat).map_err(map_err)?;
+        let (physical_size, alias_bytes) =
+            links::collapse_hardlinks_and_recompute(&tx, source_id).map_err(map_err)?;
         tx.commit().map_err(map_err)?;
 
         Ok(Source {
@@ -233,6 +241,8 @@ pub async fn scan_folder(
             duplicated_pct: 0.0,
             cross_dup_size: 0,
             cross_dup_file_count: 0,
+            physical_size,
+            alias_bytes,
         })
     })
     .await
@@ -302,13 +312,17 @@ pub fn get_tree(
     let sql = if parent_id.is_some() {
         "SELECT n.id, n.source_id, n.parent_id, n.name, n.rel_path, n.type, n.size, n.mtime, n.inode, n.dev, n.depth, n.subtree_size, n.subtree_file_count,
                 COALESCE(d.has_dup, 0), COALESCE(d.dup_pct, 0), COALESCE(d.cross_dup, 0),
-                COALESCE(d.cross_dup_size, 0), COALESCE(d.cross_dup_file_count, 0), COALESCE(d.in_folder_group, 0)
+                COALESCE(d.cross_dup_size, 0), COALESCE(d.cross_dup_file_count, 0), COALESCE(d.in_folder_group, 0),
+                n.alias_of,
+                (n.alias_of IS NOT NULL OR EXISTS (SELECT 1 FROM nodes a WHERE a.alias_of = n.id))
          FROM nodes n LEFT JOIN dup_annot d ON d.node_id = n.id
          WHERE n.source_id = ?1 AND n.parent_id = ?2 ORDER BY n.type = 'file', n.name"
     } else {
         "SELECT n.id, n.source_id, n.parent_id, n.name, n.rel_path, n.type, n.size, n.mtime, n.inode, n.dev, n.depth, n.subtree_size, n.subtree_file_count,
                 COALESCE(d.has_dup, 0), COALESCE(d.dup_pct, 0), COALESCE(d.cross_dup, 0),
-                COALESCE(d.cross_dup_size, 0), COALESCE(d.cross_dup_file_count, 0), COALESCE(d.in_folder_group, 0)
+                COALESCE(d.cross_dup_size, 0), COALESCE(d.cross_dup_file_count, 0), COALESCE(d.in_folder_group, 0),
+                n.alias_of,
+                (n.alias_of IS NOT NULL OR EXISTS (SELECT 1 FROM nodes a WHERE a.alias_of = n.id))
          FROM nodes n LEFT JOIN dup_annot d ON d.node_id = n.id
          WHERE n.source_id = ?1 AND n.parent_id IS NULL ORDER BY n.type = 'file', n.name"
     };
@@ -335,6 +349,8 @@ pub fn get_tree(
             cross_dup_size: r.get(16)?,
             cross_dup_file_count: r.get(17)?,
             in_folder_group: r.get::<_, i64>(18)? != 0,
+            alias_of: r.get(19)?,
+            is_hardlink: r.get::<_, i64>(20)? != 0,
         })
     };
 

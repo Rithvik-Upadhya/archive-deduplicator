@@ -22,6 +22,7 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     init_schema(&conn)?;
+    migrate(&conn)?;
     Ok(conn)
 }
 
@@ -47,7 +48,9 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             imported_at TEXT NOT NULL,
             total_size INTEGER NOT NULL DEFAULT 0,
             file_count INTEGER NOT NULL DEFAULT 0,
-            excluded INTEGER NOT NULL DEFAULT 0
+            excluded INTEGER NOT NULL DEFAULT 0,
+            physical_size INTEGER NOT NULL DEFAULT 0,
+            alias_bytes INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS nodes (
@@ -63,12 +66,16 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             dev INTEGER,
             depth INTEGER NOT NULL DEFAULT 0,
             subtree_size INTEGER NOT NULL DEFAULT 0,
-            subtree_file_count INTEGER NOT NULL DEFAULT 0
+            subtree_file_count INTEGER NOT NULL DEFAULT 0,
+            alias_of INTEGER REFERENCES nodes(id) ON DELETE SET NULL,
+            inode_trusted INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_nodes_source ON nodes(source_id);
         CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_id);
         CREATE INDEX IF NOT EXISTS idx_nodes_size ON nodes(size);
         CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type);
+        CREATE INDEX IF NOT EXISTS idx_nodes_alias ON nodes(alias_of) WHERE alias_of IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_nodes_inode ON nodes(source_id, dev, inode) WHERE inode IS NOT NULL;
 
         CREATE TABLE IF NOT EXISTS match_groups (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -158,6 +165,73 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Target schema version. Bump this and add an entry to `migrate`'s
+/// `alterations` list whenever a column is added to an already-shipped table.
+pub const SCHEMA_VERSION: i64 = 2;
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
+    let count: i64 = conn.query_row(&sql, rusqlite::params![column], |r| r.get(0))?;
+    Ok(count > 0)
+}
+
+/// Bring an existing on-disk database up to `SCHEMA_VERSION`. `init_schema`'s
+/// `CREATE TABLE IF NOT EXISTS` only ever helps a brand-new database -- on an
+/// existing one it silently no-ops against the already-present old-shape
+/// table, so newly added columns need an explicit `ALTER TABLE` here.
+///
+/// Checked via `column_exists` (introspection) rather than purely by
+/// `user_version`, so this stays correct regardless of whether a given
+/// column already exists (e.g. on a database `init_schema` just created
+/// fresh, where every column in the list below is already present).
+pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    // `PRAGMA user_version` is a pure read of the database header -- checking
+    // it first keeps the common (already-migrated) case a read-only no-op,
+    // same as `init_schema`'s `CREATE TABLE IF NOT EXISTS` statements. Every
+    // `db::open()` call runs this, including dedicated connections opened
+    // alongside an in-progress writer (see `run_dedup`'s doc comment and the
+    // `wal_mode_lets_a_reader_proceed_during_an_open_writer_transaction`
+    // test below) -- an unconditional write here would reintroduce exactly
+    // the lock contention that design depends on avoiding.
+    let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if current >= SCHEMA_VERSION {
+        return Ok(());
+    }
+    let alterations: &[(&str, &str, &str)] = &[
+        (
+            "nodes",
+            "alias_of",
+            "ALTER TABLE nodes ADD COLUMN alias_of INTEGER REFERENCES nodes(id) ON DELETE SET NULL",
+        ),
+        (
+            "nodes",
+            "inode_trusted",
+            "ALTER TABLE nodes ADD COLUMN inode_trusted INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "sources",
+            "physical_size",
+            "ALTER TABLE sources ADD COLUMN physical_size INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "sources",
+            "alias_bytes",
+            "ALTER TABLE sources ADD COLUMN alias_bytes INTEGER NOT NULL DEFAULT 0",
+        ),
+    ];
+    for (table, column, ddl) in alterations {
+        if !column_exists(conn, table, column)? {
+            conn.execute(ddl, [])?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_nodes_alias ON nodes(alias_of) WHERE alias_of IS NOT NULL;
+         CREATE INDEX IF NOT EXISTS idx_nodes_inode ON nodes(source_id, dev, inode) WHERE inode IS NOT NULL;",
+    )?;
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +288,70 @@ mod tests {
             let _ = std::fs::remove_file(self.0.with_extension("sqlite-wal"));
             let _ = std::fs::remove_file(self.0.with_extension("sqlite-shm"));
         }
+    }
+
+    /// A stand-in for a pre-migration on-disk database: the baseline tables
+    /// `migrate` needs to alter, deliberately missing the four new columns.
+    const OLD_SCHEMA_DDL: &str = r#"
+        CREATE TABLE workspaces (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            label TEXT NOT NULL,
+            device_label TEXT NOT NULL,
+            orig_root_path TEXT,
+            dev_id INTEGER,
+            imported_at TEXT NOT NULL,
+            total_size INTEGER NOT NULL DEFAULT 0,
+            file_count INTEGER NOT NULL DEFAULT 0,
+            excluded INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+            parent_id INTEGER REFERENCES nodes(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            rel_path TEXT NOT NULL,
+            type TEXT NOT NULL,
+            size INTEGER NOT NULL DEFAULT 0,
+            mtime TEXT,
+            inode INTEGER,
+            dev INTEGER,
+            depth INTEGER NOT NULL DEFAULT 0,
+            subtree_size INTEGER NOT NULL DEFAULT 0,
+            subtree_file_count INTEGER NOT NULL DEFAULT 0
+        );
+    "#;
+
+    #[test]
+    fn migrate_adds_new_columns_to_a_pre_migration_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(OLD_SCHEMA_DDL).unwrap();
+
+        migrate(&conn).unwrap();
+
+        assert!(column_exists(&conn, "nodes", "alias_of").unwrap());
+        assert!(column_exists(&conn, "nodes", "inode_trusted").unwrap());
+        assert!(column_exists(&conn, "sources", "physical_size").unwrap());
+        assert!(column_exists(&conn, "sources", "alias_bytes").unwrap());
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_is_idempotent_on_a_fresh_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap(); // second call must not error (no double ALTER)
     }
 }

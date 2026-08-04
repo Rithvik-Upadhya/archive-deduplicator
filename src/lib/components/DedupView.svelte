@@ -83,10 +83,11 @@
         return () => obs.disconnect();
     });
 
-    const kinds: { id: 'all' | 'file' | 'folder'; label: string }[] = [
+    const kinds: { id: 'all' | 'file' | 'folder' | 'hardlink'; label: string }[] = [
         { id: 'all', label: 'All' },
         { id: 'file', label: 'Files' },
         { id: 'folder', label: 'Folders' },
+        { id: 'hardlink', label: 'Hardlinks' },
     ];
     const sorts: { id: GroupSort; label: string }[] = [
         { id: 'confidence', label: 'Confidence' },
@@ -217,7 +218,7 @@
                                 onValueChange={v =>
                                     v &&
                                     app.setGroupKind(
-                                        v as 'all' | 'file' | 'folder'
+                                        v as 'all' | 'file' | 'folder' | 'hardlink'
                                     )}>
                                 {#each kinds as k (k.id)}
                                     <ToggleGroup.Item

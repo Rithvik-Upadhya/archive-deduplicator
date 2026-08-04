@@ -3,6 +3,7 @@ mod consolidate;
 mod db;
 mod dbio;
 mod dedup;
+mod links;
 mod model;
 mod parse;
 mod pathfix;

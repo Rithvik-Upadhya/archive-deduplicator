@@ -26,6 +26,11 @@ export interface Source {
     duplicated_pct: number;
     cross_dup_size: number;
     cross_dup_file_count: number;
+    /** `total_size` minus bytes double-counted by hardlink alias sets --
+     *  what the UI should display as the device's real disk usage. */
+    physical_size: number;
+    /** Bytes among `total_size` that belong to non-canonical hardlink aliases. */
+    alias_bytes: number;
 }
 
 export interface TreeNode {
@@ -48,6 +53,12 @@ export interface TreeNode {
     cross_dup_size: number;
     cross_dup_file_count: number;
     in_folder_group: boolean;
+    /** Canonical node id when this is a hardlink alias. */
+    alias_of: number | null;
+    /** Whether this node is part of a hardlink alias set at all -- either
+     *  an alias or the canonical target of one or more aliases. Takes
+     *  precedence over `has_duplicate` in the tree UI's badge. */
+    is_hardlink: boolean;
 }
 
 export interface MatchMember {
@@ -63,7 +74,7 @@ export interface MatchMember {
 export interface MatchGroup {
     id: number;
     workspace_id: number;
-    kind: 'file' | 'folder';
+    kind: 'file' | 'folder' | 'hardlink';
     confidence: number;
     primary_signal: string;
     size: number;

@@ -33,14 +33,18 @@ class AppState {
     view = $state<ViewName>('dedup');
 
     // Dedup tuning parameters (persisted per-workspace in workspace_state).
-    minSizeKb = $state(4);
+    // 64 KB matches the matcher's default `min_size_bytes` floor: the vast
+    // majority of files below this are noise-generating size collisions
+    // (thumbnail caches, tiny fixed-size files) that account for a
+    // negligible share of actual bytes on a typical archive.
+    minSizeKb = $state(64);
     minConfidence = $state(40);
 
     // Results (paged: `groups` holds all pages loaded so far).
     groups = $state<MatchGroup[]>([]);
     groupTotal = $state(0);
     groupSort = $state<GroupSort>('confidence');
-    groupKind = $state<'all' | 'file' | 'folder'>('all');
+    groupKind = $state<'all' | 'file' | 'folder' | 'hardlink'>('all');
     groupsLoading = $state(false);
     deviceStats = $state<DeviceStats[]>([]);
 
@@ -100,7 +104,7 @@ class AppState {
             api.workspaceStateGet(ws, 'min_confidence'),
             api.workspaceStateGet(ws, 'dedup_stale'),
         ]);
-        this.minSizeKb = minSize ? Number(minSize) : 4;
+        this.minSizeKb = minSize ? Number(minSize) : 64;
         this.minConfidence = minConf ? Number(minConf) : 40;
         this.dedupStale = stale === '1';
 
@@ -283,7 +287,7 @@ class AppState {
         await this.refreshGroups();
     }
 
-    async setGroupKind(kind: 'all' | 'file' | 'folder') {
+    async setGroupKind(kind: 'all' | 'file' | 'folder' | 'hardlink') {
         this.groupKind = kind;
         await this.refreshGroups();
     }
