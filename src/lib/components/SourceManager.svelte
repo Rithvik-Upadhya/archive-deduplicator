@@ -186,7 +186,7 @@
                             <Button
                                 variant="ghost"
                                 size="icon"
-                                class="size-6 shrink-0 {s.excluded
+                                class="size-6 shrink-0 opacity-0 transition-opacity group-hover/device:opacity-100 {s.excluded
                                     ? 'text-muted-foreground'
                                     : ''}"
                                 aria-pressed={s.excluded}
