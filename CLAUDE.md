@@ -28,7 +28,7 @@ pnpm check                 # svelte-kit sync + svelte-check (the TS typecheck)
 pnpm tauri build           # production bundle
 
 cd src-tauri
-cargo test                 # Rust tests (currently only dedup.rs)
+cargo test                 # Rust tests (db.rs, dedup.rs, links.rs, rollup.rs, dbio.rs, consolidate.rs, pathfix.rs)
 cargo test detects_cross_source_file_duplicates    # single test
 cargo clippy && cargo fmt
 ```
@@ -74,34 +74,56 @@ Three files must be kept in lockstep — changing a command signature means edit
 ### Backend module flow
 
 ```
-parse.rs / scan.rs  →  nodes table  →  dedup.rs  →  rollup.rs  →  dup_annot cache
-   (import)                            (matching)   (folders +      (fast tree browsing)
-                                                     device stats)
+parse.rs / scan.rs  →  nodes table  →  links.rs  →  dedup.rs  →  rollup.rs  →  dup_annot cache
+   (import)                          (hardlinks)   (matching)   (folders +      (fast tree browsing)
+                                                                 device stats)
 ```
 
 - **`parse.rs`** flattens a `tree -JDs --inodes --device` JSON doc into `FlatNode`s, precomputing
   `subtree_size` / `subtree_file_count` bottom-up so the UI never aggregates. **`scan.rs`** produces
   the same `Flattened` struct from a live `WalkDir`, so both import paths share `insert_nodes`.
-- **`dedup.rs`** is the matcher. Exact file size is the bucketing key (that's what survives a
-  rename); name, stem, extension, mtime, parent-folder name and inode/dev are folded into a 0–100
-  confidence in `score_pair`, then union-find groups the survivors. Two tunables come from the UI:
-  `min_size_bytes` (a **hard filter** — small files collide by size constantly) and
-  `min_confidence`. inode/dev equality only scores within the same source; across sources it's
-  coincidence.
+  Neither module knows about hardlinks — that's `links.rs`'s job, run as a post-`insert_nodes` step.
+- **`links.rs`** detects hardlink alias sets (files sharing `(dev, inode)` within one source) right
+  after `insert_nodes`, inside the same transaction. Only trusted where the platform's inode/dev
+  values are reliable (currently: Unix live scans only — see `scan_produces_trusted_inodes`; Windows
+  scans and `tree` JSON imports are always untrusted pending real per-volume filesystem detection).
+  The lowest-`rel_path` member becomes canonical; the rest get `nodes.alias_of` set and a
+  `kind='hardlink', confidence=100` match group. Aliases stay fully visible in `get_tree` (the user
+  still needs to see every name a physical file has) but are excluded from `subtree_size`/
+  `subtree_file_count` propagation into ancestors and from the matcher's candidate pool
+  (`dedup.rs::load_files` filters `alias_of IS NULL`) — deleting `k-1` aliases frees zero bytes until
+  the last name is gone, so they must never be scored as ordinary duplicates.
+- **`dedup.rs`** is the matcher: absolute vetoes (different size via bucketing, different extension,
+  zero-byte) followed by three fixed-confidence evidence tiers that never merge or average —
+  C (70, exact name + strong mtime), D (55, exact name only), E (45, same parent-folder name +
+  some mtime support, names differ). Metadata-tier groups are never built by transitive union-find;
+  a group must be a genuine clique (every pair independently qualifies at that tier), enforced via
+  exact-name grouping for C/D (name equality is transitive) and Bron–Kerbosch maximal-clique
+  enumeration for E (the mtime-tolerance edge condition is not transitive). Two tunables come from
+  the UI: `min_size_bytes` (a **hard filter**, default 64 KiB) and `min_confidence` (a tier cutoff
+  now, not a continuous threshold). `kind='hardlink'` groups are `links.rs`'s, not this module's —
+  the group-clearing `DELETE` at the start of a run explicitly spares them.
 - **`rollup.rs`** builds folder-level groups on top of the file groups, then `rebuild_annotations`
   writes the `dup_annot` table (per-node `has_dup` / `dup_pct`) so `get_tree` is a plain query.
+  Its byte/leaf rollup queries (`load_file_locs`, `load_leaf_locs`) also filter `alias_of IS NULL`.
 - **`pathfix.rs`** walks the *consolidation* tree, not the sources — but descends into `nodes` for
   subtrees dragged in wholesale. Renames of consolidation nodes are written straight to
   `consolidation_nodes.name`; renames of files inside a dragged-in source directory are stored as
   virtual edits in `pathfix_state` and folded in at path-computation and export time.
 - **`dbio.rs`** — export is a SQLite backup-API copy of the live file. Import is deliberately
   non-destructive: it attaches the external file read-only and recreates every workspace found as
-  a *new* workspace with all foreign keys remapped. Never make import overwrite.
-- **`db.rs`** owns the schema, created idempotently on every launch via `CREATE TABLE IF NOT
-  EXISTS`. There is no migration framework — schema changes go in `init_schema`, and any
-  incompatible change needs an explicit `DROP`/`ALTER` line there (see the `pathfix_edits` drop).
-  The connection is a single `Mutex<Connection>` in Tauri managed state (`Db`), so every command
-  locks it; don't hold the lock across an `await`.
+  a *new* workspace with all foreign keys remapped (including `nodes.alias_of`, which — unlike
+  `parent_id` — can reference a node with a *lower* id than itself, since a hardlink's canonical is
+  chosen by `rel_path` rather than insertion order; it's backfilled in a second pass once every id
+  is mapped). Never make import overwrite.
+- **`db.rs`** owns the schema (`init_schema`, `CREATE TABLE IF NOT EXISTS`, safe for brand-new
+  databases) plus a real migration step (`migrate`, gated on `PRAGMA user_version` so it stays a
+  read-only no-op once a database is current — see the doc comment on why an unconditional write
+  there would reintroduce lock contention with `run_dedup`'s dedicated connection). Adding a column
+  to an already-shipped table needs an entry in *both* `init_schema`'s DDL (for fresh databases) and
+  `migrate`'s `alterations` list (for existing ones) — `CREATE TABLE IF NOT EXISTS` alone only ever
+  helps the former. The connection is a single `Mutex<Connection>` in Tauri managed state (`Db`), so
+  every command locks it; don't hold the lock across an `await`.
 
 ### Frontend
 

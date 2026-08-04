@@ -49,10 +49,13 @@
             ? source.file_count - source.cross_dup_file_count
             : source.file_count
     );
+    // `physical_size` (total_size minus hardlink-alias bytes) is the real
+    // disk usage; `cross_dup_size` is already computed against canonical
+    // (non-alias) files only, so it composes cleanly with either base.
     const visibleSize = $derived(
         filterCrossDevice
-            ? source.total_size - source.cross_dup_size
-            : source.total_size
+            ? source.physical_size - source.cross_dup_size
+            : source.physical_size
     );
 
     async function load() {
@@ -176,6 +179,15 @@
         class="shrink-0 px-2 pt-2 pb-1 ps-7 border-b-1 font-heading text-xs tabular-nums text-muted-foreground">
         {visibleFileCount} files · {formatBytes(visibleSize)}
         {#if source.kind === 'scan'}· scanned{/if}
+        {#if source.alias_bytes > 0}
+            <span
+                class="text-muted-foreground/70"
+                title="{formatBytes(
+                    source.alias_bytes
+                )} of this device's logical size comes from hardlink aliases -- the same physical bytes under more than one name. Counted once here.">
+                (-{formatBytes(source.alias_bytes)} hardlinked, counts once)
+            </span>
+        {/if}
     </div>
 
     {#if expanded}

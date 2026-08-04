@@ -60,6 +60,14 @@ pub struct Source {
     pub cross_dup_size: i64,
     #[serde(default)]
     pub cross_dup_file_count: i64,
+    /// `total_size` minus bytes double-counted by hardlink alias sets. This
+    /// is what the UI should display as the device's real disk usage.
+    #[serde(default)]
+    pub physical_size: i64,
+    /// Bytes among `total_size` that belong to non-canonical hardlink
+    /// aliases (`(k-1) * size` per alias set).
+    #[serde(default)]
+    pub alias_bytes: i64,
 }
 
 /// A flattened filesystem node stored in the database.
@@ -102,6 +110,16 @@ pub struct Node {
     /// `dup_pct > 0`) -- gates whether "Locate duplicates" has anything to find.
     #[serde(default)]
     pub in_folder_group: bool,
+    /// Canonical node id when this is a hardlink alias (a non-canonical
+    /// name for a physical file that also exists under another name).
+    #[serde(default)]
+    pub alias_of: Option<i64>,
+    /// Whether this node is part of a hardlink alias set at all -- either
+    /// an alias (`alias_of` set) or the canonical target of one or more
+    /// aliases. Drives the "link" badge in the tree UI, which takes
+    /// precedence over the normal "dup" badge for these nodes.
+    #[serde(default)]
+    pub is_hardlink: bool,
 }
 
 /// A group of nodes that are likely duplicates of one another.

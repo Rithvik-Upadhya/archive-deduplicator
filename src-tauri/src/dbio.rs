@@ -108,7 +108,7 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
             let mut src_id_map: HashMap<i64, i64> = HashMap::new();
             {
                 let mut stmt = tx.prepare(
-                    "SELECT id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded
+                    "SELECT id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes
                      FROM ext.sources WHERE workspace_id = ?1",
                 )?;
                 let rows: Vec<(
@@ -122,72 +122,10 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                     i64,
                     i64,
                     i64,
+                    i64,
+                    i64,
                 )> = stmt
                     .query_map(params![old_ws_id], |r| {
-                        Ok((
-                            r.get(0)?,
-                            r.get(1)?,
-                            r.get(2)?,
-                            r.get(3)?,
-                            r.get(4)?,
-                            r.get(5)?,
-                            r.get(6)?,
-                            r.get(7)?,
-                            r.get(8)?,
-                            r.get(9)?,
-                        ))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                for (
-                    old_id,
-                    kind,
-                    label,
-                    device_label,
-                    orig_root_path,
-                    dev_id,
-                    imported_at,
-                    total_size,
-                    file_count,
-                    excluded,
-                ) in rows
-                {
-                    tx.execute(
-                        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                        params![new_ws_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded],
-                    )?;
-                    let new_id = tx.last_insert_rowid();
-                    src_id_map.insert(old_id, new_id);
-                    sources_added += 1;
-                }
-            }
-
-            // --- nodes (per source, preserving parent hierarchy via id map) ---
-            let mut node_id_map: HashMap<i64, i64> = HashMap::new();
-            for (&old_src_id, &new_src_id) in src_id_map.clone().iter() {
-                // Nodes must be inserted in an order where parents precede
-                // children. `id` order is guaranteed to satisfy this since
-                // parent rows are always created (and thus assigned a lower
-                // autoincrement id) before their children during scanning.
-                let mut stmt = tx.prepare(
-                    "SELECT id, parent_id, name, rel_path, type, size, mtime, inode, dev, depth, subtree_size, subtree_file_count
-                     FROM ext.nodes WHERE source_id = ?1 ORDER BY id",
-                )?;
-                let rows: Vec<(
-                    i64,
-                    Option<i64>,
-                    String,
-                    String,
-                    String,
-                    i64,
-                    Option<String>,
-                    Option<i64>,
-                    Option<i64>,
-                    i64,
-                    i64,
-                    i64,
-                )> = stmt
-                    .query_map(params![old_src_id], |r| {
                         Ok((
                             r.get(0)?,
                             r.get(1)?,
@@ -206,6 +144,86 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 for (
                     old_id,
+                    kind,
+                    label,
+                    device_label,
+                    orig_root_path,
+                    dev_id,
+                    imported_at,
+                    total_size,
+                    file_count,
+                    excluded,
+                    physical_size,
+                    alias_bytes,
+                ) in rows
+                {
+                    tx.execute(
+                        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        params![new_ws_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes],
+                    )?;
+                    let new_id = tx.last_insert_rowid();
+                    src_id_map.insert(old_id, new_id);
+                    sources_added += 1;
+                }
+            }
+
+            // --- nodes (per source, preserving parent hierarchy via id map) ---
+            let mut node_id_map: HashMap<i64, i64> = HashMap::new();
+            for (&old_src_id, &new_src_id) in src_id_map.clone().iter() {
+                // Nodes must be inserted in an order where parents precede
+                // children. `id` order is guaranteed to satisfy this since
+                // parent rows are always created (and thus assigned a lower
+                // autoincrement id) before their children during scanning.
+                let mut stmt = tx.prepare(
+                    "SELECT id, parent_id, name, rel_path, type, size, mtime, inode, dev, depth, subtree_size, subtree_file_count, inode_trusted, alias_of
+                     FROM ext.nodes WHERE source_id = ?1 ORDER BY id",
+                )?;
+                let rows: Vec<(
+                    i64,
+                    Option<i64>,
+                    String,
+                    String,
+                    String,
+                    i64,
+                    Option<String>,
+                    Option<i64>,
+                    Option<i64>,
+                    i64,
+                    i64,
+                    i64,
+                    i64,
+                    Option<i64>,
+                )> = stmt
+                    .query_map(params![old_src_id], |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                            r.get(6)?,
+                            r.get(7)?,
+                            r.get(8)?,
+                            r.get(9)?,
+                            r.get(10)?,
+                            r.get(11)?,
+                            r.get(12)?,
+                            r.get(13)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                // A hardlink alias's `alias_of` can reference a node with a
+                // *lower* rel_path but not necessarily a lower id (the
+                // canonical is chosen by rel_path in `links.rs`, not by scan/
+                // insert order), so unlike `parent_id` it cannot always be
+                // resolved against `node_id_map` while still walking in id
+                // order. Insert every node first, then backfill `alias_of`
+                // in a second pass once every old id has a new id mapped.
+                let mut pending_alias_of: Vec<(i64, i64)> = Vec::new(); // (new_id, old_alias_of)
+                for (
+                    old_id,
                     parent_id,
                     name,
                     rel_path,
@@ -217,17 +235,30 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                     depth,
                     subtree_size,
                     subtree_file_count,
+                    inode_trusted,
+                    alias_of,
                 ) in rows
                 {
                     let new_parent_id = parent_id.and_then(|p| node_id_map.get(&p).copied());
                     tx.execute(
-                        "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, mtime, inode, dev, depth, subtree_size, subtree_file_count)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                        params![new_src_id, new_parent_id, name, rel_path, ntype, size, mtime, inode, dev, depth, subtree_size, subtree_file_count],
+                        "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, mtime, inode, dev, depth, subtree_size, subtree_file_count, inode_trusted)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                        params![new_src_id, new_parent_id, name, rel_path, ntype, size, mtime, inode, dev, depth, subtree_size, subtree_file_count, inode_trusted],
                     )?;
                     let new_id = tx.last_insert_rowid();
                     node_id_map.insert(old_id, new_id);
+                    if let Some(old_alias_of) = alias_of {
+                        pending_alias_of.push((new_id, old_alias_of));
+                    }
                     nodes_added += 1;
+                }
+                for (new_id, old_alias_of) in pending_alias_of {
+                    if let Some(&new_alias_of) = node_id_map.get(&old_alias_of) {
+                        tx.execute(
+                            "UPDATE nodes SET alias_of = ?1 WHERE id = ?2",
+                            params![new_alias_of, new_id],
+                        )?;
+                    }
                 }
             }
 
@@ -445,7 +476,19 @@ pub fn copy_source_to_workspace(
 ) -> rusqlite::Result<i64> {
     let tx = conn.transaction()?;
 
-    let (kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded): (
+    let (
+        kind,
+        label,
+        device_label,
+        orig_root_path,
+        dev_id,
+        imported_at,
+        total_size,
+        file_count,
+        excluded,
+        physical_size,
+        alias_bytes,
+    ): (
         String,
         String,
         String,
@@ -455,8 +498,10 @@ pub fn copy_source_to_workspace(
         i64,
         i64,
         i64,
+        i64,
+        i64,
     ) = tx.query_row(
-        "SELECT kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded
+        "SELECT kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes
          FROM sources WHERE id = ?1",
         params![source_id],
         |r| {
@@ -470,13 +515,15 @@ pub fn copy_source_to_workspace(
                 r.get(6)?,
                 r.get(7)?,
                 r.get(8)?,
+                r.get(9)?,
+                r.get(10)?,
             ))
         },
     )?;
 
     tx.execute(
-        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             target_workspace_id,
             kind,
@@ -487,7 +534,9 @@ pub fn copy_source_to_workspace(
             imported_at,
             total_size,
             file_count,
-            excluded
+            excluded,
+            physical_size,
+            alias_bytes
         ],
     )?;
     let new_source_id = tx.last_insert_rowid();
@@ -505,9 +554,11 @@ pub fn copy_source_to_workspace(
         i64,
         i64,
         i64,
+        i64,
+        Option<i64>,
     )> = {
         let mut stmt = tx.prepare(
-            "SELECT id, parent_id, name, rel_path, type, size, mtime, inode, dev, depth, subtree_size, subtree_file_count
+            "SELECT id, parent_id, name, rel_path, type, size, mtime, inode, dev, depth, subtree_size, subtree_file_count, inode_trusted, alias_of
              FROM nodes WHERE source_id = ?1 ORDER BY id",
         )?;
         stmt.query_map(params![source_id], |r| {
@@ -524,12 +575,18 @@ pub fn copy_source_to_workspace(
                 r.get(9)?,
                 r.get(10)?,
                 r.get(11)?,
+                r.get(12)?,
+                r.get(13)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?
     };
 
     let mut node_id_map: HashMap<i64, i64> = HashMap::new();
+    // See the matching comment in `import_merge`: `alias_of` cannot always be
+    // resolved while inserting in id order (the canonical isn't necessarily
+    // the lowest-id member of its alias set), so backfill it in a second pass.
+    let mut pending_alias_of: Vec<(i64, i64)> = Vec::new();
     for (
         old_id,
         parent_id,
@@ -543,12 +600,14 @@ pub fn copy_source_to_workspace(
         depth,
         subtree_size,
         subtree_file_count,
+        inode_trusted,
+        alias_of,
     ) in rows
     {
         let new_parent_id = parent_id.and_then(|p| node_id_map.get(&p).copied());
         tx.execute(
-            "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, mtime, inode, dev, depth, subtree_size, subtree_file_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, mtime, inode, dev, depth, subtree_size, subtree_file_count, inode_trusted)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 new_source_id,
                 new_parent_id,
@@ -561,10 +620,23 @@ pub fn copy_source_to_workspace(
                 dev,
                 depth,
                 subtree_size,
-                subtree_file_count
+                subtree_file_count,
+                inode_trusted
             ],
         )?;
-        node_id_map.insert(old_id, tx.last_insert_rowid());
+        let new_id = tx.last_insert_rowid();
+        node_id_map.insert(old_id, new_id);
+        if let Some(old_alias_of) = alias_of {
+            pending_alias_of.push((new_id, old_alias_of));
+        }
+    }
+    for (new_id, old_alias_of) in pending_alias_of {
+        if let Some(&new_alias_of) = node_id_map.get(&old_alias_of) {
+            tx.execute(
+                "UPDATE nodes SET alias_of = ?1 WHERE id = ?2",
+                params![new_alias_of, new_id],
+            )?;
+        }
     }
 
     tx.commit()?;

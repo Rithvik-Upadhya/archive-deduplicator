@@ -65,7 +65,7 @@ export const getGroups = (args: {
     workspaceId: number;
     minConfidence: number;
     minSize: number;
-    kind?: 'file' | 'folder';
+    kind?: 'file' | 'folder' | 'hardlink';
     sort?: GroupSort;
     offset: number;
     limit: number;
