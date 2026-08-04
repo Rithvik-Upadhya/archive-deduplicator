@@ -214,42 +214,45 @@
                                             ? 'Include in analysis'
                                             : 'Exclude from analysis'}</span>
                                 </Button>
-                                <DropdownMenu.Root>
-                                    <DropdownMenu.Trigger>
-                                        {#snippet child({
-                                            props,
-                                        }: {
-                                            props: Record<string, unknown>;
-                                        })}
-                                            <Button
-                                                {...props}
-                                                variant="ghost"
-                                                size="icon"
-                                                class="size-6 opacity-0 transition-opacity disabled:opacity-0 group-hover/device:opacity-100"
-                                                disabled={app.workspaces
-                                                    .length <= 1}
-                                                title="Copy to workspace">
-                                                <Icon icon="ph:copy-fill" />
-                                                <span class="sr-only"
-                                                    >Copy to workspace</span>
-                                            </Button>
-                                        {/snippet}
-                                    </DropdownMenu.Trigger>
-                                    <DropdownMenu.Content align="end">
-                                        <DropdownMenu.Group>
-                                            <DropdownMenu.GroupHeading
-                                                >Copy to</DropdownMenu.GroupHeading>
-                                            {#each app.workspaces.filter(w => w.id !== app.activeWorkspaceId) as ws (ws.id)}
-                                                <DropdownMenu.Item
-                                                    onSelect={() =>
-                                                        copyToWorkspace(s, ws)}>
-                                                    <span class="truncate"
-                                                        >{ws.name}</span>
-                                                </DropdownMenu.Item>
-                                            {/each}
-                                        </DropdownMenu.Group>
-                                    </DropdownMenu.Content>
-                                </DropdownMenu.Root>
+                                {#if app.workspaces.length > 1}
+                                    <DropdownMenu.Root>
+                                        <DropdownMenu.Trigger>
+                                            {#snippet child({
+                                                props,
+                                            }: {
+                                                props: Record<string, unknown>;
+                                            })}
+                                                <Button
+                                                    {...props}
+                                                    variant="ghost"
+                                                    size="icon"
+                                                    class="size-6 opacity-0 transition-opacity group-hover/device:opacity-100"
+                                                    title="Copy to workspace">
+                                                    <Icon icon="ph:copy-fill" />
+                                                    <span class="sr-only"
+                                                        >Copy to workspace</span>
+                                                </Button>
+                                            {/snippet}
+                                        </DropdownMenu.Trigger>
+                                        <DropdownMenu.Content align="end">
+                                            <DropdownMenu.Group>
+                                                <DropdownMenu.GroupHeading
+                                                    >Copy to</DropdownMenu.GroupHeading>
+                                                {#each app.workspaces.filter(w => w.id !== app.activeWorkspaceId) as ws (ws.id)}
+                                                    <DropdownMenu.Item
+                                                        onSelect={() =>
+                                                            copyToWorkspace(
+                                                                s,
+                                                                ws
+                                                            )}>
+                                                        <span class="truncate"
+                                                            >{ws.name}</span>
+                                                    </DropdownMenu.Item>
+                                                {/each}
+                                            </DropdownMenu.Group>
+                                        </DropdownMenu.Content>
+                                    </DropdownMenu.Root>
+                                {/if}
                                 <Button
                                     variant="ghost"
                                     size="icon"
