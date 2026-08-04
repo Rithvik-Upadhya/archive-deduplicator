@@ -1,6 +1,7 @@
 <script lang="ts">
     import { getTree } from '$lib/api';
     import { app } from '$lib/stores/app.svelte';
+    import { deviceCollapsed, deviceFilterOn } from '$lib/stores/treeExpansion.svelte';
     import type { Source, TreeNode } from '$lib/types';
     import { DUP_BADGE, dupLevel, formatBytes, pct } from '$lib/util';
     import type { TreeSelection } from '$lib/stores/selection.svelte';
@@ -23,21 +24,50 @@
         selection?: TreeSelection<DragMeta>;
     }
 
-    let { source, onselect, onlocate, draggable = false, selection }: Props =
-        $props();
+    let {
+        source,
+        onselect,
+        onlocate,
+        draggable = false,
+        selection,
+    }: Props = $props();
 
     let roots = $state<TreeNode[] | null>(null);
-    let expanded = $state(true);
+    const expanded = $derived(!deviceCollapsed.has(source.id));
     let editing = $state(false);
     /** Populated when a rename begins. */
     let editValue = $state('');
     let confirmingDelete = $state(false);
+    /** Hides nodes whose only duplicates live on another device. */
+    const filterCrossDevice = $derived(deviceFilterOn.has(source.id));
+
+    const visibleRoots = $derived(
+        roots?.filter(n => !filterCrossDevice || !n.cross_dup) ?? null
+    );
+    const visibleFileCount = $derived(
+        filterCrossDevice
+            ? source.file_count - source.cross_dup_file_count
+            : source.file_count
+    );
+    const visibleSize = $derived(
+        filterCrossDevice
+            ? source.total_size - source.cross_dup_size
+            : source.total_size
+    );
 
     async function load() {
         roots = await getTree(app.activeWorkspaceId!, source.id, null);
     }
 
+    /** Tracks which `treeVersion` `roots` reflects, so a dedup rerun (or any
+     *  other workspace reload) invalidates the cache without discarding it
+     *  on every unrelated re-render. */
+    let loadedVersion = -1;
     $effect(() => {
+        if (app.treeVersion !== loadedVersion) {
+            loadedVersion = app.treeVersion;
+            roots = null;
+        }
         if (expanded && roots === null) load();
     });
 
@@ -64,16 +94,14 @@
     }
 </script>
 
-<div
-    class="mb-2 flex min-h-0 flex-col overflow-hidden rounded-md border bg-card"
-    class:grow={expanded}>
+<div class="mb-2 flex flex-col rounded-md border bg-card" class:grow={expanded}>
     <div class="flex shrink-0 items-center gap-1.5 bg-muted/50 px-2 py-1.5">
         <Button
             variant="ghost"
             size="icon"
             class="size-5 shrink-0 text-muted-foreground transition-transform duration-150"
             aria-label="Toggle device"
-            onclick={() => (expanded = !expanded)}>
+            onclick={() => deviceCollapsed.toggle(source.id)}>
             <Icon
                 icon="ph:caret-right-bold"
                 class={expanded
@@ -106,14 +134,32 @@
             </button>
         {/if}
 
-        <Badge
-            variant="outline"
-            class="shrink-0 px-1.5 py-0 font-heading text-[0.65rem] tabular-nums {DUP_BADGE[
-                dupLevel(pct(source.duplicated_pct))
-            ]}"
-            title="Percentage of bytes duplicated elsewhere">
-            {pct(source.duplicated_pct)}% dup
-        </Badge>
+        {#if !filterCrossDevice}
+            <Badge
+                variant="outline"
+                class="shrink-0 px-1.5 py-0 font-heading text-[0.65rem] tabular-nums {DUP_BADGE[
+                    dupLevel(pct(source.duplicated_pct))
+                ]}"
+                title="Percentage of bytes duplicated elsewhere">
+                {pct(source.duplicated_pct)}% dup
+            </Badge>
+        {/if}
+        <Button
+            variant="ghost"
+            size="icon"
+            class="size-6 shrink-0 {filterCrossDevice
+                ? 'text-brand'
+                : 'text-muted-foreground'}"
+            aria-label={filterCrossDevice
+                ? 'Disable filter to include duplicated files'
+                : 'Hide files that have a duplicate on another device'}
+            aria-pressed={filterCrossDevice}
+            title={filterCrossDevice
+                ? 'Disable filter to include duplicated files'
+                : 'Hide files that have a duplicate on another device'}
+            onclick={() => deviceFilterOn.toggle(source.id)}>
+            <Icon icon={filterCrossDevice ? 'ph:funnel-fill' : 'ph:funnel'} />
+        </Button>
         <!-- Destructive tint is held back until hover so the only permanently
              red things on screen are the ones reporting duplicate findings. -->
         <Button
@@ -128,7 +174,7 @@
 
     <div
         class="shrink-0 px-2 pt-2 pb-1 ps-7 border-b-1 font-heading text-xs tabular-nums text-muted-foreground">
-        {source.file_count} files · {formatBytes(source.total_size)}
+        {visibleFileCount} files · {formatBytes(visibleSize)}
         {#if source.kind === 'scan'}· scanned{/if}
     </div>
 
@@ -145,15 +191,20 @@
                     <div class="px-2 py-1.5 text-xs text-muted-foreground">
                         Empty
                     </div>
+                {:else if visibleRoots && visibleRoots.length === 0}
+                    <div class="px-2 py-1.5 text-xs text-muted-foreground">
+                        All files on this device have duplicates elsewhere
+                    </div>
                 {:else}
-                    {#each roots as node (node.id)}
+                    {#each visibleRoots ?? [] as node (node.id)}
                         <TreeItem
                             {node}
                             workspaceId={app.activeWorkspaceId!}
                             {onselect}
                             {onlocate}
                             {draggable}
-                            {selection} />
+                            {selection}
+                            {filterCrossDevice} />
                     {/each}
                 {/if}
             </div>

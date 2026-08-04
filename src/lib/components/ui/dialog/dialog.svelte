@@ -5,4 +5,4 @@
         $props();
 </script>
 
-<DialogPrimitive.Root bind:open {...restProps} class="antialiased" />
+<DialogPrimitive.Root bind:open {...restProps} />

@@ -2,6 +2,7 @@
     import type { ConsolidationNode } from '$lib/types';
     import { formatBytes } from '$lib/util';
     import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
+    import { consolidationTreeExpanded } from '$lib/stores/treeExpansion.svelte';
     import Self from './ConsolidationNodeItem.svelte';
     import Icon from '@iconify/svelte';
     import { Button } from '$lib/components/ui/button';
@@ -36,7 +37,7 @@
             : node.name
     );
 
-    let expanded = $state(false);
+    const expanded = $derived(consolidationTreeExpanded.has(node.id));
     let dragOver = $state(false);
     let editing = $state(false);
     let editValue = $state('');
@@ -58,7 +59,7 @@
         e.dataTransfer.effectAllowed = 'move';
     }
 
-    function onRowClick(e: MouseEvent) {
+    function onRowClick(e: MouseEvent | KeyboardEvent) {
         if (editing) return;
         selection.click(node.id, e);
     }
@@ -97,7 +98,8 @@
             dragOver = false;
         }}
         ondrop={onDrop}
-        onclick={onRowClick}>
+        onclick={onRowClick}
+        onkeydown={e => e.key === 'Enter' && onRowClick(e)}>
         <button
             type="button"
             class="inline-flex w-3 shrink-0 justify-center text-muted-foreground transition-transform duration-150"
@@ -106,7 +108,7 @@
             aria-label="Toggle"
             onclick={e => {
                 e.stopPropagation();
-                expanded = !expanded;
+                consolidationTreeExpanded.toggle(node.id);
             }}>
             <Icon icon="ph:caret-right-bold" />
         </button>

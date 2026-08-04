@@ -115,7 +115,9 @@ UI-relevant conventions:
 - View switching is `app.view` (`dedup` | `consolidate` | `pathlimits`), branched in
   `+page.svelte`; `VIEWS` in the store drives both sidebar and breadcrumb.
 - Anything that should survive a restart goes through `app_state_get`/`app_state_set` (a
-  key/value table): active workspace, current view, dedup sliders, `dedup_stale`.
+  global key/value table): active workspace, current view. Per-workspace settings (dedup
+  sliders, `dedup_stale`) instead go through `workspace_state_get`/`workspace_state_set`, keyed
+  by `(workspace_id, key)`, so they don't bleed across workspaces.
 - Match groups are paged (50/page, infinite scroll). `refreshGroups` resets, `loadMoreGroups`
   appends — filter changes must go through `refreshGroups`.
 - Any mutation that invalidates matching sets `dedupStale` so the UI nudges a re-run.

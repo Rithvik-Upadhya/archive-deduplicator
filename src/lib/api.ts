@@ -123,6 +123,11 @@ export const appStateGet = (key: string) =>
 export const appStateSet = (key: string, value: string) =>
     invoke<void>('app_state_set', { key, value });
 
+export const workspaceStateGet = (workspaceId: number, key: string) =>
+    invoke<string | null>('workspace_state_get', { workspaceId, key });
+export const workspaceStateSet = (workspaceId: number, key: string, value: string) =>
+    invoke<void>('workspace_state_set', { workspaceId, key, value });
+
 // --- Database export / import ---
 
 export const dbExport = (path: string) => invoke<void>('db_export', { path });

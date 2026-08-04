@@ -32,7 +32,7 @@ class AppState {
     sources = $state<Source[]>([]);
     view = $state<ViewName>('dedup');
 
-    // Dedup tuning parameters (persisted in app_state).
+    // Dedup tuning parameters (persisted per-workspace in workspace_state).
     minSizeKb = $state(4);
     minConfidence = $state(40);
 
@@ -46,6 +46,11 @@ class AppState {
 
     /** True when sources changed after the last dedup run (nudges a re-run). */
     dedupStale = $state(false);
+
+    /** Bumped every `loadWorkspace()`, so tree panels know their cached
+     *  `roots`/`children` (fetched via `getTree`) may be stale and should
+     *  refetch -- e.g. after a dedup rerun changes duplicate annotations. */
+    treeVersion = $state(0);
 
     running = $state(false);
     loading = $state(true);
@@ -76,12 +81,6 @@ class AppState {
 
             const view = (await api.appStateGet('view')) as ViewName | null;
             if (view) this.view = view;
-            const minSize = await api.appStateGet('min_size_kb');
-            if (minSize) this.minSizeKb = Number(minSize);
-            const minConf = await api.appStateGet('min_confidence');
-            if (minConf) this.minConfidence = Number(minConf);
-            const stale = await api.appStateGet('dedup_stale');
-            this.dedupStale = stale === '1';
 
             await this.loadWorkspace();
         } finally {
@@ -92,14 +91,38 @@ class AppState {
     async loadWorkspace() {
         if (this.activeWorkspaceId == null) return;
         const ws = this.activeWorkspaceId;
+        const [minSize, minConf, stale] = await Promise.all([
+            api.workspaceStateGet(ws, 'min_size_kb'),
+            api.workspaceStateGet(ws, 'min_confidence'),
+            api.workspaceStateGet(ws, 'dedup_stale'),
+        ]);
+        this.minSizeKb = minSize ? Number(minSize) : 4;
+        this.minConfidence = minConf ? Number(minConf) : 40;
+        this.dedupStale = stale === '1';
+
         this.sources = await api.sourceList(ws);
         this.deviceStats = await api.getDeviceStats(ws);
         await this.refreshGroups();
+        this.treeVersion++;
     }
 
-    private async setDedupStale(stale: boolean) {
+    /** Persist the current min-size/min-confidence tuning for the active
+     *  workspace. */
+    async saveTuning() {
+        if (this.activeWorkspaceId == null) return;
+        const ws = this.activeWorkspaceId;
+        await api.workspaceStateSet(ws, 'min_size_kb', String(this.minSizeKb));
+        await api.workspaceStateSet(ws, 'min_confidence', String(this.minConfidence));
+    }
+
+    async setDedupStale(stale: boolean) {
+        if (this.activeWorkspaceId == null) return;
         this.dedupStale = stale;
-        await api.appStateSet('dedup_stale', stale ? '1' : '0');
+        await api.workspaceStateSet(
+            this.activeWorkspaceId,
+            'dedup_stale',
+            stale ? '1' : '0',
+        );
     }
 
     async setView(view: ViewName) {
@@ -175,8 +198,7 @@ class AppState {
         if (this.activeWorkspaceId == null) return;
         this.running = true;
         try {
-            await api.appStateSet('min_size_kb', String(this.minSizeKb));
-            await api.appStateSet('min_confidence', String(this.minConfidence));
+            await this.saveTuning();
             await api.runDedup(
                 this.activeWorkspaceId,
                 this.minSizeKb * 1024,

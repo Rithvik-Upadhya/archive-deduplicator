@@ -1,7 +1,7 @@
 <script lang="ts">
-    import { untrack } from 'svelte';
     import type { PathTreeNode } from '$lib/types';
     import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
+    import { consolidationTreeExpanded } from '$lib/stores/treeExpansion.svelte';
     import Self from './PathTreeItem.svelte';
     import Icon from '@iconify/svelte';
     import { Button } from '$lib/components/ui/button';
@@ -34,10 +34,12 @@
     const kids = $derived(childrenOf(node.id));
     const isLeaf = $derived(kids.length === 0);
 
-    // One-time initialization, not a reactive re-sync: a branch that only
-    // becomes over-limit after the slider moves shouldn't retroactively
-    // snap open, and one the user collapsed shouldn't reopen.
-    let expanded = $state(untrack(() => node.over_limit));
+    // Applied once, on this node's first-ever encounter, not a reactive
+    // re-sync: a branch that only becomes over-limit after the slider moves
+    // shouldn't retroactively snap open, and one the user collapsed
+    // shouldn't reopen just because this component remounted.
+    consolidationTreeExpanded.seedOnce(node.id, node.over_limit);
+    const expanded = $derived(consolidationTreeExpanded.has(node.id));
     let editing = $state(false);
     let editValue = $state('');
     let dragOver = $state(false);
@@ -61,7 +63,7 @@
         e.dataTransfer.effectAllowed = 'move';
     }
 
-    function onRowClick(e: MouseEvent) {
+    function onRowClick(e: MouseEvent | KeyboardEvent) {
         if (editing) return;
         selection.click(node.id, e);
     }
@@ -75,7 +77,7 @@
         if (isDir) {
             // Otherwise the moved node lands inside a still-collapsed
             // directory and silently vanishes from view.
-            expanded = true;
+            consolidationTreeExpanded.add(node.id);
         }
         ondropInto(isDir ? node.id : node.parent_id, e);
     }
@@ -105,7 +107,8 @@
             dragOver = false;
         }}
         ondrop={onDrop}
-        onclick={onRowClick}>
+        onclick={onRowClick}
+        onkeydown={e => e.key === 'Enter' && onRowClick(e)}>
         <button
             type="button"
             class="inline-flex w-3 shrink-0 justify-center text-muted-foreground transition-transform duration-150"
@@ -114,7 +117,7 @@
             aria-label="Toggle"
             onclick={e => {
                 e.stopPropagation();
-                expanded = !expanded;
+                consolidationTreeExpanded.toggle(node.id);
             }}>
             <Icon icon="ph:caret-right-bold" />
         </button>

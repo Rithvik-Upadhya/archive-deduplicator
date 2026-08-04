@@ -54,6 +54,8 @@ pub fn run() {
             commands::pathfix_rename,
             commands::app_state_get,
             commands::app_state_set,
+            commands::workspace_state_get,
+            commands::workspace_state_set,
             commands::db_export,
             commands::db_import,
         ])

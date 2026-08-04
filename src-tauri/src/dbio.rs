@@ -231,21 +231,40 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
             // --- dup_annot (per-node duplicate annotation cache) ---
             {
                 let mut stmt = tx.prepare(
-                    "SELECT n.id, d.has_dup, d.dup_pct FROM ext.dup_annot d
+                    "SELECT n.id, d.has_dup, d.dup_pct, d.cross_dup, d.cross_dup_size, d.cross_dup_file_count, d.in_folder_group
+                     FROM ext.dup_annot d
                      JOIN ext.nodes n ON n.id = d.node_id
                      JOIN ext.sources s ON s.id = n.source_id
                      WHERE s.workspace_id = ?1",
                 )?;
-                let rows: Vec<(i64, i64, f64)> = stmt
+                let rows: Vec<(i64, i64, f64, i64, i64, i64, i64)> = stmt
                     .query_map(params![old_ws_id], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                            r.get(6)?,
+                        ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
-                for (old_node_id, has_dup, dup_pct) in rows {
+                for (
+                    old_node_id,
+                    has_dup,
+                    dup_pct,
+                    cross_dup,
+                    cross_dup_size,
+                    cross_dup_file_count,
+                    in_folder_group,
+                ) in rows
+                {
                     if let Some(&new_node_id) = node_id_map.get(&old_node_id) {
                         tx.execute(
-                            "INSERT OR IGNORE INTO dup_annot (node_id, has_dup, dup_pct) VALUES (?1, ?2, ?3)",
-                            params![new_node_id, has_dup, dup_pct],
+                            "INSERT OR IGNORE INTO dup_annot (node_id, has_dup, dup_pct, cross_dup, cross_dup_size, cross_dup_file_count, in_folder_group)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![new_node_id, has_dup, dup_pct, cross_dup, cross_dup_size, cross_dup_file_count, in_folder_group],
                         )?;
                     }
                 }

@@ -126,12 +126,25 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             value TEXT NOT NULL
         );
 
+        -- Per-workspace settings (dedup tuning, staleness), unlike app_state
+        -- above which is app-wide (active workspace, current view).
+        CREATE TABLE IF NOT EXISTS workspace_state (
+            workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            PRIMARY KEY (workspace_id, key)
+        );
+
         -- Precomputed duplicate annotations per node, rebuilt after each dedup
         -- run so tree browsing never has to recompute them on the fly.
         CREATE TABLE IF NOT EXISTS dup_annot (
             node_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
             has_dup INTEGER NOT NULL DEFAULT 0,
-            dup_pct REAL NOT NULL DEFAULT 0
+            dup_pct REAL NOT NULL DEFAULT 0,
+            cross_dup INTEGER NOT NULL DEFAULT 0,
+            cross_dup_size INTEGER NOT NULL DEFAULT 0,
+            cross_dup_file_count INTEGER NOT NULL DEFAULT 0,
+            in_folder_group INTEGER NOT NULL DEFAULT 0
         );
         "#,
     )?;

@@ -49,6 +49,13 @@ pub struct Source {
     /// Percentage (0-100) of this device's bytes that appear duplicated elsewhere.
     #[serde(default)]
     pub duplicated_pct: f64,
+    /// Bytes among `total_size` that are cross-device duplicates -- what the
+    /// "exclusive to this device" filter hides. Subtract from `total_size` /
+    /// `file_count` to get the filtered totals.
+    #[serde(default)]
+    pub cross_dup_size: i64,
+    #[serde(default)]
+    pub cross_dup_file_count: i64,
 }
 
 /// A flattened filesystem node stored in the database.
@@ -74,6 +81,23 @@ pub struct Node {
     /// For directories: fraction (0-100) of subtree bytes that appear duplicated.
     #[serde(default)]
     pub dup_pct: f64,
+    /// Whether the "exclusive to this device" filter should hide this node:
+    /// for a file, a duplicate exists on a different device (source_id); for
+    /// a directory, every leaf in its subtree is such a file.
+    #[serde(default)]
+    pub cross_dup: bool,
+    /// Directories only: byte size / file count within `subtree_size` /
+    /// `subtree_file_count` that `cross_dup` would hide, so the UI can show
+    /// filtered totals without re-walking the tree client-side.
+    #[serde(default)]
+    pub cross_dup_size: i64,
+    #[serde(default)]
+    pub cross_dup_file_count: i64,
+    /// Directories only: whether this directory is a genuine member of a
+    /// clustered folder-kind match group (as opposed to merely having
+    /// `dup_pct > 0`) -- gates whether "Locate duplicates" has anything to find.
+    #[serde(default)]
+    pub in_folder_group: bool,
 }
 
 /// A group of nodes that are likely duplicates of one another.

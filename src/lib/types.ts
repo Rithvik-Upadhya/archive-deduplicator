@@ -23,6 +23,8 @@ export interface Source {
     total_size: number;
     file_count: number;
     duplicated_pct: number;
+    cross_dup_size: number;
+    cross_dup_file_count: number;
 }
 
 export interface TreeNode {
@@ -41,6 +43,10 @@ export interface TreeNode {
     subtree_file_count: number;
     has_duplicate: boolean;
     dup_pct: number;
+    cross_dup: boolean;
+    cross_dup_size: number;
+    cross_dup_file_count: number;
+    in_folder_group: boolean;
 }
 
 export interface MatchMember {

@@ -83,8 +83,8 @@
     }
 </script>
 
-<div class="flex flex-col gap-3">
-    <div class="flex flex-col gap-2">
+<div class="flex flex-row gap-3">
+    <div class="flex flex-col gap-2 border-r-1 pr-3">
         <Button
             variant="outline"
             class="justify-start"
@@ -114,15 +114,16 @@
     {#if busy}
         <p
             class="flex items-center gap-2 text-xs text-muted-foreground"
-            aria-live="polite">
+            aria-live="polite"
+            style="writing-mode: sideways-lr;">
             <Icon icon="ph:spinner-gap-fill" class="animate-spin" />
             Working…
         </p>
     {/if}
 
-    <Separator />
-
-    <h2 class="section-label">Devices</h2>
+    <h2 class="section-label text-center" style="writing-mode: sideways-lr;">
+        Devices
+    </h2>
 
     {#if app.sources.length === 0}
         <Empty.Root class="border border-dashed py-6">
@@ -137,7 +138,7 @@
             </Empty.Header>
         </Empty.Root>
     {:else}
-        <ul class="flex flex-col gap-1.5">
+        <ul class="flex flex-row gap-1.5 grow overflow-x-auto">
             {#each app.sources as s (s.id)}
                 <li
                     class="group/device flex flex-col gap-1 rounded-md border bg-card px-2 py-1.5 transition-colors hover:border-brand/40">
@@ -187,7 +188,9 @@
                     </div>
                     <Progress
                         value={pct(s.duplicated_pct)}
-                        class="h-1 {DUP_BAR[dupLevel(pct(s.duplicated_pct))]}" />
+                        class="h-1 {DUP_BAR[
+                            dupLevel(pct(s.duplicated_pct))
+                        ]}" />
                     <div
                         class="flex items-center justify-between font-heading text-[0.7rem] tabular-nums text-muted-foreground">
                         <span>{formatBytes(s.total_size)}</span>

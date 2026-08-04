@@ -21,7 +21,10 @@
     // Two independent selections: one for the source-device panel, one for
     // the consolidation tree -- separate id spaces and separate drag
     // "domains" (drag from source into consolidation, or move within it).
-    const sourceSelection = new TreeSelection<{ name: string; type: NodeType }>();
+    const sourceSelection = new TreeSelection<{
+        name: string;
+        type: NodeType;
+    }>();
     const consSelection = new TreeSelection();
 
     let showNewFolderDialog = $state(false);
@@ -192,16 +195,25 @@
             toast.error("Can't move a folder into itself.");
             return;
         }
-        const base = Math.max(0, ...childrenOf(newParentId).map(n => n.sort_order)) + 1;
+        const base =
+            Math.max(0, ...childrenOf(newParentId).map(n => n.sort_order)) + 1;
         for (let i = 0; i < topLevel.length; i++) {
             const nodeId = topLevel[i];
             const newSortOrder = base + i;
             try {
-                await api.consolidationMoveNode(nodeId, newParentId, newSortOrder);
+                await api.consolidationMoveNode(
+                    nodeId,
+                    newParentId,
+                    newSortOrder
+                );
                 nodes = nodes.map(n =>
                     n.id === nodeId
-                        ? { ...n, parent_id: newParentId, sort_order: newSortOrder }
-                        : n,
+                        ? {
+                              ...n,
+                              parent_id: newParentId,
+                              sort_order: newSortOrder,
+                          }
+                        : n
                 );
             } catch (err) {
                 toast.error(String(err));
@@ -211,7 +223,9 @@
     }
 
     function handleDrop(parentId: number | null, e: DragEvent) {
-        const consRaw = e.dataTransfer?.getData('application/x-dedup-cons-node');
+        const consRaw = e.dataTransfer?.getData(
+            'application/x-dedup-cons-node'
+        );
         if (consRaw) {
             const { ids } = JSON.parse(consRaw) as { ids: number[] };
             handleMoveManyWithin(ids, parentId);
@@ -290,9 +304,14 @@
                 </Empty.Header>
             </Empty.Root>
         {:else}
-            {#each app.sources as s (s.id)}
-                <DeviceTree source={s} draggable selection={sourceSelection} />
-            {/each}
+            <div class="flex flex-col overflow-y-auto overflow-x-hidden">
+                {#each app.sources as s (s.id)}
+                    <DeviceTree
+                        source={s}
+                        draggable
+                        selection={sourceSelection} />
+                {/each}
+            </div>
         {/if}
     </section>
 

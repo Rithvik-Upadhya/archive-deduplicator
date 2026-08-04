@@ -1,5 +1,7 @@
 <script lang="ts">
     import { getTree } from '$lib/api';
+    import { app } from '$lib/stores/app.svelte';
+    import { deviceTreeExpanded } from '$lib/stores/treeExpansion.svelte';
     import type { NodeType, TreeNode } from '$lib/types';
     import { DUP_BADGE, dupLevel, formatBytes, pct } from '$lib/util';
     import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
@@ -22,6 +24,8 @@
         /** Shared multi-select state, only used when `draggable` is set --
          *  DedupView's browsing tree stays single-select via `onselect`. */
         selection?: TreeSelection<DragMeta>;
+        /** Hides nodes whose only duplicates live on another device. */
+        filterCrossDevice?: boolean;
     }
 
     let {
@@ -31,28 +35,62 @@
         onlocate,
         draggable = false,
         selection,
+        filterCrossDevice = false,
     }: Props = $props();
 
-    let expanded = $state(false);
+    const expanded = $derived(deviceTreeExpanded.has(node.id));
     let children = $state<TreeNode[] | null>(null);
     let loading = $state(false);
 
-    const isDir = $derived(node.type === 'directory');
-    const showLocate = $derived(
-        !!onlocate && (node.has_duplicate || (isDir && node.dup_pct > 0))
+    const visibleChildren = $derived(
+        children?.filter(c => !filterCrossDevice || !c.cross_dup) ?? null
     );
 
-    async function toggleExpanded() {
-        expanded = !expanded;
-        if (isDir && expanded && children === null) {
-            loading = true;
-            try {
-                children = await getTree(workspaceId, node.source_id, node.id);
-            } finally {
-                loading = false;
-            }
+    const isDir = $derived(node.type === 'directory');
+    const visibleFileCount = $derived(
+        filterCrossDevice
+            ? node.subtree_file_count - node.cross_dup_file_count
+            : node.subtree_file_count
+    );
+    const visibleSize = $derived(
+        filterCrossDevice ? node.subtree_size - node.cross_dup_size : node.subtree_size
+    );
+    const showLocate = $derived(
+        !!onlocate && (isDir ? node.in_folder_group : node.has_duplicate)
+    );
+
+    async function loadChildren() {
+        loading = true;
+        try {
+            children = await getTree(workspaceId, node.source_id, node.id);
+        } finally {
+            loading = false;
         }
     }
+
+    async function toggleExpanded() {
+        const willExpand = !expanded;
+        deviceTreeExpanded.toggle(node.id);
+        if (isDir && willExpand && children === null) {
+            await loadChildren();
+        }
+    }
+
+    /** Tracks which `treeVersion` `children` reflects, so a dedup rerun (or
+     *  any other workspace reload) invalidates the cache and refetches it
+     *  while the node stays expanded, instead of leaving it stale. Collapsing
+     *  still leaves `children` cached for a free re-expand as long as the
+     *  version hasn't moved. */
+    let loadedVersion = -1;
+    $effect(() => {
+        if (app.treeVersion !== loadedVersion) {
+            loadedVersion = app.treeVersion;
+            children = null;
+        }
+        if (isDir && expanded && children === null && !loading) {
+            loadChildren();
+        }
+    });
 
     function onRowActivate(e: MouseEvent | KeyboardEvent) {
         if (selection) {
@@ -120,11 +158,9 @@
         {#if isDir}
             <span
                 class="ms-auto shrink-0 font-heading text-xs tabular-nums whitespace-nowrap text-muted-foreground">
-                {node.subtree_file_count} files · {formatBytes(
-                    node.subtree_size
-                )}
+                {visibleFileCount} files · {formatBytes(visibleSize)}
             </span>
-            {#if node.dup_pct > 0}
+            {#if !filterCrossDevice && node.dup_pct > 0}
                 <Badge
                     variant="outline"
                     class="shrink-0 px-1 py-0 font-heading text-[0.65rem] tabular-nums {DUP_BADGE[
@@ -171,15 +207,16 @@
                     <Icon icon="ph:spinner-gap-fill" class="animate-spin" />
                     Loading…
                 </div>
-            {:else if children}
-                {#each children as child (child.id)}
+            {:else if visibleChildren}
+                {#each visibleChildren as child (child.id)}
                     <Self
                         node={child}
                         {workspaceId}
                         {onselect}
                         {onlocate}
                         {draggable}
-                        {selection} />
+                        {selection}
+                        {filterCrossDevice} />
                 {/each}
             {/if}
         </div>

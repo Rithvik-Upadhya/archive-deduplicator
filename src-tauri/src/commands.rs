@@ -89,6 +89,8 @@ pub fn workspace_delete(db: State<Db>, id: i64) -> CmdResult<()> {
 pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
     let conn = db.0.lock().unwrap();
     let dup_by_src = rollup::duplicated_size_by_source(&conn, workspace_id).map_err(map_err)?;
+    let cross_dup_by_src =
+        rollup::cross_dup_size_by_source(&conn, workspace_id).map_err(map_err)?;
     let mut stmt = conn
         .prepare(
             "SELECT id, workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count
@@ -109,6 +111,8 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
                 total_size: r.get(8)?,
                 file_count: r.get(9)?,
                 duplicated_pct: 0.0,
+                cross_dup_size: 0,
+                cross_dup_file_count: 0,
             })
         })
         .map_err(map_err)?;
@@ -122,6 +126,9 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
         } else {
             0.0
         };
+        let (cross_size, cross_count) = cross_dup_by_src.get(&s.id).copied().unwrap_or((0, 0));
+        s.cross_dup_size = cross_size;
+        s.cross_dup_file_count = cross_count;
     }
     Ok(sources)
 }
@@ -161,6 +168,8 @@ pub fn import_tree_json(
         total_size: flat.total_size,
         file_count: flat.file_count,
         duplicated_pct: 0.0,
+        cross_dup_size: 0,
+        cross_dup_file_count: 0,
     })
 }
 
@@ -199,6 +208,8 @@ pub fn scan_folder(
         total_size: flat.total_size,
         file_count: flat.file_count,
         duplicated_pct: 0.0,
+        cross_dup_size: 0,
+        cross_dup_file_count: 0,
     })
 }
 
@@ -241,12 +252,14 @@ pub fn get_tree(
 
     let sql = if parent_id.is_some() {
         "SELECT n.id, n.source_id, n.parent_id, n.name, n.rel_path, n.type, n.size, n.mtime, n.inode, n.dev, n.depth, n.subtree_size, n.subtree_file_count,
-                COALESCE(d.has_dup, 0), COALESCE(d.dup_pct, 0)
+                COALESCE(d.has_dup, 0), COALESCE(d.dup_pct, 0), COALESCE(d.cross_dup, 0),
+                COALESCE(d.cross_dup_size, 0), COALESCE(d.cross_dup_file_count, 0), COALESCE(d.in_folder_group, 0)
          FROM nodes n LEFT JOIN dup_annot d ON d.node_id = n.id
          WHERE n.source_id = ?1 AND n.parent_id = ?2 ORDER BY n.type = 'file', n.name"
     } else {
         "SELECT n.id, n.source_id, n.parent_id, n.name, n.rel_path, n.type, n.size, n.mtime, n.inode, n.dev, n.depth, n.subtree_size, n.subtree_file_count,
-                COALESCE(d.has_dup, 0), COALESCE(d.dup_pct, 0)
+                COALESCE(d.has_dup, 0), COALESCE(d.dup_pct, 0), COALESCE(d.cross_dup, 0),
+                COALESCE(d.cross_dup_size, 0), COALESCE(d.cross_dup_file_count, 0), COALESCE(d.in_folder_group, 0)
          FROM nodes n LEFT JOIN dup_annot d ON d.node_id = n.id
          WHERE n.source_id = ?1 AND n.parent_id IS NULL ORDER BY n.type = 'file', n.name"
     };
@@ -269,6 +282,10 @@ pub fn get_tree(
             subtree_file_count: r.get(12)?,
             has_duplicate: r.get::<_, i64>(13)? != 0,
             dup_pct: r.get(14)?,
+            cross_dup: r.get::<_, i64>(15)? != 0,
+            cross_dup_size: r.get(16)?,
+            cross_dup_file_count: r.get(17)?,
+            in_folder_group: r.get::<_, i64>(18)? != 0,
         })
     };
 
@@ -759,6 +776,43 @@ pub fn app_state_set(db: State<Db>, key: String, value: String) -> CmdResult<()>
         "INSERT INTO app_state (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![key, value],
+    )
+    .map_err(map_err)?;
+    Ok(())
+}
+
+/// Same as `app_state_get`/`app_state_set` but scoped to one workspace --
+/// used for settings that shouldn't bleed across workspaces (dedup tuning,
+/// staleness), unlike `app_state`'s app-wide keys (active workspace, view).
+#[tauri::command]
+pub fn workspace_state_get(
+    db: State<Db>,
+    workspace_id: i64,
+    key: String,
+) -> CmdResult<Option<String>> {
+    let conn = db.0.lock().unwrap();
+    let v: Option<String> = conn
+        .query_row(
+            "SELECT value FROM workspace_state WHERE workspace_id = ?1 AND key = ?2",
+            params![workspace_id, key],
+            |r| r.get(0),
+        )
+        .ok();
+    Ok(v)
+}
+
+#[tauri::command]
+pub fn workspace_state_set(
+    db: State<Db>,
+    workspace_id: i64,
+    key: String,
+    value: String,
+) -> CmdResult<()> {
+    let conn = db.0.lock().unwrap();
+    conn.execute(
+        "INSERT INTO workspace_state (workspace_id, key, value) VALUES (?1, ?2, ?3)
+         ON CONFLICT(workspace_id, key) DO UPDATE SET value = excluded.value",
+        params![workspace_id, key, value],
     )
     .map_err(map_err)?;
     Ok(())

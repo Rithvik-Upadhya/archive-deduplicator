@@ -60,6 +60,9 @@ importers:
       less:
         specifier: ^4.6.7
         version: 4.6.7
+      paneforge:
+        specifier: ^1.0.2
+        version: 1.0.2(svelte@5.56.6)
       phosphor-svelte:
         specifier: ^3.1.0
         version: 3.1.0(svelte@5.56.6)(vite@6.4.3(jiti@2.7.0)(less@4.6.7)(lightningcss@1.32.0))
@@ -933,6 +936,11 @@ packages:
   node-fetch-native@1.6.7:
     resolution: {integrity: sha512-g9yhqoedzIUm0nTnTqAQvueMPVOuIY16bqgAJJC8XOOubYFNwz6IER9qs0Gq2Xd0+CecCKFjtdDTMA4u4xG06Q==}
 
+  paneforge@1.0.2:
+    resolution: {integrity: sha512-KzmIXQH1wCfwZ4RsMohD/IUtEjVhteR+c+ulb/CHYJHX8SuDXoJmChtsc/Xs5Wl8NHS4L5Q7cxL8MG40gSU1bA==}
+    peerDependencies:
+      svelte: ^5.29.0
+
   parse-node-version@1.0.1:
     resolution: {integrity: sha512-3YHlOa/JgH6Mnpr05jP9eDG254US9ek25LyIxZlDItp2iJtwyaXQb57lBYLdT3MowkUFYEV2XXNAYIPlESvJlA==}
     engines: {node: '>= 0.10'}
@@ -981,6 +989,11 @@ packages:
 
   runed@0.28.0:
     resolution: {integrity: sha512-k2xx7RuO9hWcdd9f+8JoBeqWtYrm5CALfgpkg2YDB80ds/QE4w0qqu34A7fqiAwiBBSBQOid7TLxwxVC27ymWQ==}
+    peerDependencies:
+      svelte: ^5.7.0
+
+  runed@0.29.2:
+    resolution: {integrity: sha512-0cq6cA6sYGZwl/FvVqjx9YN+1xEBu9sDDyuWdDW1yWX7JF2wmvmVKfH+hVCZs+csW+P3ARH92MjI3H9QTagOQA==}
     peerDependencies:
       svelte: ^5.7.0
 
@@ -1052,6 +1065,12 @@ packages:
     engines: {node: '>=18', pnpm: '>=8.7.0'}
     peerDependencies:
       svelte: ^5.0.0
+
+  svelte-toolbelt@0.9.3:
+    resolution: {integrity: sha512-HCSWxCtVmv+c6g1ACb8LTwHVbDqLKJvHpo6J8TaqwUme2hj9ATJCpjCPNISR1OCq2Q4U1KT41if9ON0isINQZw==}
+    engines: {node: '>=18', pnpm: '>=8.7.0'}
+    peerDependencies:
+      svelte: ^5.30.2
 
   svelte@5.56.6:
     resolution: {integrity: sha512-p4HDLDogGHKRKCrgckQHNs5PEfXkju6JI5jTywueaKJI5hAdjPohEhRtQ0M1SWC/+TA73SPln+r7srr+7e4nZA==}
@@ -1764,6 +1783,12 @@ snapshots:
 
   node-fetch-native@1.6.7: {}
 
+  paneforge@1.0.2(svelte@5.56.6):
+    dependencies:
+      runed: 0.23.4(svelte@5.56.6)
+      svelte: 5.56.6
+      svelte-toolbelt: 0.9.3(svelte@5.56.6)
+
   parse-node-version@1.0.1: {}
 
   phosphor-svelte@3.1.0(svelte@5.56.6)(vite@6.4.3(jiti@2.7.0)(less@4.6.7)(lightningcss@1.32.0)):
@@ -1831,6 +1856,11 @@ snapshots:
       svelte: 5.56.6
 
   runed@0.28.0(svelte@5.56.6):
+    dependencies:
+      esm-env: 1.2.2
+      svelte: 5.56.6
+
+  runed@0.29.2(svelte@5.56.6):
     dependencies:
       esm-env: 1.2.2
       svelte: 5.56.6
@@ -1910,6 +1940,13 @@ snapshots:
     dependencies:
       clsx: 2.1.1
       runed: 0.23.4(svelte@5.56.6)
+      style-to-object: 1.0.14
+      svelte: 5.56.6
+
+  svelte-toolbelt@0.9.3(svelte@5.56.6):
+    dependencies:
+      clsx: 2.1.1
+      runed: 0.29.2(svelte@5.56.6)
       style-to-object: 1.0.14
       svelte: 5.56.6
 

@@ -9,11 +9,11 @@
     import { Button } from '$lib/components/ui/button';
     import { Badge } from '$lib/components/ui/badge';
     import { Slider } from '$lib/components/ui/slider';
-    import { Progress } from '$lib/components/ui/progress';
     import { Label } from '$lib/components/ui/label';
     import * as Alert from '$lib/components/ui/alert';
     import * as Card from '$lib/components/ui/card';
     import * as Empty from '$lib/components/ui/empty';
+    import * as Resizable from '$lib/components/ui/resizable/index.js';
     import * as ToggleGroup from '$lib/components/ui/toggle-group';
     import { toast } from 'svelte-sonner';
 
@@ -22,11 +22,18 @@
     let sentinel = $state<HTMLElement | null>(null);
     let reviewPane = $state<HTMLElement | null>(null);
 
-    // Re-query group filters once the sliders settle.
+    // Re-query group filters once the sliders settle, and persist the new
+    // tuning + flag results stale -- min_size in particular is a hard filter
+    // baked into the last `run_dedup` pass, so a lower value here can only
+    // be reflected in the results after a rerun.
     let sliderTimer: ReturnType<typeof setTimeout> | undefined;
     function slidersChanged() {
         clearTimeout(sliderTimer);
-        sliderTimer = setTimeout(() => app.refreshGroups(), 250);
+        sliderTimer = setTimeout(() => {
+            app.refreshGroups();
+            app.saveTuning();
+            app.setDedupStale(true);
+        }, 250);
     }
 
     async function onselect(node: TreeNode) {
@@ -71,19 +78,16 @@
     ];
 </script>
 
-<div class="grid min-h-0 grow grid-cols-[280px_1fr] gap-4 overflow-hidden">
-    <!-- Left rail: device / source management -->
-    <aside class="min-h-0 overflow-y-auto pe-1">
-        <SourceManager />
-    </aside>
-
+<!-- Top row: Source management -->
+<SourceManager />
+<div class="grid min-h-0 grow grid-cols-[1fr] gap-4 overflow-hidden mt-8">
     <div class="flex min-h-0 min-w-0 flex-col gap-6 overflow-hidden">
         {#if app.dedupStale}
             <Alert.Root class="flex-row items-center gap-3">
                 <Icon icon="ph:warning-fill" class="text-warn" />
                 <Alert.Description class="grow">
-                    Sources changed since the last analysis — results may be out
-                    of date.
+                    Sources or analysis settings changed since the last run —
+                    results may be out of date.
                 </Alert.Description>
                 <Button size="sm" disabled={app.running} onclick={runDedup}>
                     {app.running ? 'Analyzing…' : 'Re-run Analysis'}
@@ -103,7 +107,7 @@
                     id="minsize"
                     type="single"
                     min={0}
-                    max={1024}
+                    max={10240}
                     step={4}
                     bind:value={app.minSizeKb}
                     onValueChange={slidersChanged} />
@@ -136,190 +140,123 @@
         </div>
 
         <!-- Work area: trees + duplicate review -->
-        <div class="grid min-h-0 grow grid-cols-2 gap-4 overflow-hidden">
-            <div class="flex min-h-0 min-w-0 flex-col overflow-hidden pe-1">
-                <h2 class="section-label mb-2 shrink-0">Device trees</h2>
-                {#if app.sources.length === 0}
-                    <Empty.Root class="border border-dashed">
-                        <Empty.Header>
-                            <Empty.Media variant="icon">
-                                <Icon icon="ph:tree-structure-fill" />
-                            </Empty.Media>
-                            <Empty.Title>No devices</Empty.Title>
-                            <Empty.Description>
-                                Add devices from the left to browse their trees.
-                            </Empty.Description>
-                        </Empty.Header>
-                    </Empty.Root>
-                {:else}
-                    {#each app.sources as s (s.id)}
-                        <DeviceTree source={s} {onselect} {onlocate} />
-                    {/each}
-                {/if}
-            </div>
-
-            <aside
-                class="flex min-h-0 min-w-0 flex-col overflow-x-hidden overflow-y-auto pe-1"
-                bind:this={reviewPane}>
-                <div class="mb-2 flex flex-wrap items-center gap-2">
-                    <h2 class="section-label">
-                        Duplicate groups
-                        {#if app.groupTotal > 0}
-                            <span class="text-brand">({app.groupTotal})</span>
-                        {/if}
-                    </h2>
-                    <div class="ms-auto flex items-center gap-3">
-                        <ToggleGroup.Root
-                            type="single"
-                            size="sm"
-                            variant="outline"
-                            value={app.groupKind}
-                            onValueChange={v =>
-                                v &&
-                                app.setGroupKind(
-                                    v as 'all' | 'file' | 'folder'
-                                )}>
-                            {#each kinds as k (k.id)}
-                                <ToggleGroup.Item
-                                    value={k.id}
-                                    class="px-2 text-xs">
-                                    {k.label}
-                                </ToggleGroup.Item>
+        <Resizable.PaneGroup
+            direction="horizontal"
+            class="grid min-h-0 grow grid-cols-2 overflow-hidden">
+            <Resizable.Pane>
+                <div class="flex h-full min-w-0 flex-col overflow-hidden pe-1">
+                    <h2 class="section-label mb-2 shrink-0">Device trees</h2>
+                    {#if app.sources.length === 0}
+                        <Empty.Root class="border border-dashed">
+                            <Empty.Header>
+                                <Empty.Media variant="icon">
+                                    <Icon icon="ph:tree-structure-fill" />
+                                </Empty.Media>
+                                <Empty.Title>No devices</Empty.Title>
+                                <Empty.Description>
+                                    Add devices from the left to browse their
+                                    trees.
+                                </Empty.Description>
+                            </Empty.Header>
+                        </Empty.Root>
+                    {:else}
+                        <div
+                            class="flex flex-col overflow-y-auto overflow-x-hidden">
+                            {#each app.sources as s (s.id)}
+                                <DeviceTree source={s} {onselect} {onlocate} />
                             {/each}
-                        </ToggleGroup.Root>
-                        <ToggleGroup.Root
-                            type="single"
-                            size="sm"
-                            variant="outline"
-                            value={app.groupSort}
-                            onValueChange={v =>
-                                v && app.setGroupSort(v as GroupSort)}>
-                            {#each sorts as s (s.id)}
-                                <ToggleGroup.Item
-                                    value={s.id}
-                                    class="px-2 text-xs">
-                                    {s.label}
-                                </ToggleGroup.Item>
-                            {/each}
-                        </ToggleGroup.Root>
-                    </div>
+                        </div>
+                    {/if}
                 </div>
-
-                <!-- Focused selection from the tree -->
-                {#if selectedGroup}
-                    <Card.Root class="mb-3 gap-2 border-brand/70 py-3">
-                        <Card.Header class="gap-1 px-3">
-                            <Card.Title class="flex items-center gap-2 text-sm">
-                                <span class="truncate">
-                                    Duplicates of: {selectedNode?.name}
-                                </span>
-                                <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    class="ms-auto size-6"
-                                    aria-label="Close"
-                                    onclick={() => {
-                                        selectedGroup = null;
-                                        selectedNode = null;
-                                    }}>
-                                    <Icon icon="ph:x-bold" />
-                                </Button>
-                            </Card.Title>
-                            <Card.Description class="text-xs">
-                                <span
-                                    class="font-heading font-semibold tabular-nums {confidenceTone(
-                                        pct(selectedGroup.confidence)
-                                    )}">
-                                    {pct(selectedGroup.confidence)}%
-                                </span>
-                                · {selectedGroup.primary_signal}
-                            </Card.Description>
-                        </Card.Header>
-                        <Card.Content class="px-3">
-                            <ul class="flex flex-col">
-                                {#each selectedGroup.members as m (m.node_id)}
-                                    <li
-                                        class="flex gap-2 rounded-sm px-1 py-0.5 text-xs data-[self=true]:bg-brand/10"
-                                        data-self={m.node_id ===
-                                            selectedNode?.id}>
-                                        <span
-                                            class="shrink-0 font-medium whitespace-nowrap text-muted-foreground"
-                                            >{m.device_label}</span>
-                                        <span
-                                            class="flex-1 truncate"
-                                            title={m.rel_path}
-                                            >{m.rel_path}</span>
-                                        <span
-                                            class="shrink-0 whitespace-nowrap text-muted-foreground">
-                                            {formatBytes(m.size)} · {formatTime(
-                                                m.mtime
-                                            )}
-                                        </span>
-                                    </li>
+            </Resizable.Pane>
+            <Resizable.Handle class="mx-3" />
+            <Resizable.Pane>
+                <aside
+                    class="flex min-h-0 min-w-0 flex-col overflow-x-hidden pe-1 overflow-y-hidden"
+                    bind:this={reviewPane}>
+                    <div class="mb-2 flex flex-wrap items-center gap-2">
+                        <h2 class="section-label">
+                            Duplicate groups
+                            {#if app.groupTotal > 0}
+                                <span class="text-brand"
+                                    >({app.groupTotal})</span>
+                            {/if}
+                        </h2>
+                        <div class="ms-auto flex items-center gap-3">
+                            <ToggleGroup.Root
+                                type="single"
+                                size="sm"
+                                variant="outline"
+                                value={app.groupKind}
+                                onValueChange={v =>
+                                    v &&
+                                    app.setGroupKind(
+                                        v as 'all' | 'file' | 'folder'
+                                    )}>
+                                {#each kinds as k (k.id)}
+                                    <ToggleGroup.Item
+                                        value={k.id}
+                                        class="px-2 text-xs">
+                                        {k.label}
+                                    </ToggleGroup.Item>
                                 {/each}
-                            </ul>
-                        </Card.Content>
-                    </Card.Root>
-                {:else if selectedNode}
-                    <Card.Root class="mb-3 gap-1 py-3">
-                        <Card.Header class="gap-1 px-3">
-                            <Card.Title class="truncate text-sm"
-                                >{selectedNode.name}</Card.Title>
-                            <Card.Description class="text-xs">
-                                No duplicate group for this file.
-                            </Card.Description>
-                        </Card.Header>
-                    </Card.Root>
-                {/if}
+                            </ToggleGroup.Root>
+                            <ToggleGroup.Root
+                                type="single"
+                                size="sm"
+                                variant="outline"
+                                value={app.groupSort}
+                                onValueChange={v =>
+                                    v && app.setGroupSort(v as GroupSort)}>
+                                {#each sorts as s (s.id)}
+                                    <ToggleGroup.Item
+                                        value={s.id}
+                                        class="px-2 text-xs">
+                                        {s.label}
+                                    </ToggleGroup.Item>
+                                {/each}
+                            </ToggleGroup.Root>
+                        </div>
+                    </div>
 
-                {#if app.groups.length === 0 && !app.groupsLoading}
-                    <Empty.Root class="border border-dashed">
-                        <Empty.Header>
-                            <Empty.Media variant="icon">
-                                <Icon icon="ph:copy-simple-fill" />
-                            </Empty.Media>
-                            <Empty.Title>No duplicate groups</Empty.Title>
-                            <Empty.Description>
-                                Adjust the sliders and run “Find Duplicates”.
-                            </Empty.Description>
-                        </Empty.Header>
-                    </Empty.Root>
-                {:else}
-                    <ul class="flex flex-col gap-2">
-                        {#each app.groups as g (g.id)}
-                            <li
-                                class="overflow-hidden rounded-md border transition-colors data-[folder=true]:border-brand/40 data-[folder=true]:bg-brand/[0.04]"
-                                data-folder={g.kind === 'folder'}>
-                                <div
-                                    class="flex items-center gap-2 bg-muted/50 px-2 py-1 text-xs">
-                                    <!-- Only folder groups carry the brand tint;
-                                         they're the high-leverage matches. -->
-                                    <Icon
-                                        icon={g.kind === 'folder'
-                                            ? 'ph:folder-fill'
-                                            : 'ph:file-fill'}
-                                        class="shrink-0 {g.kind === 'folder'
-                                            ? 'text-brand'
-                                            : 'text-muted-foreground'}" />
+                    <!-- Focused selection from the tree -->
+                    {#if selectedGroup}
+                        <Card.Root class="mb-3 gap-2 border-brand/70 py-3">
+                            <Card.Header class="gap-1 px-3">
+                                <Card.Title
+                                    class="flex items-center gap-2 text-sm">
+                                    <span class="truncate">
+                                        Duplicates of: {selectedNode?.name}
+                                    </span>
+                                    <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        class="ms-auto size-6"
+                                        aria-label="Close"
+                                        onclick={() => {
+                                            selectedGroup = null;
+                                            selectedNode = null;
+                                        }}>
+                                        <Icon icon="ph:x-bold" />
+                                    </Button>
+                                </Card.Title>
+                                <Card.Description class="text-xs">
                                     <span
                                         class="font-heading font-semibold tabular-nums {confidenceTone(
-                                            pct(g.confidence)
-                                        )}">{pct(g.confidence)}%</span>
-                                    <span class="truncate text-muted-foreground"
-                                        >{g.primary_signal}</span>
-                                    <span
-                                        class="ms-auto shrink-0 font-heading tabular-nums"
-                                        >{formatBytes(g.size)}</span>
-                                    <Badge
-                                        variant="secondary"
-                                        class="shrink-0 px-1.5 py-0 font-heading text-[0.65rem]">
-                                        {g.members.length}×
-                                    </Badge>
-                                </div>
-                                <ul class="flex flex-col py-0.5">
-                                    {#each g.members as m (m.node_id)}
+                                            pct(selectedGroup.confidence)
+                                        )}">
+                                        {pct(selectedGroup.confidence)}%
+                                    </span>
+                                    · {selectedGroup.primary_signal}
+                                </Card.Description>
+                            </Card.Header>
+                            <Card.Content class="px-3">
+                                <ul class="flex flex-col">
+                                    {#each selectedGroup.members as m (m.node_id)}
                                         <li
-                                            class="flex gap-2 px-2 py-0.5 text-xs">
+                                            class="flex gap-2 rounded-sm px-1 py-0.5 text-xs data-[self=true]:bg-brand/10"
+                                            data-self={m.node_id ===
+                                                selectedNode?.id}>
                                             <span
                                                 class="shrink-0 font-medium whitespace-nowrap text-muted-foreground"
                                                 >{m.device_label}</span>
@@ -327,25 +264,106 @@
                                                 class="flex-1 truncate"
                                                 title={m.rel_path}
                                                 >{m.rel_path}</span>
+                                            <span
+                                                class="shrink-0 whitespace-nowrap text-muted-foreground">
+                                                {formatBytes(m.size)} · {formatTime(
+                                                    m.mtime
+                                                )}
+                                            </span>
                                         </li>
                                     {/each}
                                 </ul>
-                            </li>
-                        {/each}
-                    </ul>
-                    <div
-                        class="py-3 text-center text-xs text-muted-foreground"
-                        bind:this={sentinel}>
-                        {#if app.groupsLoading}
-                            Loading…
-                        {:else if app.groups.length < app.groupTotal}
-                            Scroll for more ({app.groups.length} / {app.groupTotal})
-                        {:else if app.groupTotal > 0}
-                            All {app.groupTotal} groups loaded
-                        {/if}
-                    </div>
-                {/if}
-            </aside>
-        </div>
+                            </Card.Content>
+                        </Card.Root>
+                    {:else if selectedNode}
+                        <Card.Root class="mb-3 gap-1 py-3">
+                            <Card.Header class="gap-1 px-3">
+                                <Card.Title class="truncate text-sm"
+                                    >{selectedNode.name}</Card.Title>
+                                <Card.Description class="text-xs">
+                                    No duplicate group for this file.
+                                </Card.Description>
+                            </Card.Header>
+                        </Card.Root>
+                    {/if}
+
+                    {#if app.groups.length === 0 && !app.groupsLoading}
+                        <Empty.Root class="border border-dashed">
+                            <Empty.Header>
+                                <Empty.Media variant="icon">
+                                    <Icon icon="ph:copy-simple-fill" />
+                                </Empty.Media>
+                                <Empty.Title>No duplicate groups</Empty.Title>
+                                <Empty.Description>
+                                    Adjust the sliders and run “Find
+                                    Duplicates”.
+                                </Empty.Description>
+                            </Empty.Header>
+                        </Empty.Root>
+                    {:else}
+                        <ul class="flex flex-col gap-2 overflow-y-auto">
+                            {#each app.groups as g (g.id)}
+                                <li
+                                    class="rounded-md border transition-colors data-[folder=true]:border-brand/40 data-[folder=true]:bg-brand/[0.04]"
+                                    data-folder={g.kind === 'folder'}>
+                                    <div
+                                        class="flex items-center gap-2 bg-muted/50 px-2 py-1 text-xs">
+                                        <!-- Only folder groups carry the brand tint;
+                                         they're the high-leverage matches. -->
+                                        <Icon
+                                            icon={g.kind === 'folder'
+                                                ? 'ph:folder-fill'
+                                                : 'ph:file-fill'}
+                                            class="shrink-0 {g.kind === 'folder'
+                                                ? 'text-brand'
+                                                : 'text-muted-foreground'}" />
+                                        <span
+                                            class="font-heading font-semibold tabular-nums {confidenceTone(
+                                                pct(g.confidence)
+                                            )}">{pct(g.confidence)}%</span>
+                                        <span
+                                            class="truncate text-muted-foreground"
+                                            >{g.primary_signal}</span>
+                                        <span
+                                            class="ms-auto shrink-0 font-heading tabular-nums"
+                                            >{formatBytes(g.size)}</span>
+                                        <Badge
+                                            variant="secondary"
+                                            class="shrink-0 px-1.5 py-0 font-heading text-[0.65rem]">
+                                            {g.members.length}×
+                                        </Badge>
+                                    </div>
+                                    <ul class="flex flex-col py-0.5">
+                                        {#each g.members as m (m.node_id)}
+                                            <li
+                                                class="flex gap-2 px-2 py-0.5 text-xs">
+                                                <span
+                                                    class="shrink-0 font-medium whitespace-nowrap text-muted-foreground"
+                                                    >{m.device_label}</span>
+                                                <span
+                                                    class="flex-1 truncate"
+                                                    title={m.rel_path}
+                                                    >{m.rel_path}</span>
+                                            </li>
+                                        {/each}
+                                    </ul>
+                                </li>
+                            {/each}
+                        </ul>
+                        <div
+                            class="py-3 text-center text-xs text-muted-foreground"
+                            bind:this={sentinel}>
+                            {#if app.groupsLoading}
+                                Loading…
+                            {:else if app.groups.length < app.groupTotal}
+                                Scroll for more ({app.groups.length} / {app.groupTotal})
+                            {:else if app.groupTotal > 0}
+                                All {app.groupTotal} groups loaded
+                            {/if}
+                        </div>
+                    {/if}
+                </aside>
+            </Resizable.Pane>
+        </Resizable.PaneGroup>
     </div>
 </div>
