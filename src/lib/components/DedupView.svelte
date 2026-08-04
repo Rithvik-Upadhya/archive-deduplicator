@@ -172,7 +172,7 @@
             <Resizable.Handle class="mx-3" />
             <Resizable.Pane>
                 <aside
-                    class="flex min-h-0 min-w-0 flex-col overflow-x-hidden pe-1 overflow-y-hidden"
+                    class="flex h-full min-w-0 flex-col overflow-hidden pe-1"
                     bind:this={reviewPane}>
                     <div class="mb-2 flex flex-wrap items-center gap-2">
                         <h2 class="section-label">
