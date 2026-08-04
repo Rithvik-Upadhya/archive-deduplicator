@@ -11,7 +11,7 @@
     });
 </script>
 
-<section class="flex min-h-0 grow flex-col overflow-hidden pt-2">
+<section class="flex min-h-0 min-w-0 grow flex-col overflow-hidden pt-2">
     {#if app.loading}
         <div class="flex flex-col gap-4 p-4">
             <Skeleton class="h-24 w-full" />

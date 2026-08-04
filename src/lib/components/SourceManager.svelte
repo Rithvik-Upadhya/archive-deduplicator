@@ -58,7 +58,10 @@
         }
     }
 
-    async function copyToWorkspace(s: { id: number; device_label: string }, ws: Workspace) {
+    async function copyToWorkspace(
+        s: { id: number; device_label: string },
+        ws: Workspace
+    ) {
         try {
             await app.copySourceToWorkspace(s.id, ws.id);
             toast.success(`Copied “${s.device_label}” to “${ws.name}”.`, {
@@ -77,7 +80,7 @@
             'scan',
             files.length === 1
                 ? `Importing “${files[0].name}”…`
-                : `Importing ${files.length} tree files…`,
+                : `Importing ${files.length} tree files…`
         );
         try {
             for (const file of Array.from(files)) {
@@ -85,7 +88,11 @@
                 const label = file.name.replace(/\.json$/i, '');
                 await app.importJson(text, label);
             }
-            taskTray.resolve(taskId, 'success', `Imported ${files.length} tree file(s).`);
+            taskTray.resolve(
+                taskId,
+                'success',
+                `Imported ${files.length} tree file(s).`
+            );
         } catch (err) {
             taskTray.resolve(taskId, 'error', String(err));
         } finally {
@@ -112,7 +119,7 @@
     }
 </script>
 
-<div class="flex flex-row gap-3">
+<div class="flex min-w-0 flex-row gap-3">
     <div class="flex flex-col gap-2 border-r-1 pr-3">
         <Button
             variant="outline"
@@ -160,7 +167,7 @@
         <ul class="flex flex-row gap-1.5 grow overflow-x-auto">
             {#each app.sources as s (s.id)}
                 <li
-                    class="group/device flex flex-col gap-1 rounded-md border bg-card px-2 py-1.5 transition-colors hover:border-brand/40 {s.excluded
+                    class="group/device flex min-w-[380px] w-[380px] flex-col gap-1 rounded-md border bg-card px-2 py-1.5 transition-colors hover:border-brand/40 {s.excluded
                         ? 'opacity-60'
                         : ''}">
                     <div class="flex min-w-0 items-center gap-1">
