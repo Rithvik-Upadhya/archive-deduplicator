@@ -327,58 +327,61 @@
                             </Empty.Header>
                         </Empty.Root>
                     {:else}
-                        <ul class="flex flex-col gap-2 overflow-y-auto">
-                            {#each app.groups as g (g.id)}
-                                <li
-                                    class="rounded-md border transition-colors data-[folder=true]:border-brand/40 data-[folder=true]:bg-brand/[0.04]"
-                                    data-folder={g.kind === 'folder'}>
-                                    <div
-                                        class="flex items-center gap-2 bg-muted/50 px-2 py-1 text-xs">
-                                        <!-- Only folder groups carry the brand tint;
-                                         they're the high-leverage matches. -->
-                                        <Icon
-                                            icon={g.kind === 'folder'
-                                                ? 'ph:folder-fill'
-                                                : 'ph:file-fill'}
-                                            class="shrink-0 {g.kind === 'folder'
-                                                ? 'text-brand'
-                                                : 'text-muted-foreground'}" />
-                                        <span
-                                            class="font-heading font-semibold tabular-nums {confidenceTone(
-                                                pct(g.confidence)
-                                            )}">{pct(g.confidence)}%</span>
-                                        <span
-                                            class="truncate text-muted-foreground"
-                                            >{g.primary_signal}</span>
-                                        <span
-                                            class="ms-auto shrink-0 font-heading tabular-nums"
-                                            >{formatBytes(g.size)}</span>
-                                        <Badge
-                                            variant="secondary"
-                                            class="shrink-0 px-1.5 py-0 font-heading text-[0.65rem]">
-                                            {g.members.length}×
-                                        </Badge>
-                                    </div>
-                                    <ul class="flex flex-col py-0.5">
-                                        {#each g.members as m (m.node_id)}
-                                            <li
-                                                class="flex gap-2 px-2 py-0.5 text-xs">
-                                                <span
-                                                    class="shrink-0 font-medium whitespace-nowrap text-muted-foreground"
-                                                    >{m.device_label}</span>
-                                                <span
-                                                    class="flex-1 truncate"
-                                                    title={m.rel_path}
-                                                    >{m.rel_path}</span>
-                                            </li>
-                                        {/each}
-                                    </ul>
-                                </li>
-                            {/each}
-                        </ul>
+                        <div class="overflow-y-auto">
+                            <ul class="flex flex-col gap-2">
+                                {#each app.groups as g (g.id)}
+                                    <li
+                                        class="rounded-md border transition-colors data-[folder=true]:border-brand/40 data-[folder=true]:bg-brand/[0.04]"
+                                        data-folder={g.kind === 'folder'}>
+                                        <div
+                                            class="flex items-center gap-2 bg-muted/50 px-2 py-1 text-xs">
+                                            <!-- Only folder groups carry the brand tint;
+                                             they're the high-leverage matches. -->
+                                            <Icon
+                                                icon={g.kind === 'folder'
+                                                    ? 'ph:folder-fill'
+                                                    : 'ph:file-fill'}
+                                                class="shrink-0 {g.kind ===
+                                                'folder'
+                                                    ? 'text-brand'
+                                                    : 'text-muted-foreground'}" />
+                                            <span
+                                                class="font-heading font-semibold tabular-nums {confidenceTone(
+                                                    pct(g.confidence)
+                                                )}">{pct(g.confidence)}%</span>
+                                            <span
+                                                class="truncate text-muted-foreground"
+                                                >{g.primary_signal}</span>
+                                            <span
+                                                class="ms-auto shrink-0 font-heading tabular-nums"
+                                                >{formatBytes(g.size)}</span>
+                                            <Badge
+                                                variant="secondary"
+                                                class="shrink-0 px-1.5 py-0 font-heading text-[0.65rem]">
+                                                {g.members.length}×
+                                            </Badge>
+                                        </div>
+                                        <ul class="flex flex-col py-0.5">
+                                            {#each g.members as m (m.node_id)}
+                                                <li
+                                                    class="flex gap-2 px-2 py-0.5 text-xs">
+                                                    <span
+                                                        class="shrink-0 font-medium whitespace-nowrap text-muted-foreground"
+                                                        >{m.device_label}</span>
+                                                    <span
+                                                        class="flex-1 truncate"
+                                                        title={m.rel_path}
+                                                        >{m.rel_path}</span>
+                                                </li>
+                                            {/each}
+                                        </ul>
+                                    </li>
+                                {/each}
+                            </ul>
+                            <div bind:this={sentinel}></div>
+                        </div>
                         <div
-                            class="py-3 text-center text-xs text-muted-foreground"
-                            bind:this={sentinel}>
+                            class="py-3 text-center text-xs text-muted-foreground">
                             {#if app.groupsLoading}
                                 Loading…
                             {:else if app.groups.length < app.groupTotal}
