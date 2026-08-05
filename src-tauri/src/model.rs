@@ -88,6 +88,15 @@ pub struct Source {
     pub hash_coverage_files: i64,
     #[serde(default)]
     pub hash_coverage_bytes: i64,
+    /// Whether content hashing runs for this source at all. When false, the
+    /// device is matched on filesystem metadata only. Defaults to true so
+    /// JSON-imported or pre-migration rows deserialize as enabled.
+    #[serde(default = "default_true")]
+    pub hashing_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// A flattened filesystem node stored in the database.

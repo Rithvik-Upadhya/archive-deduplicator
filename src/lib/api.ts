@@ -45,6 +45,7 @@ export const scanFolder = (
     workspaceId: number,
     path: string,
     label: string,
+    hashingEnabled: boolean,
     hashMinSize?: number,
     mediumOverride?: string,
     filesystemOverride?: string,
@@ -56,6 +57,7 @@ export const scanFolder = (
         hashMinSize: hashMinSize ?? null,
         mediumOverride: mediumOverride ?? null,
         filesystemOverride: filesystemOverride ?? null,
+        hashingEnabled,
     });
 
 // --- Medium detection & content hashing ---

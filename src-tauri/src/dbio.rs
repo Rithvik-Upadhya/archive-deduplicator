@@ -107,6 +107,15 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
             // --- sources ---
             let mut src_id_map: HashMap<i64, i64> = HashMap::new();
             {
+                // NOTE: `hashing_enabled` is deliberately *not* selected here.
+                // `ext` is attached read-only against whatever schema the
+                // exported file happens to have, and `migrate` never runs
+                // against it -- an export made before this column existed
+                // would make this `SELECT` fail outright. Omitting the column
+                // just falls back to its `DEFAULT 1` on insert, which is a
+                // far cheaper failure mode (an explicitly-disabled source
+                // reads back as enabled) than breaking import of every
+                // pre-existing export.
                 let mut stmt = tx.prepare(
                     "SELECT id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id
                      FROM ext.sources WHERE workspace_id = ?1",
@@ -543,6 +552,7 @@ pub fn copy_source_to_workspace(
         hash_coverage_files,
         hash_coverage_bytes,
         volume_id,
+        hashing_enabled,
     ): (
         String,
         String,
@@ -562,8 +572,9 @@ pub fn copy_source_to_workspace(
         i64,
         i64,
         Option<String>,
+        i64,
     ) = tx.query_row(
-        "SELECT kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id
+        "SELECT kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id, hashing_enabled
          FROM sources WHERE id = ?1",
         params![source_id],
         |r| {
@@ -586,13 +597,14 @@ pub fn copy_source_to_workspace(
                 r.get(15)?,
                 r.get(16)?,
                 r.get(17)?,
+                r.get(18)?,
             ))
         },
     )?;
 
     tx.execute(
-        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id, hashing_enabled)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         params![
             target_workspace_id,
             kind,
@@ -612,7 +624,8 @@ pub fn copy_source_to_workspace(
             hash_spec,
             hash_coverage_files,
             hash_coverage_bytes,
-            volume_id
+            volume_id,
+            hashing_enabled
         ],
     )?;
     let new_source_id = tx.last_insert_rowid();

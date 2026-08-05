@@ -42,6 +42,7 @@
     let specLocked = $state(false);
 
     // Step 2 -- per-source scan options.
+    let hashingEnabled = $state(true);
     let hashMinSizeKb = $state(64); // 64 KiB, matches the matcher's own default floor
     let mediumOverride = $state<MediumKind>('unknown');
     let filesystemOverride = $state('');
@@ -79,6 +80,7 @@
     $effect(() => {
         if (open) {
             step = 1;
+            hashingEnabled = true;
             void loadDefaults();
         }
     });
@@ -104,6 +106,7 @@
             hashMinSize: hashMinSizeKb * 1024,
             mediumOverride,
             filesystemOverride: filesystemOverride.trim(),
+            hashingEnabled,
         });
         open = false;
     }
@@ -189,13 +192,32 @@
         {:else}
             <div class="flex flex-col gap-4 py-2">
                 <div class="flex flex-col gap-1.5">
-                    <Label for="hash-min-size-kb">Skip hashing below (KB)</Label>
-                    <Input
-                        id="hash-min-size-kb"
-                        type="number"
-                        min="0"
-                        bind:value={hashMinSizeKb} />
+                    <Label>Content hashing</Label>
+                    <ToggleGroup.Root
+                        type="single"
+                        variant="outline"
+                        size="sm"
+                        value={hashingEnabled ? 'on' : 'off'}
+                        onValueChange={(v) => v && (hashingEnabled = v === 'on')}>
+                        <ToggleGroup.Item value="on" class="px-2 text-xs">Enabled</ToggleGroup.Item>
+                        <ToggleGroup.Item value="off" class="px-2 text-xs">Disabled</ToggleGroup.Item>
+                    </ToggleGroup.Root>
+                    <p class="text-xs text-muted-foreground">
+                        When disabled, this device is matched on filesystem metadata only --
+                        no content hash pass runs for it.
+                    </p>
                 </div>
+
+                {#if hashingEnabled}
+                    <div class="flex flex-col gap-1.5">
+                        <Label for="hash-min-size-kb">Skip hashing below (KB)</Label>
+                        <Input
+                            id="hash-min-size-kb"
+                            type="number"
+                            min="0"
+                            bind:value={hashMinSizeKb} />
+                    </div>
+                {/if}
                 <div class="flex flex-col gap-1.5">
                     <Label>Storage medium</Label>
                     <ToggleGroup.Root

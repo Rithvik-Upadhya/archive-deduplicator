@@ -93,7 +93,7 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
         rollup::cross_dup_size_by_source(&conn, workspace_id).map_err(map_err)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes
+            "SELECT id, workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, hashing_enabled
              FROM sources WHERE workspace_id = ?1 ORDER BY id",
         )
         .map_err(map_err)?;
@@ -122,6 +122,7 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
                 hash_spec: r.get(16)?,
                 hash_coverage_files: r.get(17)?,
                 hash_coverage_bytes: r.get(18)?,
+                hashing_enabled: r.get::<_, i64>(19)? != 0,
             })
         })
         .map_err(map_err)?;
@@ -166,8 +167,8 @@ pub async fn import_tree_json(
         let device_label = label.clone();
         let tx = conn.transaction().map_err(map_err)?;
         tx.execute(
-            "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count)
-             VALUES (?1, 'json', ?2, ?3, NULL, ?4, ?5, ?6, ?7)",
+            "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, hashing_enabled)
+             VALUES (?1, 'json', ?2, ?3, NULL, ?4, ?5, ?6, ?7, 0)",
             params![workspace_id, label, device_label, flat.root_dev, ts, flat.total_size, flat.file_count],
         )
         .map_err(map_err)?;
@@ -200,6 +201,7 @@ pub async fn import_tree_json(
             hash_spec: None,
             hash_coverage_files: 0,
             hash_coverage_bytes: 0,
+            hashing_enabled: false,
             physical_size,
             alias_bytes,
         })
@@ -221,6 +223,7 @@ pub async fn scan_folder(
     hash_min_size: Option<i64>,
     medium_override: Option<String>,
     filesystem_override: Option<String>,
+    hashing_enabled: bool,
 ) -> CmdResult<Source> {
     tauri::async_runtime::spawn_blocking(move || -> CmdResult<Source> {
         let detected = medium::detect(Path::new(&path));
@@ -246,9 +249,9 @@ pub async fn scan_folder(
         let device_label = label.clone();
         let tx = conn.transaction().map_err(map_err)?;
         tx.execute(
-            "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, medium_kind, filesystem, hash_min_size, volume_id)
-             VALUES (?1, 'scan', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![workspace_id, label, device_label, path, flat.root_dev, ts, flat.total_size, flat.file_count, medium_kind.as_str(), filesystem, hash_min_size, volume_id],
+            "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, medium_kind, filesystem, hash_min_size, volume_id, hashing_enabled)
+             VALUES (?1, 'scan', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![workspace_id, label, device_label, path, flat.root_dev, ts, flat.total_size, flat.file_count, medium_kind.as_str(), filesystem, hash_min_size, volume_id, hashing_enabled],
         )
         .map_err(map_err)?;
         let source_id = tx.last_insert_rowid();
@@ -276,6 +279,7 @@ pub async fn scan_folder(
             hash_spec: None,
             hash_coverage_files: 0,
             hash_coverage_bytes: 0,
+            hashing_enabled,
             cross_dup_size: 0,
             cross_dup_file_count: 0,
             physical_size,
@@ -377,6 +381,22 @@ pub fn hash_settings_set(db: State<Db>, workspace_id: i64, spec: HashSpecDto) ->
     )
 }
 
+/// Reads the two `sources` columns `run_hash_scan` needs to decide whether
+/// (and how) to hash: the detected medium (drives queue depth) and whether
+/// the user has opted this source out of hashing entirely. Split out from
+/// `run_hash_scan` so the disabled-hashing gate is testable without a Tauri
+/// `AppHandle`.
+fn fetch_medium_and_hashing_enabled(
+    conn: &rusqlite::Connection,
+    source_id: i64,
+) -> rusqlite::Result<(Option<String>, bool)> {
+    conn.query_row(
+        "SELECT medium_kind, hashing_enabled FROM sources WHERE id = ?1",
+        params![source_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+}
+
 /// Hash every eligible file in `source_id` under the workspace's hash spec.
 /// Safe to call again after an interruption -- see `hashing::run_hash_scan`'s
 /// doc comment for why resumability needs no separate resume path. Follows
@@ -387,13 +407,20 @@ pub async fn run_hash_scan(app: tauri::AppHandle, source_id: i64) -> CmdResult<H
         let db_path = app.state::<crate::db::DbPath>().0.clone();
         let mut conn = crate::db::open(&db_path).map_err(map_err)?;
 
-        let medium_kind_str: Option<String> = conn
-            .query_row(
-                "SELECT medium_kind FROM sources WHERE id = ?1",
-                params![source_id],
-                |r| r.get(0),
-            )
-            .map_err(map_err)?;
+        let (medium_kind_str, hashing_enabled) =
+            fetch_medium_and_hashing_enabled(&conn, source_id).map_err(map_err)?;
+        // A source the user explicitly opted out of hashing (per-device toggle
+        // in the scan dialog) must never get a content-hash pass, even if this
+        // command is invoked defensively or by a future "resume hashing"
+        // affordance -- the flag is the source of truth, not just a
+        // client-side skip.
+        if !hashing_enabled {
+            return Ok(HashScanReportDto {
+                hashed: 0,
+                cached: 0,
+                errors: 0,
+            });
+        }
         let medium_kind = medium_kind_str
             .as_deref()
             .and_then(medium::MediumKind::parse)
@@ -1089,4 +1116,54 @@ pub fn db_export(db: State<Db>, path: String) -> CmdResult<()> {
 pub fn db_import(db: State<Db>, path: String) -> CmdResult<crate::dbio::ImportSummary> {
     let mut conn = db.0.lock().unwrap();
     crate::dbio::import_merge(&mut conn, Path::new(&path)).map_err(map_err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn seeded_conn() -> (Connection, i64) {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (name, created_at, updated_at) VALUES ('w', 't', 't')",
+            [],
+        )
+        .unwrap();
+        let ws = conn.last_insert_rowid();
+        (conn, ws)
+    }
+
+    #[test]
+    fn fetch_medium_and_hashing_enabled_reflects_a_disabled_source() {
+        let (conn, ws) = seeded_conn();
+        conn.execute(
+            "INSERT INTO sources (workspace_id, kind, label, device_label, imported_at, total_size, file_count, medium_kind, hashing_enabled)
+             VALUES (?1, 'scan', 'disc-a', 'disc-a', 't', 0, 0, 'hdd', 0)",
+            params![ws],
+        )
+        .unwrap();
+        let source_id = conn.last_insert_rowid();
+
+        let (medium_kind, hashing_enabled) =
+            fetch_medium_and_hashing_enabled(&conn, source_id).unwrap();
+        assert_eq!(medium_kind.as_deref(), Some("hdd"));
+        assert!(!hashing_enabled);
+    }
+
+    #[test]
+    fn fetch_medium_and_hashing_enabled_defaults_to_true() {
+        let (conn, ws) = seeded_conn();
+        conn.execute(
+            "INSERT INTO sources (workspace_id, kind, label, device_label, imported_at, total_size, file_count)
+             VALUES (?1, 'scan', 'disc-a', 'disc-a', 't', 0, 0)",
+            params![ws],
+        )
+        .unwrap();
+        let source_id = conn.last_insert_rowid();
+
+        let (_, hashing_enabled) = fetch_medium_and_hashing_enabled(&conn, source_id).unwrap();
+        assert!(hashing_enabled);
+    }
 }
