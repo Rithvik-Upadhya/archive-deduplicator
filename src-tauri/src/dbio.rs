@@ -107,17 +107,8 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
             // --- sources ---
             let mut src_id_map: HashMap<i64, i64> = HashMap::new();
             {
-                // NOTE: `hashing_enabled` is deliberately *not* selected here.
-                // `ext` is attached read-only against whatever schema the
-                // exported file happens to have, and `migrate` never runs
-                // against it -- an export made before this column existed
-                // would make this `SELECT` fail outright. Omitting the column
-                // just falls back to its `DEFAULT 1` on insert, which is a
-                // far cheaper failure mode (an explicitly-disabled source
-                // reads back as enabled) than breaking import of every
-                // pre-existing export.
                 let mut stmt = tx.prepare(
-                    "SELECT id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id
+                    "SELECT id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id, hashing_enabled
                      FROM ext.sources WHERE workspace_id = ?1",
                 )?;
                 #[allow(clippy::type_complexity)]
@@ -141,6 +132,7 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                     i64,
                     i64,
                     Option<String>,
+                    i64,
                 )> = stmt
                     .query_map(params![old_ws_id], |r| {
                         Ok((
@@ -163,6 +155,7 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                             r.get(16)?,
                             r.get(17)?,
                             r.get(18)?,
+                            r.get(19)?,
                         ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -186,12 +179,13 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                     hash_coverage_files,
                     hash_coverage_bytes,
                     volume_id,
+                    hashing_enabled,
                 ) in rows
                 {
                     tx.execute(
-                        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
-                        params![new_ws_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id],
+                        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id, hashing_enabled)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                        params![new_ws_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id, hashing_enabled],
                     )?;
                     let new_id = tx.last_insert_rowid();
                     src_id_map.insert(old_id, new_id);
