@@ -61,6 +61,19 @@ Running the app from a sandbox is not a workaround either: Tauri's Linux stack (
 GTK3, libsoup-3.0) is absent, and there is no display, X server, or Xvfb. `pnpm tauri dev` is a
 **macOS-host-only** command.
 
+### Branches, not worktrees
+
+**Claude: never create a git worktree in this repo — use an ordinary branch.** That means no
+`git worktree add` and no `EnterWorktree`; `git checkout -b <name>` from `main` instead. Work is
+merged back into `main` directly and the branch deleted; this repo does not use pull requests, and
+nothing is pushed to `origin`.
+
+Worktrees cost more than they're worth here: `src-tauri/target/` is not shared, so every worktree
+triggers a full multi-minute rebuild of the entire Tauri dependency tree (and the link step alone
+needs more RAM than a sandbox typically has). A worktree also can't merge into `main` while the
+main checkout has it checked out, so the work strands until someone merges it by hand, and the
+stray directory plus its branch then have to be cleaned up separately.
+
 ## Architecture
 
 ### The Rust/TS contract
