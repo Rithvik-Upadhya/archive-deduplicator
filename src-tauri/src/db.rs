@@ -7,6 +7,20 @@ use std::sync::Mutex;
 /// Managed database handle stored in Tauri state.
 pub struct Db(pub Mutex<Connection>);
 
+impl Db {
+    /// Lock the connection, recovering from poisoning instead of panicking.
+    ///
+    /// A panic anywhere in a command while holding this lock (an indexing
+    /// bug, an unexpected-data `unwrap()`) would otherwise poison the mutex
+    /// permanently, bricking every subsequent command for the rest of the
+    /// app session. SQLite's transactional model makes recovery safe here --
+    /// a panic mid-transaction just leaves it rolled back to the last
+    /// commit, so the recovered connection is never left half-written.
+    pub fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 /// The on-disk path of the managed database, stored alongside `Db` so a
 /// command can open its own dedicated connection (e.g. `run_dedup`, which
 /// must not hold `Db`'s mutex for the duration of a long-running pass).

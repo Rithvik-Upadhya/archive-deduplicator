@@ -104,6 +104,11 @@ pub fn detect(root: &Path) -> MediumInfo {
     platform::detect(root)
 }
 
+// Windows' `detect()` always resolves to a concrete `Network` or
+// drive-based kind and never needs the fully-generic "give up" shape --
+// unlike Linux/macOS, whose `detect()` falls back to this on I/O errors --
+// so this is legitimately unused on that platform, not an oversight.
+#[cfg_attr(windows, allow(dead_code))]
 fn unknown() -> MediumInfo {
     MediumInfo {
         medium_kind: MediumKind::Unknown,

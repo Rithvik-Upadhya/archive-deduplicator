@@ -21,7 +21,6 @@
     import * as Empty from '$lib/components/ui/empty';
     import * as AlertDialog from '$lib/components/ui/alert-dialog';
     import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
-    import { Separator } from '$lib/components/ui/separator';
     import ScanConfigDialog from '$lib/components/ScanConfigDialog.svelte';
 
     let scanDialogOpen = $state(false);
