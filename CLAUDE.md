@@ -126,9 +126,15 @@ parse.rs / scan.rs  →  nodes table  →  links.rs  →  hashing.rs  →  dedup
   Metadata tiers C–E are never built that way; a group must be a genuine clique (every pair
   independently qualifies at that tier), enforced via exact-name grouping for C/D (name equality is
   transitive) and Bron–Kerbosch maximal-clique enumeration for E (the mtime-tolerance edge condition
-  is not transitive) — and a pair where both sides are hashed is skipped entirely in C–E, since a
-  hash match already claimed it at A/B and a hash mismatch is an absolute veto; a hashed file paired
-  with an *unhashed* one is untouched and still eligible for ordinary metadata evidence. Two tunables
+  is not transitive). Two hash-derived exclusions then apply to C–E: a pair hashed under the same
+  spec with *differing* digests is an absolute veto (it must never be softened into a metadata
+  match), and — separately — a metadata group whose members *all* belong to one and the same A/B
+  hash group is dropped as redundant, since it only restates at lower confidence a group content
+  evidence already produced. That second rule is deliberately whole-group rather than per-pair: a
+  *mixed* group (some members hash-mates, some not) is emitted intact, because suppressing the
+  individual hash-mate pairs would split it into one group per cross-cohort pairing and inflate the
+  count this rule exists to reduce. A hashed file paired with an *unhashed* one is untouched and
+  still eligible for ordinary metadata evidence. Two tunables
   come from the UI: `min_size_bytes` (a **hard filter**, default 64 KiB) and `min_confidence` (a tier
   cutoff now, not a continuous threshold). `kind='hardlink'` groups are `links.rs`'s, not this
   module's — the group-clearing `DELETE` at the start of a run explicitly spares them.

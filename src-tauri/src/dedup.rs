@@ -307,21 +307,39 @@ fn all_pairs_strong_mtime(files: &[FileRow], group: &[usize]) -> bool {
 ///   dragging two unrelated files into the same group (the same failure
 ///   union-find had).
 ///
-/// Both tiers additionally honor the hash veto (both hashed, same
-/// spec, digests differ): a hash-confirmed-different pair must never be
-/// softened into a metadata match. Tier E folds this into its edge
-/// condition directly. Tier C/D's exact-name grouping has no per-pair check
-/// to fold it into (name equality is transitive, which is what makes it
-/// clique-free in the first place) -- so instead, a name-group that
-/// internally contains two hash-confirmed-different members is dropped
-/// entirely rather than partially reconciled, consistent with this
-/// matcher's "when a group is internally contradictory or expensive to
-/// verify, drop rather than guess" design (the same rule `MAX_GROUP_SIZE`
-/// and the clique-budget cutoff already apply elsewhere). A hash-confirmed-
-/// *same* pair is unaffected by this and still participates normally here
-/// (redundant with the tier A/B group formed separately in
-/// `run_with_progress`, not wrong).
-fn resolve_groups_in_bucket(files: &[FileRow], idxs: &[usize]) -> Vec<(Tier, Vec<usize>)> {
+/// Two hash-derived exclusions apply on top of that, and they are opposites
+/// of each other -- one for hash-confirmed-*different* members, one for
+/// hash-confirmed-*same* ones:
+///
+/// 1. **The hash veto** (both hashed, same spec, digests differ): a
+///    hash-confirmed-different pair must never be softened into a metadata
+///    match. Tier E folds this into its edge condition directly. Tier C/D's
+///    exact-name grouping has no per-pair check to fold it into (name
+///    equality is transitive, which is what makes it clique-free in the
+///    first place) -- so instead, a name-group that internally contains two
+///    hash-confirmed-different members is dropped entirely rather than
+///    partially reconciled, consistent with this matcher's "when a group is
+///    internally contradictory or expensive to verify, drop rather than
+///    guess" design (the same rule `MAX_GROUP_SIZE` and the clique-budget
+///    cutoff already apply elsewhere).
+/// 2. **The redundancy rule** (`group_is_hash_redundant`): a metadata group
+///    whose members *all* belong to one and the same tier A/B hash group is
+///    dropped, because it only restates -- at lower confidence, on weaker
+///    evidence -- a group `run_with_progress` already formed from content
+///    itself. Without this, a hashed corpus produces two groups for nearly
+///    every duplicate set and roughly doubles the count the UI reports.
+///
+/// The redundancy rule is deliberately whole-group rather than per-pair.
+/// Suppressing individual pairs would break a *mixed* group (some members
+/// hash-mates, some not) into one group per cross-cohort pairing, which
+/// inflates the group count in exactly the way this rule exists to prevent.
+/// So a mixed group is emitted intact, hash-mates and all; only the wholly
+/// redundant case is dropped.
+fn resolve_groups_in_bucket(
+    files: &[FileRow],
+    hash_group_of: &[Option<usize>],
+    idxs: &[usize],
+) -> Vec<(Tier, Vec<usize>)> {
     let mut out = Vec::new();
 
     let mut by_ext: HashMap<String, Vec<usize>> = HashMap::new();
@@ -344,6 +362,9 @@ fn resolve_groups_in_bucket(files: &[FileRow], idxs: &[usize]) -> Vec<(Tier, Vec
                 continue;
             }
             if group_has_hash_conflict(files, &group) {
+                continue;
+            }
+            if group_is_hash_redundant(hash_group_of, &group) {
                 continue;
             }
             let tier = if all_pairs_strong_mtime(files, &group) {
@@ -391,6 +412,13 @@ fn resolve_groups_in_bucket(files: &[FileRow], idxs: &[usize]) -> Vec<(Tier, Vec
                 if clique.len() > MAX_GROUP_SIZE {
                     continue;
                 }
+                // Applied to the emitted clique rather than to the edge
+                // condition above: as an edge rule it would split mixed
+                // cliques into several smaller groups, the outcome the
+                // whole-group framing exists to avoid.
+                if group_is_hash_redundant(hash_group_of, &clique) {
+                    continue;
+                }
                 out.push((Tier::E, clique));
             }
         }
@@ -412,6 +440,26 @@ fn group_has_hash_conflict(files: &[FileRow], group: &[usize]) -> bool {
         }
     }
     false
+}
+
+/// Whether every member of `group` belongs to the same tier A/B hash group,
+/// making this metadata group a pure restatement of one already formed from
+/// content evidence -- see `resolve_groups_in_bucket`'s doc comment.
+///
+/// A single `Vec<Option<usize>>` lookup suffices because a file's hash-group
+/// key is `(size, hash_spec, content_hash)`, which is a function of the file:
+/// a file belongs to at most one hash group, so "same group" needs no set
+/// intersection. An unhashed member (`None`), or two members in *different*
+/// hash groups, means the group carries evidence no single hash group
+/// already covers, and it survives.
+fn group_is_hash_redundant(hash_group_of: &[Option<usize>], group: &[usize]) -> bool {
+    let Some(&first) = group.first() else {
+        return false;
+    };
+    let Some(id) = hash_group_of[first] else {
+        return false;
+    };
+    group.iter().all(|&i| hash_group_of[i] == Some(id))
 }
 
 /// Run the full dedup pass for a workspace: clears prior groups, rebuilds file
@@ -436,7 +484,12 @@ fn group_has_hash_conflict(files: &[FileRow], group: &[usize]) -> bool {
 /// on exact name with one partner, and a separate tier-E match on parent
 /// folder with a different partner) -- this reflects two independent pieces
 /// of partial evidence, not a bug; `get_group_for_node` already resolves
-/// "which one to show" via `ORDER BY confidence DESC LIMIT 1`.
+/// "which one to show" via `ORDER BY confidence DESC LIMIT 1`. What is *not*
+/// legitimate is the degenerate version of that: a metadata group with the
+/// same membership as a hash group, which is one piece of evidence counted
+/// twice. `group_is_hash_redundant` drops those, so the group count the UI
+/// reports stays proportional to the number of distinct duplicate sets found
+/// rather than doubling as soon as a workspace is hashed.
 ///
 /// Calls `on_phase(name, current, total)` at each of the five natural phase
 /// boundaries below (plus a final "done" tick), so a caller with a progress
@@ -476,6 +529,10 @@ pub fn run_with_progress(
                 .push(i);
         }
     }
+    // Which hash group each file landed in, so the metadata tiers below can
+    // drop groups that merely restate one of these (see
+    // `group_is_hash_redundant`). `None` for a file in no hash group.
+    let mut hash_group_of: Vec<Option<usize>> = vec![None; files.len()];
     for group in by_hash.into_values() {
         // No MAX_GROUP_SIZE cap here, unlike the metadata tiers below: the cap
         // exists because a large metadata cluster is probably systematic
@@ -494,14 +551,33 @@ pub fn run_with_progress(
         } else {
             Tier::B
         };
+        // Only a hash group that will actually be *persisted* may suppress a
+        // metadata group: suppressing on behalf of a group the insert loop
+        // below then drops would erase the match from the UI entirely rather
+        // than merely de-duplicate it.
+        //
+        // With today's constants this can't happen -- every hash tier (100,
+        // 99) outranks every metadata tier (70, 55, 45), so any
+        // `min_confidence` that drops a hash group drops all its possible
+        // metadata counterparts too. The check is kept anyway so the
+        // suppression rule is self-contained, rather than silently correct
+        // only because of a numeric coincidence between two separate sets of
+        // tier constants that a future tier could break.
+        if tier.confidence() >= params.min_confidence {
+            let id = groups.len();
+            for &i in &group {
+                hash_group_of[i] = Some(id);
+            }
+        }
         groups.push((tier, group));
     }
 
     // Metadata tiers (C/D/E) run over ALL files -- hashed and unhashed
     // alike, since a hashed file paired with an *unhashed* one is still
-    // eligible for ordinary metadata evidence (see `resolve_groups_in_bucket`'s
-    // doc comment for the one exclusion: two hashed-and-different files must
-    // never co-occur in a metadata group either).
+    // eligible for ordinary metadata evidence. Two exclusions apply (see
+    // `resolve_groups_in_bucket`'s doc comment): two hashed-and-*different*
+    // files must never co-occur in a metadata group, and a group whose
+    // members all sit in one hash group is dropped as redundant.
     //
     // Bucket file indices by size. Files below the tunable minimum, and
     // zero-byte files unconditionally (an absolute veto, not merely a
@@ -518,7 +594,7 @@ pub fn run_with_progress(
         if idxs.len() < 2 {
             continue;
         }
-        groups.extend(resolve_groups_in_bucket(&files, idxs));
+        groups.extend(resolve_groups_in_bucket(&files, &hash_group_of, idxs));
     }
 
     on_phase("grouping", 2, TOTAL_PHASES);
@@ -1174,6 +1250,113 @@ mod tests {
         let ws = 1;
         run_with_progress(&mut conn, ws, DedupParams::default(), |_, _, _| {}).unwrap();
         assert!(group_rows(&conn, ws).is_empty());
+    }
+
+    #[test]
+    fn hash_group_is_not_restated_as_metadata_group() {
+        // Two files that hash identically AND share name/size/mtime. The
+        // hash group already says everything the name+mtime group would, so
+        // only the tier-A group may be persisted -- otherwise every hashed
+        // duplicate set is listed twice and the UI's group count doubles.
+        let mut conn = setup_files(&[
+            ("a.jpg", 500_000, Some("2024-01-01_10:00:00"), ""),
+            ("a.jpg", 500_000, Some("2024-01-01_10:00:00"), ""),
+        ]);
+        // Both rows are named "a.jpg" at top level, so this hashes both.
+        set_hash(&conn, "a.jpg", "", "full", "blake3/v1/full", &[0xAB; 32]);
+
+        let ws = 1;
+        run_with_progress(&mut conn, ws, DedupParams::default(), |_, _, _| {}).unwrap();
+        assert_eq!(
+            group_rows(&conn, ws),
+            vec![(100.0, "hash-full".to_string())],
+            "a metadata group with the same members as a hash group is one \
+             piece of evidence counted twice and must not be persisted"
+        );
+    }
+
+    #[test]
+    fn hashed_pair_still_matches_an_unhashed_third_file() {
+        // Mixed group: `a`/`b` are hash-mates, `c` was never hashed. The
+        // metadata group is NOT wholly redundant -- it carries the a-c and
+        // b-c evidence no hash group covers -- so it survives intact, with
+        // all three members. Deliberately whole-group rather than per-pair:
+        // suppressing just the a-b pair would split this into {a,c} and
+        // {b,c}, inflating the count instead of reducing it.
+        let mut conn = setup_files(&[
+            ("a.jpg", 500_000, Some("2024-01-01_10:00:00"), ""),
+            ("a.jpg", 500_000, Some("2024-01-01_10:00:00"), ""),
+            ("a.jpg", 500_000, Some("2024-01-01_10:00:00"), ""),
+        ]);
+        set_hash(&conn, "a.jpg", "", "full", "blake3/v1/full", &[0xAB; 32]);
+        // set_hash hit all three rows; unhash the last so only two are mates.
+        conn.execute(
+            "UPDATE nodes SET content_hash = NULL, hash_kind = NULL, hash_spec = NULL
+             WHERE type = 'file' AND id = (SELECT MAX(id) FROM nodes WHERE type = 'file')",
+            [],
+        )
+        .unwrap();
+
+        let ws = 1;
+        run_with_progress(&mut conn, ws, DedupParams::default(), |_, _, _| {}).unwrap();
+        assert_eq!(
+            group_rows(&conn, ws),
+            vec![
+                (100.0, "hash-full".to_string()),
+                (70.0, "name+mtime".into())
+            ],
+            "a mixed group carries evidence no hash group covers and must survive"
+        );
+
+        let members: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM match_members mm
+                 JOIN match_groups mg ON mg.id = mm.group_id
+                 WHERE mg.workspace_id = ?1 AND mg.primary_signal = 'name+mtime'",
+                params![ws],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            members, 3,
+            "the surviving metadata group keeps all three members, hash-mates included"
+        );
+    }
+
+    #[test]
+    fn tier_e_clique_wholly_inside_one_hash_group_is_dropped() {
+        // Tier E's exclusion is applied to the emitted clique, not to the
+        // edge condition. Two hash-mates with differing names under a shared
+        // parent would otherwise form a redundant parent+mtime group.
+        let mut conn = setup_files(&[
+            ("a.jpg", 500_000, Some("2024-01-01_10:00:00"), "p"),
+            ("b.jpg", 500_000, Some("2024-01-01_10:00:00"), "p"),
+        ]);
+        set_hash(&conn, "a.jpg", "p", "full", "blake3/v1/full", &[0xAB; 32]);
+        set_hash(&conn, "b.jpg", "p", "full", "blake3/v1/full", &[0xAB; 32]);
+
+        let ws = 1;
+        run_with_progress(&mut conn, ws, DedupParams::default(), |_, _, _| {}).unwrap();
+        assert_eq!(
+            group_rows(&conn, ws),
+            vec![(100.0, "hash-full".to_string())],
+            "tier E must not restate a hash group either"
+        );
+    }
+
+    #[test]
+    fn hash_redundancy_needs_one_shared_group_not_merely_hashed_members() {
+        // The rule keys on shared hash-group membership, not on "is hashed".
+        assert!(group_is_hash_redundant(&[Some(0), Some(0)], &[0, 1]));
+        assert!(
+            !group_is_hash_redundant(&[Some(0), Some(1)], &[0, 1]),
+            "members of two different hash groups are not covered by either"
+        );
+        assert!(
+            !group_is_hash_redundant(&[Some(0), None], &[0, 1]),
+            "an unhashed member means the group carries uncovered evidence"
+        );
+        assert!(!group_is_hash_redundant(&[None, None], &[0, 1]));
     }
 
     #[test]
