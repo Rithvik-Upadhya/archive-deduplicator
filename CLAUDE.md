@@ -31,7 +31,7 @@ pnpm check                 # svelte-kit sync + svelte-check (the TS typecheck)
 pnpm tauri build           # production bundle
 
 cd src-tauri
-cargo test                 # Rust tests (db.rs, dedup.rs, links.rs, rollup.rs, dbio.rs, consolidate.rs, pathfix.rs)
+cargo test                 # Rust tests (db.rs, dedup.rs, links.rs, rollup.rs, dbio.rs, consolidate.rs, pathfix.rs, medium.rs, hashing.rs)
 cargo test detects_cross_source_file_duplicates    # single test
 cargo clippy && cargo fmt
 ```
