@@ -3,6 +3,7 @@ mod consolidate;
 mod db;
 mod dbio;
 mod dedup;
+mod hashing;
 mod links;
 mod medium;
 mod model;

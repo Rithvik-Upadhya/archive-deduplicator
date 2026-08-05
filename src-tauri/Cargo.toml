@@ -26,6 +26,7 @@ serde_json = "1"
 walkdir = "2"
 chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.40.1", features = ["backup", "bundled"] }
+blake3 = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
