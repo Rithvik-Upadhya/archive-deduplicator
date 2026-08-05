@@ -333,9 +333,12 @@ pub struct LaneConfig {
 
 impl LaneConfig {
     /// A single flat pool of `queue_depth` workers handling every job,
-    /// regardless of size -- the pre-lane-split behavior, kept as a named
-    /// constructor for SSD (where there's no seek cost to isolate) and for
-    /// tests that don't care about the lane split.
+    /// regardless of size -- the pre-lane-split behavior. Production code
+    /// always goes through `from_profile` (SSD's profile already yields this
+    /// same shape via `large_file_threshold: i64::MAX`); this constructor
+    /// exists only so tests that don't care about the lane split can build a
+    /// `LaneConfig` without spelling out all three fields.
+    #[cfg(test)]
     pub fn flat(queue_depth: usize) -> Self {
         LaneConfig {
             small_depth: queue_depth,
