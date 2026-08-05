@@ -1,9 +1,11 @@
 // Tracks long-running operations (folder scans, dedup analysis) so the UI can
 // show a floating progress card and grey out the button that would start a
-// second task of the same kind. Same class-singleton runes pattern as
-// `app.svelte.ts`.
+// second task of the same kind. Also doubles as the app's single notification
+// mechanism via `notify()`, for one-shot success/error cards (rename, delete,
+// import/export, …) that need no progress phase. Same class-singleton runes
+// pattern as `app.svelte.ts`.
 
-export type TaskKind = 'scan' | 'dedup';
+export type TaskKind = 'scan' | 'dedup' | 'action';
 export type TaskStatus = 'running' | 'success' | 'error';
 
 export interface Task {
@@ -50,6 +52,21 @@ class TaskTrayState {
 
     dismiss(id: string) {
         this.tasks = this.tasks.filter(t => t.id !== id);
+    }
+
+    /** One-shot success/error notice (rename, delete, import/export, …) with
+     *  no progress phase -- replaces what used to be a sonner toast call.
+     *  Auto-dismisses so `'action'` cards don't pile up in the tray the way
+     *  a sticky scan/dedup task card should; the user can still dismiss it
+     *  early via the card's own button. */
+    notify(label: string, status: 'success' | 'error', message?: string): string {
+        const id = this.start('action', label);
+        this.resolve(id, status, message);
+        setTimeout(
+            () => this.dismiss(id),
+            status === 'error' ? 7000 : 4000
+        );
+        return id;
     }
 }
 

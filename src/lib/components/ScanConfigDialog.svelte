@@ -8,7 +8,7 @@
     import * as Dialog from '$lib/components/ui/dialog';
     import * as ToggleGroup from '$lib/components/ui/toggle-group';
     import Icon from '@iconify/svelte';
-    import { toast } from 'svelte-sonner';
+    import { taskTray } from '$lib/stores/tasks.svelte';
 
     let {
         open = $bindable(false),
@@ -69,7 +69,7 @@
                 strideKb = Math.round(settings.spec.stride / 1024);
             }
         } catch (err) {
-            toast.error(String(err));
+            taskTray.notify('Detection failed', 'error', String(err));
         } finally {
             loading = false;
         }
