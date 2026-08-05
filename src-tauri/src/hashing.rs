@@ -31,12 +31,17 @@ pub struct HashSpec {
 }
 
 impl HashSpec {
-    /// A reasonable out-of-the-box default: 8 MiB threshold, 1 MiB probe,
+    /// A reasonable out-of-the-box default: 32 MiB threshold, 1 MiB probe,
     /// 32 MiB stride -- used only until a workspace's first hashed scan
-    /// locks in whatever spec was actually in force.
+    /// locks in whatever spec was actually in force. 32 MiB (rather than a
+    /// tighter threshold) is chosen so that files in the 8-32 MiB range get
+    /// a full, hash-proven (tier A) comparison instead of a sampled (tier B)
+    /// one -- on a typical archive-disc corpus that band is a small slice of
+    /// total bytes, so the extra I/O to fully hash it is cheap relative to
+    /// the stronger evidence it buys.
     pub fn default_spec() -> Self {
         HashSpec {
-            threshold: Some(8 * 1024 * 1024),
+            threshold: Some(32 * 1024 * 1024),
             probe: 1024 * 1024,
             stride: 32 * 1024 * 1024,
         }
@@ -275,43 +280,95 @@ pub fn hash_file(
 /// disk, and its size (needed for region planning without re-stat'ing).
 pub type HashJob = (i64, PathBuf, i64);
 
-/// Hash `jobs` using a fixed-size worker pool (sized from
-/// `medium::MediumProfile::reader_queue_depth`). On HDD the point isn't CPU
-/// parallelism -- the head is singular -- but keeping several reads in
-/// flight so the drive's NCQ can reorder them. Results arrive in completion
+/// Worker-pool sizing for `hash_files_pooled`, split by file size into a
+/// "small" lane (many concurrent readers -- these are seek-bound anyway on
+/// a spinning disk, so a deep queue lets the drive's NCQ reorder them
+/// productively) and a "large" lane (usually just one reader -- concurrent
+/// multi-GB sequential reads from different physical locations thrash a
+/// single HDD head far worse than concurrent small reads do, so the large
+/// lane is kept shallow to protect that streaming throughput). Adapted from
+/// fclones' own per-device-type thread pools, but computed once up front
+/// (never escalated mid-run) since this project can't assume a source is
+/// still online later to re-read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LaneConfig {
+    pub small_depth: usize,
+    pub large_depth: usize,
+    pub large_threshold: i64,
+}
+
+impl LaneConfig {
+    /// A single flat pool of `queue_depth` workers handling every job,
+    /// regardless of size -- the pre-lane-split behavior, kept as a named
+    /// constructor for SSD (where there's no seek cost to isolate) and for
+    /// tests that don't care about the lane split.
+    pub fn flat(queue_depth: usize) -> Self {
+        LaneConfig {
+            small_depth: queue_depth,
+            large_depth: queue_depth,
+            large_threshold: i64::MAX,
+        }
+    }
+
+    pub fn from_profile(profile: &medium::MediumProfile) -> Self {
+        LaneConfig {
+            small_depth: profile.reader_queue_depth,
+            large_depth: profile.large_lane_queue_depth,
+            large_threshold: profile.large_file_threshold,
+        }
+    }
+}
+
+/// Hash `jobs` using two worker pools sized by `lanes` (see `LaneConfig`):
+/// jobs under `lanes.large_threshold` run on the small lane, everything else
+/// on the large lane, both lanes active concurrently. `LaneConfig::flat`
+/// collapses this back to a single pool. Results arrive in completion
 /// order, not job order; each is tagged with its node id so the caller (the
 /// batched-persistence loop in `commands.rs`) can match them back up.
 pub fn hash_files_pooled(
     jobs: Vec<HashJob>,
     spec: HashSpec,
-    queue_depth: usize,
+    lanes: LaneConfig,
 ) -> Vec<(i64, std::io::Result<(blake3::Hash, &'static str, i64)>)> {
     let expected = jobs.len();
-    // An MPMC channel: every worker clones its own `Receiver` and pulls
-    // directly, no `Mutex` serializing access to a single `mpsc::Receiver`
-    // (which would make every worker contend on one lock just to grab its
-    // next job). Unbounded is fine -- the full job list is already in
-    // memory as `jobs` before this call.
-    let (work_tx, work_rx) = crossbeam_channel::unbounded::<HashJob>();
-    for job in jobs {
-        let _ = work_tx.send(job);
-    }
-    drop(work_tx);
+    // A stable partition preserves whatever order `resolve_candidates`
+    // already sorted `jobs` into (physical-order on HDD) within each lane.
+    let (large_jobs, small_jobs): (Vec<HashJob>, Vec<HashJob>) = jobs
+        .into_iter()
+        .partition(|(_, _, size)| *size >= lanes.large_threshold);
 
     let (result_tx, result_rx) = crossbeam_channel::unbounded();
-    let n_workers = queue_depth.max(1);
-    let mut handles = Vec::with_capacity(n_workers);
-    for _ in 0..n_workers {
-        let work_rx = work_rx.clone();
-        let result_tx = result_tx.clone();
-        handles.push(std::thread::spawn(move || {
-            while let Ok((node_id, path, size)) = work_rx.recv() {
-                let result = hash_file(&path, size, &spec);
-                if result_tx.send((node_id, result)).is_err() {
-                    break;
+    let mut handles = Vec::new();
+    for (lane_jobs, depth) in [
+        (small_jobs, lanes.small_depth),
+        (large_jobs, lanes.large_depth),
+    ] {
+        if lane_jobs.is_empty() {
+            continue;
+        }
+        // An MPMC channel per lane: every worker clones its own `Receiver`
+        // and pulls directly, no `Mutex` serializing access to a single
+        // `mpsc::Receiver`. Unbounded is fine -- the full job list is
+        // already in memory before this call.
+        let (work_tx, work_rx) = crossbeam_channel::unbounded::<HashJob>();
+        for job in lane_jobs {
+            let _ = work_tx.send(job);
+        }
+        drop(work_tx);
+
+        let n_workers = depth.max(1);
+        for _ in 0..n_workers {
+            let work_rx = work_rx.clone();
+            let result_tx = result_tx.clone();
+            handles.push(std::thread::spawn(move || {
+                while let Ok((node_id, path, size)) = work_rx.recv() {
+                    let result = hash_file(&path, size, &spec);
+                    if result_tx.send((node_id, result)).is_err() {
+                        break;
+                    }
                 }
-            }
-        }));
+            }));
+        }
     }
     drop(result_tx);
 
@@ -565,7 +622,7 @@ const HASH_BATCH_SIZE: usize = 2000;
 pub fn run_hash_scan(
     conn: &mut Connection,
     source_id: i64,
-    queue_depth: usize,
+    lanes: LaneConfig,
     cancel: &AtomicBool,
     mut on_progress: impl FnMut(u64, u64),
 ) -> rusqlite::Result<HashScanReport> {
@@ -629,7 +686,7 @@ pub fn run_hash_scan(
             .iter()
             .map(|c| (c.node_id, Path::new(&root).join(&c.rel_path), c.size))
             .collect();
-        let results = hash_files_pooled(jobs, spec, queue_depth.max(1));
+        let results = hash_files_pooled(jobs, spec, lanes);
 
         let ts = now();
         let tx = conn.transaction()?;
@@ -996,6 +1053,75 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Guards against a regression that would make interior probes silent
+    /// no-ops (e.g. an off-by-one in `plan_regions` that never actually
+    /// reads the differing byte). Two same-size files with identical head
+    /// and tail bytes, differing only at an offset deterministically inside
+    /// one of `plan_regions`' interior probes, must still hash differently
+    /// -- this is the sampled-tier detection this project's low-false-
+    /// positive design relies on.
+    #[test]
+    fn sampled_hash_detects_a_difference_that_falls_inside_a_probed_region() {
+        let dir =
+            std::env::temp_dir().join(format!("adedup_hash_test_probe_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let spec = HashSpec {
+            threshold: Some(8192),
+            probe: 64,
+            stride: 4096,
+        };
+        let size: usize = 20_000;
+        // `align_down` rounds an offset down to the nearest 4096-byte
+        // boundary, so probe offsets below 4096 all collapse to 0 -- pick a
+        // size large enough that interior probes land past that boundary.
+        // n = clamp(20000/4096, 0, 4096) = 4 interior probes at
+        // align_down(i*20000/5, 4096) for i in 1..=4 => 0, 4096, 8192, 12288,
+        // each covering [off..off+64). Head is [0..64), tail is [19936..20000).
+        // Offset 4100 falls inside the second interior probe [4096..4160)
+        // and outside both head and tail, so only a real interior read
+        // detects a difference there.
+        assert!(regions_cover_offset(
+            &plan_regions(size as i64, &spec),
+            4100
+        ));
+        assert!(!(0..64).contains(&4100) && !(19936..20_000).contains(&4100));
+
+        let mut content_a = vec![0u8; size];
+        for (i, b) in content_a.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        let mut content_b = content_a.clone();
+        content_b[4100] ^= 0xFF;
+
+        let a = dir.join("a.bin");
+        let b = dir.join("b.bin");
+        std::fs::write(&a, &content_a).unwrap();
+        std::fs::write(&b, &content_b).unwrap();
+
+        let (hash_a, kind_a, _) = hash_file(&a, size as i64, &spec).unwrap();
+        let (hash_b, kind_b, _) = hash_file(&b, size as i64, &spec).unwrap();
+        assert_eq!(kind_a, "sampled");
+        assert_eq!(kind_b, "sampled");
+        assert_ne!(
+            hash_a, hash_b,
+            "a difference inside an interior probe region must change the digest"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn regions_cover_offset(regions: &[Range<i64>], offset: i64) -> bool {
+        regions.iter().any(|r| r.contains(&offset))
+    }
+
+    /// Pins the deliberately-chosen default threshold so any future change
+    /// to it is an explicit, visible edit rather than an accidental drift.
+    #[test]
+    fn default_spec_threshold_matches_the_32mib_corpus_cutoff() {
+        assert_eq!(HashSpec::default_spec().threshold, Some(32 * 1024 * 1024));
+    }
+
     #[test]
     fn differing_spec_produces_a_different_digest_for_identical_bytes() {
         let dir = std::env::temp_dir().join(format!("adedup_hash_test3_{}", std::process::id()));
@@ -1043,7 +1169,49 @@ mod tests {
             probe: 0,
             stride: 0,
         };
-        let results = hash_files_pooled(jobs, spec, 4);
+        let results = hash_files_pooled(jobs, spec, LaneConfig::flat(4));
+        assert_eq!(results.len(), 20);
+
+        let mut seen: Vec<i64> = results.iter().map(|(id, _)| *id).collect();
+        seen.sort();
+        assert_eq!(seen, (0..20).collect::<Vec<_>>());
+        for (_, r) in &results {
+            assert!(r.is_ok());
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hash_files_pooled_splits_jobs_across_both_lanes_and_processes_every_job() {
+        let dir = std::env::temp_dir().join(format!("adedup_lane_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut jobs = Vec::new();
+        // Half the jobs are "small" (below the 50-byte lane threshold), half
+        // "large" -- exercising both lanes in one call.
+        for i in 0..20 {
+            let content = if i < 10 {
+                format!("s{i}")
+            } else {
+                format!("large-content-padded-out-{i:03}")
+            };
+            let path = dir.join(format!("f{i}.bin"));
+            let mut f = std::fs::File::create(&path).unwrap();
+            write!(f, "{content}").unwrap();
+            jobs.push((i as i64, path, content.len() as i64));
+        }
+
+        let spec = HashSpec {
+            threshold: None,
+            probe: 0,
+            stride: 0,
+        };
+        let lanes = LaneConfig {
+            small_depth: 3,
+            large_depth: 1,
+            large_threshold: 20,
+        };
+        let results = hash_files_pooled(jobs, spec, lanes);
         assert_eq!(results.len(), 20);
 
         let mut seen: Vec<i64> = results.iter().map(|(id, _)| *id).collect();
@@ -1102,8 +1270,14 @@ mod tests {
         let (_, locked_before) = get_hash_settings(&conn, ws).unwrap();
         assert!(!locked_before);
 
-        let report =
-            run_hash_scan(&mut conn, source_id, 4, &AtomicBool::new(false), |_, _| {}).unwrap();
+        let report = run_hash_scan(
+            &mut conn,
+            source_id,
+            LaneConfig::flat(4),
+            &AtomicBool::new(false),
+            |_, _| {},
+        )
+        .unwrap();
         assert_eq!(report.hashed, 2);
         assert_eq!(report.cached, 0);
         assert!(report.errors.is_empty());
@@ -1156,8 +1330,14 @@ mod tests {
         .unwrap();
         let source_id = conn.last_insert_rowid();
 
-        let report =
-            run_hash_scan(&mut conn, source_id, 4, &AtomicBool::new(false), |_, _| {}).unwrap();
+        let report = run_hash_scan(
+            &mut conn,
+            source_id,
+            LaneConfig::flat(4),
+            &AtomicBool::new(false),
+            |_, _| {},
+        )
+        .unwrap();
         assert_eq!(report.hashed, 0);
         assert_eq!(report.cached, 0);
     }
@@ -1186,8 +1366,14 @@ mod tests {
         // the wrong digest, making this a strong test of "zero content reads".
         std::fs::remove_file(dir.join("a.bin")).unwrap();
 
-        let report =
-            run_hash_scan(&mut conn, source_id, 4, &AtomicBool::new(false), |_, _| {}).unwrap();
+        let report = run_hash_scan(
+            &mut conn,
+            source_id,
+            LaneConfig::flat(4),
+            &AtomicBool::new(false),
+            |_, _| {},
+        )
+        .unwrap();
         assert_eq!(report.hashed, 0, "no real hashing should have happened");
         assert_eq!(report.cached, 1);
         assert!(report.errors.is_empty());
@@ -1210,12 +1396,24 @@ mod tests {
             vec![("a.bin", b"aaa"), ("b.bin", b"bbb"), ("c.bin", b"ccc")];
         let (mut conn, _ws, source_id, dir) = setup_scan_source(&files);
 
-        let first =
-            run_hash_scan(&mut conn, source_id, 4, &AtomicBool::new(false), |_, _| {}).unwrap();
+        let first = run_hash_scan(
+            &mut conn,
+            source_id,
+            LaneConfig::flat(4),
+            &AtomicBool::new(false),
+            |_, _| {},
+        )
+        .unwrap();
         assert_eq!(first.hashed, 3);
 
-        let second =
-            run_hash_scan(&mut conn, source_id, 4, &AtomicBool::new(false), |_, _| {}).unwrap();
+        let second = run_hash_scan(
+            &mut conn,
+            source_id,
+            LaneConfig::flat(4),
+            &AtomicBool::new(false),
+            |_, _| {},
+        )
+        .unwrap();
         assert_eq!(
             second.hashed, 0,
             "nothing is left to hash once every candidate has a digest"
@@ -1237,8 +1435,14 @@ mod tests {
             vec![("a.bin", b"aaa"), ("b.bin", b"bbb"), ("c.bin", b"ccc")];
         let (mut conn, _ws, source_id, dir) = setup_scan_source(&files);
 
-        let first =
-            run_hash_scan(&mut conn, source_id, 4, &AtomicBool::new(false), |_, _| {}).unwrap();
+        let first = run_hash_scan(
+            &mut conn,
+            source_id,
+            LaneConfig::flat(4),
+            &AtomicBool::new(false),
+            |_, _| {},
+        )
+        .unwrap();
         assert_eq!(first.hashed, 3);
 
         let b_id: i64 = conn
@@ -1266,8 +1470,14 @@ mod tests {
         // re-hash (already covered separately by `cache_hit_skips_content_read_entirely`).
         conn.execute("DELETE FROM hash_cache", []).unwrap();
 
-        let resumed =
-            run_hash_scan(&mut conn, source_id, 4, &AtomicBool::new(false), |_, _| {}).unwrap();
+        let resumed = run_hash_scan(
+            &mut conn,
+            source_id,
+            LaneConfig::flat(4),
+            &AtomicBool::new(false),
+            |_, _| {},
+        )
+        .unwrap();
         assert_eq!(
             resumed.hashed, 1,
             "only the one file with a cleared digest should be re-hashed"
@@ -1320,12 +1530,18 @@ mod tests {
 
         let cancel = AtomicBool::new(false);
         let mut batches_seen = 0u32;
-        let first = run_hash_scan(&mut conn, source_id, 4, &cancel, |_current, _total| {
-            batches_seen += 1;
-            if batches_seen == 1 {
-                cancel.store(true, Ordering::Relaxed);
-            }
-        })
+        let first = run_hash_scan(
+            &mut conn,
+            source_id,
+            LaneConfig::flat(4),
+            &cancel,
+            |_current, _total| {
+                batches_seen += 1;
+                if batches_seen == 1 {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            },
+        )
         .unwrap();
 
         assert!(
@@ -1349,8 +1565,14 @@ mod tests {
             "a cancelled run must leave scan_progress at 'hashing', never 'done'"
         );
 
-        let resumed =
-            run_hash_scan(&mut conn, source_id, 4, &AtomicBool::new(false), |_, _| {}).unwrap();
+        let resumed = run_hash_scan(
+            &mut conn,
+            source_id,
+            LaneConfig::flat(4),
+            &AtomicBool::new(false),
+            |_, _| {},
+        )
+        .unwrap();
         assert_eq!(
             resumed.hashed, 5,
             "resuming must hash exactly what the cancelled run left behind"
