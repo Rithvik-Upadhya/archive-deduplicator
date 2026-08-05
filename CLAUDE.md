@@ -5,9 +5,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this app does
 
 Archive Deduplicator is a Tauri 2 desktop app for reconciling several offline archives (old discs,
-external drives, backup folders) against each other. **It never reads file contents** — it works
-purely from filesystem metadata, either imported from a `tree` JSON dump or from a live folder walk.
-Everything lives in one local SQLite database, so all state survives a restart.
+external drives, backup folders) against each other. It matches primarily on filesystem metadata,
+either imported from a `tree` JSON dump or from a live folder walk, but a live scan can also
+opt into **BLAKE3 content hashing** (full or sampled, per-workspace-locked) for its highest-
+confidence tiers — imported `tree` JSON sources are still metadata-only, since the JSON dump
+never carries file bytes. Everything lives in one local SQLite database, so all state survives
+a restart.
 
 The user workflow is three views, in order, and much of the backend design follows from it:
 
@@ -74,38 +77,71 @@ Three files must be kept in lockstep — changing a command signature means edit
 ### Backend module flow
 
 ```
-parse.rs / scan.rs  →  nodes table  →  links.rs  →  dedup.rs  →  rollup.rs  →  dup_annot cache
-   (import)                          (hardlinks)   (matching)   (folders +      (fast tree browsing)
-                                                                 device stats)
+parse.rs / scan.rs  →  nodes table  →  links.rs  →  hashing.rs  →  dedup.rs  →  rollup.rs  →  dup_annot cache
+   (import)          (medium.rs      (hardlinks)   (content       (matching)   (folders +      (fast tree
+                       detects the                   hashing,                   listing hashes   browsing)
+                       volume first)                 optional)                  + device stats)
 ```
 
 - **`parse.rs`** flattens a `tree -JDs --inodes --device` JSON doc into `FlatNode`s, precomputing
   `subtree_size` / `subtree_file_count` bottom-up so the UI never aggregates. **`scan.rs`** produces
   the same `Flattened` struct from a live `WalkDir`, so both import paths share `insert_nodes`.
   Neither module knows about hardlinks — that's `links.rs`'s job, run as a post-`insert_nodes` step.
-- **`links.rs`** detects hardlink alias sets (files sharing `(dev, inode)` within one source) right
-  after `insert_nodes`, inside the same transaction. Only trusted where the platform's inode/dev
-  values are reliable (currently: Unix live scans only — see `scan_produces_trusted_inodes`; Windows
-  scans and `tree` JSON imports are always untrusted pending real per-volume filesystem detection).
-  The lowest-`rel_path` member becomes canonical; the rest get `nodes.alias_of` set and a
-  `kind='hardlink', confidence=100` match group. Aliases stay fully visible in `get_tree` (the user
-  still needs to see every name a physical file has) but are excluded from `subtree_size`/
-  `subtree_file_count` propagation into ancestors and from the matcher's candidate pool
-  (`dedup.rs::load_files` filters `alias_of IS NULL`) — deleting `k-1` aliases frees zero bytes until
-  the last name is gone, so they must never be scored as ordinary duplicates.
+  `scan.rs` also calls **`medium.rs`** once per scan root to detect storage medium (HDD/SSD/network/
+  optical) and filesystem type, persisted onto the `sources` row and used both as the hardlink-trust
+  gate (below) and to pick hashing defaults (queue depth, sampling vs. full-hash, `hash_min_size`).
+- **`links.rs`** detects hardlink alias sets (files sharing `(dev, inode[, inode_high])` within one
+  source) right after `insert_nodes`, inside the same transaction. `inode_high` holds the upper 64
+  bits of ReFS's 128-bit file IDs (kept as a separate column rather than folded into one i64, to
+  avoid silently colliding two different ReFS files that share a lower 64 bits). Only trusted where
+  the volume's filesystem is on `medium::filesystem_is_trusted`'s allowlist (NTFS/ReFS/ext*/XFS/
+  Btrfs/APFS/HFS+/ZFS) **and** the source is a live scan — `tree` JSON imports are always untrusted,
+  since the dump has no way to attest to real device/inode semantics. The lowest-`rel_path` member
+  becomes canonical; the rest get `nodes.alias_of` set and a `kind='hardlink', confidence=100` match
+  group. Aliases stay fully visible in `get_tree` (the user still needs to see every name a physical
+  file has) but are excluded from `subtree_size`/`subtree_file_count` propagation into ancestors and
+  from the matcher's candidate pool (`dedup.rs::load_files` filters `alias_of IS NULL`) — deleting
+  `k-1` aliases frees zero bytes until the last name is gone, so they must never be scored as
+  ordinary duplicates.
+- **`hashing.rs`** is an optional post-`links.rs` pass, run on demand per source via the
+  `run_hash_scan` command (its own DB connection, like `run_dedup`, so a multi-hour hash doesn't
+  block other commands) — nothing calls it automatically after `scan_folder`, so until the frontend
+  adds a trigger for it, hashing only happens if something explicitly invokes the command. BLAKE3, either full-file or sampled (head + tail + interior probes derived
+  purely from file size and the workspace's locked `HashSpec`, so region choice is deterministic
+  across resumed/re-run scans). A `hash_cache` table keyed by `(volume_id, file_id, size, mtime,
+  hash_spec)` makes re-scanning an unchanged tree a no-op read-wise. Resumable: candidates are
+  simply every eligible node with `content_hash IS NULL` (not an index-based cursor — that would
+  desync as the candidate list shrinks across resumed calls), processed in transactional batches of
+  2,000 so a crash loses at most one batch and never leaves a node with a partial hash. The hash
+  spec is locked per-workspace (`workspace_state` keys `hash.spec`/`hash.locked`) the first time any
+  node in it is actually hashed, so mixing incompatible specs within one workspace is structurally
+  prevented rather than merely discouraged.
 - **`dedup.rs`** is the matcher: absolute vetoes (different size via bucketing, different extension,
-  zero-byte) followed by three fixed-confidence evidence tiers that never merge or average —
-  C (70, exact name + strong mtime), D (55, exact name only), E (45, same parent-folder name +
-  some mtime support, names differ). Metadata-tier groups are never built by transitive union-find;
-  a group must be a genuine clique (every pair independently qualifies at that tier), enforced via
-  exact-name grouping for C/D (name equality is transitive) and Bron–Kerbosch maximal-clique
-  enumeration for E (the mtime-tolerance edge condition is not transitive). Two tunables come from
-  the UI: `min_size_bytes` (a **hard filter**, default 64 KiB) and `min_confidence` (a tier cutoff
-  now, not a continuous threshold). `kind='hardlink'` groups are `links.rs`'s, not this module's —
-  the group-clearing `DELETE` at the start of a run explicitly spares them.
-- **`rollup.rs`** builds folder-level groups on top of the file groups, then `rebuild_annotations`
-  writes the `dup_annot` table (per-node `has_dup` / `dup_pct`) so `get_tree` is a plain query.
-  Its byte/leaf rollup queries (`load_file_locs`, `load_leaf_locs`) also filter `alias_of IS NULL`.
+  zero-byte, or — for two files that are both hashed under the same spec — differing digests) followed
+  by five fixed-confidence evidence tiers that never merge or average — A (100, full-file hash match),
+  B (99, sampled-hash match), C (70, exact name + strong mtime), D (55, exact name only), E (45, same
+  parent-folder name + some mtime support, names differ). Tiers A/B are built by plain hash-equality
+  grouping (`HashMap` keyed on `(size, hash_spec, content_hash)`) since digest equality is a true
+  transitive equivalence relation — the one place this matcher uses union-find-style grouping.
+  Metadata tiers C–E are never built that way; a group must be a genuine clique (every pair
+  independently qualifies at that tier), enforced via exact-name grouping for C/D (name equality is
+  transitive) and Bron–Kerbosch maximal-clique enumeration for E (the mtime-tolerance edge condition
+  is not transitive) — and a pair where both sides are hashed is skipped entirely in C–E, since a
+  hash match already claimed it at A/B and a hash mismatch is an absolute veto; a hashed file paired
+  with an *unhashed* one is untouched and still eligible for ordinary metadata evidence. Two tunables
+  come from the UI: `min_size_bytes` (a **hard filter**, default 64 KiB) and `min_confidence` (a tier
+  cutoff now, not a continuous threshold). `kind='hardlink'` groups are `links.rs`'s, not this
+  module's — the group-clearing `DELETE` at the start of a run explicitly spares them.
+- **`rollup.rs`** builds folder-level groups on top of the file groups via two independent
+  detectors: the original 80%-byte-overlap heuristic, and a Merkle-style bottom-up `listing_hash`
+  (BLAKE3 over each directory's sorted immediate children — `"file:{name}:{size}:{mtime_norm}"` or
+  `"dir:{name}:{child.listing_hash}"` — so structurally identical subtrees hash equal even when
+  renamed, or when dominated by small unhashed files). Directories sharing a `listing_hash` across
+  ≥2 sources get a `kind='folder', primary_signal='listing', confidence=60.0` group alongside (not
+  replacing) the byte-heuristic's groups; both can legitimately fire on the same directory pair.
+  `rebuild_annotations` then writes the `dup_annot` table (per-node `has_dup` / `dup_pct`) so
+  `get_tree` is a plain query. Its byte/leaf rollup queries (`load_file_locs`, `load_leaf_locs`)
+  also filter `alias_of IS NULL`.
 - **`pathfix.rs`** walks the *consolidation* tree, not the sources — but descends into `nodes` for
   subtrees dragged in wholesale. Renames of consolidation nodes are written straight to
   `consolidation_nodes.name`; renames of files inside a dragged-in source directory are stored as
@@ -122,8 +158,12 @@ parse.rs / scan.rs  →  nodes table  →  links.rs  →  dedup.rs  →  rollup.
   there would reintroduce lock contention with `run_dedup`'s dedicated connection). Adding a column
   to an already-shipped table needs an entry in *both* `init_schema`'s DDL (for fresh databases) and
   `migrate`'s `alterations` list (for existing ones) — `CREATE TABLE IF NOT EXISTS` alone only ever
-  helps the former. The connection is a single `Mutex<Connection>` in Tauri managed state (`Db`), so
-  every command locks it; don't hold the lock across an `await`.
+  helps the former. Current `SCHEMA_VERSION = 3`, which added hashing/medium columns to `nodes` and
+  `sources` plus two brand-new tables, `hash_cache` and `scan_progress` (new tables need only the
+  `CREATE TABLE IF NOT EXISTS` in `init_schema`, not a `migrate` entry). The connection is a single
+  `Mutex<Connection>` in Tauri managed state (`Db`), so every command locks it; don't hold the lock
+  across an `await` — `run_dedup` and `run_hash_scan` both open their own dedicated connection via
+  `db::open` instead, so a long pass doesn't block the rest of the UI.
 
 ### Frontend
 
