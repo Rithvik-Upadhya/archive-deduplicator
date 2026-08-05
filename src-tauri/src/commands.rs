@@ -364,7 +364,7 @@ fn to_hash_spec_dto(spec: hashing::HashSpec) -> HashSpecDto {
     HashSpecDto {
         threshold: spec.threshold,
         probe: spec.probe,
-        stride: spec.stride,
+        max_probes: spec.max_probes,
         spec_string: spec.spec_string(),
     }
 }
@@ -392,7 +392,7 @@ pub fn hash_settings_set(db: State<Db>, workspace_id: i64, spec: HashSpecDto) ->
         hashing::HashSpec {
             threshold: spec.threshold,
             probe: spec.probe,
-            stride: spec.stride,
+            max_probes: spec.max_probes,
         },
     )
 }

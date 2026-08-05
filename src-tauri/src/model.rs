@@ -288,7 +288,7 @@ pub struct ScanPreview {
 pub struct HashSpecDto {
     pub threshold: Option<i64>,
     pub probe: i64,
-    pub stride: i64,
+    pub max_probes: i64,
     pub spec_string: String,
 }
 

@@ -71,7 +71,7 @@ export interface ScanPreview {
 export interface HashSpecDto {
     threshold: number | null;
     probe: number;
-    stride: number;
+    max_probes: number;
     spec_string: string;
 }
 
