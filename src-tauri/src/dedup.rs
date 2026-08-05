@@ -648,13 +648,25 @@ pub fn run_with_progress(
     // Folder-level rollup uses the freshly written file groups; the listing-
     // hash pass is independent of file groups entirely (pure structure) but
     // shares this phase since both produce `kind='folder'` groups.
+    //
+    // `build_folder_groups` and `rebuild_annotations` each need the same full
+    // `nodes` scan (every file's location, every directory's parent), so load
+    // it once here and pass it to both `_with` variants instead of letting
+    // each of them independently re-query the whole table.
     on_phase("folder_rollup", 3, TOTAL_PHASES);
-    let folder_groups = super::rollup::build_folder_groups(conn, workspace_id)?;
+    let rollup_files = super::rollup::load_file_locs(conn, workspace_id)?;
+    let rollup_parent_of = super::rollup::load_parent_of(conn, workspace_id)?;
+    let folder_groups = super::rollup::build_folder_groups_with(
+        conn,
+        workspace_id,
+        &rollup_files,
+        &rollup_parent_of,
+    )?;
     let listing_groups = super::rollup::compute_listing_hashes(conn, workspace_id)?;
 
     // Rebuild the per-node duplicate annotation cache so tree browsing is fast.
     on_phase("annotating", 4, TOTAL_PHASES);
-    super::rollup::rebuild_annotations(conn, workspace_id)?;
+    super::rollup::rebuild_annotations_with(conn, workspace_id, &rollup_files, &rollup_parent_of)?;
 
     on_phase("done", TOTAL_PHASES, TOTAL_PHASES);
     Ok(group_count + folder_groups + listing_groups)

@@ -59,7 +59,6 @@ pub fn run() {
             commands::run_dedup,
             commands::get_groups,
             commands::get_group_for_node,
-            commands::get_device_stats,
             commands::consolidation_get,
             commands::consolidation_add_node,
             commands::consolidation_add_source_subtree,

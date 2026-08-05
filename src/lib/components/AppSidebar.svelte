@@ -14,6 +14,20 @@
     import { mode, toggleMode } from 'mode-watcher';
 
     let dbBusy = $state(false);
+    let switchingWorkspace = $state(false);
+    let deleteBusy = $state(false);
+
+    async function selectWorkspace(id: number) {
+        if (switchingWorkspace || id === app.activeWorkspaceId) return;
+        switchingWorkspace = true;
+        try {
+            await app.selectWorkspace(id);
+        } catch (err) {
+            taskTray.notify('Switch workspace failed', 'error', String(err));
+        } finally {
+            switchingWorkspace = false;
+        }
+    }
 
     /* --- Workspace create / rename dialog --- */
     let nameDialogOpen = $state(false);
@@ -64,10 +78,11 @@
 
     async function confirmDelete() {
         const target = deleteTarget;
-        deleteTarget = null;
         if (!target) return;
+        deleteBusy = true;
         try {
             await app.deleteWorkspace(target.id);
+            deleteTarget = null;
             taskTray.notify(
                 'Workspace deleted',
                 'success',
@@ -75,6 +90,8 @@
             );
         } catch (err) {
             taskTray.notify('Delete failed', 'error', String(err));
+        } finally {
+            deleteBusy = false;
         }
     }
 
@@ -169,8 +186,8 @@
                                     >Workspaces</DropdownMenu.GroupHeading>
                                 {#each app.workspaces as ws (ws.id)}
                                     <DropdownMenu.Item
-                                        onSelect={() =>
-                                            app.selectWorkspace(ws.id)}>
+                                        disabled={switchingWorkspace}
+                                        onSelect={() => selectWorkspace(ws.id)}>
                                         <Icon
                                             icon={ws.id ===
                                             app.activeWorkspaceId
@@ -199,7 +216,8 @@
                                 <DropdownMenu.Item
                                     variant="destructive"
                                     disabled={app.workspaces.length <= 1 ||
-                                        !app.activeWorkspace}
+                                        !app.activeWorkspace ||
+                                        deleteBusy}
                                     onSelect={() => {
                                         const ws = app.activeWorkspace;
                                         if (ws)
@@ -363,11 +381,12 @@
             </AlertDialog.Description>
         </AlertDialog.Header>
         <AlertDialog.Footer>
-            <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+            <AlertDialog.Cancel disabled={deleteBusy}>Cancel</AlertDialog.Cancel>
             <AlertDialog.Action
+                disabled={deleteBusy}
                 onclick={confirmDelete}
                 class="bg-destructive text-white hover:bg-destructive/90">
-                Delete
+                {deleteBusy ? 'Deleting…' : 'Delete'}
             </AlertDialog.Action>
         </AlertDialog.Footer>
     </AlertDialog.Content>

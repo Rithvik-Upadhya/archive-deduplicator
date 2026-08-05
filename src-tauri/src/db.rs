@@ -7,6 +7,20 @@ use std::sync::Mutex;
 /// Managed database handle stored in Tauri state.
 pub struct Db(pub Mutex<Connection>);
 
+impl Db {
+    /// Lock the connection, recovering from poisoning instead of panicking.
+    ///
+    /// A panic anywhere in a command while holding this lock (an indexing
+    /// bug, an unexpected-data `unwrap()`) would otherwise poison the mutex
+    /// permanently, bricking every subsequent command for the rest of the
+    /// app session. SQLite's transactional model makes recovery safe here --
+    /// a panic mid-transaction just leaves it rolled back to the last
+    /// commit, so the recovered connection is never left half-written.
+    pub fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 /// The on-disk path of the managed database, stored alongside `Db` so a
 /// command can open its own dedicated connection (e.g. `run_dedup`, which
 /// must not hold `Db`'s mutex for the duration of a long-running pass).
@@ -88,8 +102,12 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_nodes_source ON nodes(source_id);
         CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_id);
-        CREATE INDEX IF NOT EXISTS idx_nodes_size ON nodes(size);
         CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type);
+        -- get_tree's hot lazy-load path filters on both columns together
+        -- (WHERE source_id = ? AND parent_id = ?) on every tree-expand
+        -- click; the single-column indexes above only let SQLite use one
+        -- and scan-filter the other.
+        CREATE INDEX IF NOT EXISTS idx_nodes_source_parent ON nodes(source_id, parent_id);
         -- idx_nodes_alias/idx_nodes_inode/idx_nodes_hash reference columns
         -- (alias_of / inode_trusted / content_hash) that only exist here
         -- because this same statement just created `nodes` from scratch.
@@ -216,7 +234,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 
 /// Target schema version. Bump this and add an entry to `migrate`'s
 /// `alterations` list whenever a column is added to an already-shipped table.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 8;
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
@@ -357,6 +375,8 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_nodes_alias ON nodes(alias_of) WHERE alias_of IS NOT NULL;
          CREATE INDEX IF NOT EXISTS idx_nodes_inode ON nodes(source_id, dev, inode) WHERE inode IS NOT NULL;
          CREATE INDEX IF NOT EXISTS idx_nodes_hash ON nodes(content_hash) WHERE content_hash IS NOT NULL;
+         CREATE INDEX IF NOT EXISTS idx_nodes_source_parent ON nodes(source_id, parent_id);
+         DROP INDEX IF EXISTS idx_nodes_size;
          CREATE TABLE IF NOT EXISTS hash_cache (
              volume_id TEXT NOT NULL, file_id INTEGER NOT NULL, size INTEGER NOT NULL,
              mtime TEXT NOT NULL, hash_spec TEXT NOT NULL, content_hash BLOB NOT NULL,

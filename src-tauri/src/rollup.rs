@@ -12,15 +12,37 @@ use rusqlite::{Connection, params};
 use std::collections::{HashMap, HashSet};
 
 /// A file's location used for folder rollups.
-struct FileLoc {
-    node_id: i64,
-    source_id: i64,
-    parent_id: Option<i64>,
-    size: i64,
+pub(crate) struct FileLoc {
+    pub(crate) node_id: i64,
+    pub(crate) source_id: i64,
+    pub(crate) parent_id: Option<i64>,
+    pub(crate) size: i64,
 }
 
 /// Build folder-level match groups. Returns the number of folder groups written.
-pub fn build_folder_groups(conn: &mut Connection, workspace_id: i64) -> rusqlite::Result<usize> {
+///
+/// Thin wrapper that loads `files`/`parent_of` itself, kept only for tests
+/// that exercise this in isolation. `dedup::run_with_progress` -- the only
+/// production caller -- uses `build_folder_groups_with` directly instead,
+/// since it and `rebuild_annotations` both need the exact same two
+/// full-table loads and are always called back-to-back in the same pass;
+/// loading twice there would be pure duplicated I/O.
+#[cfg(test)]
+pub(crate) fn build_folder_groups(
+    conn: &mut Connection,
+    workspace_id: i64,
+) -> rusqlite::Result<usize> {
+    let files = load_file_locs(conn, workspace_id)?;
+    let parent_of = load_parent_of(conn, workspace_id)?;
+    build_folder_groups_with(conn, workspace_id, &files, &parent_of)
+}
+
+pub(crate) fn build_folder_groups_with(
+    conn: &mut Connection,
+    workspace_id: i64,
+    files: &[FileLoc],
+    parent_of: &HashMap<i64, Option<i64>>,
+) -> rusqlite::Result<usize> {
     // node_id -> group_id for file members.
     let mut file_group: HashMap<i64, i64> = HashMap::new();
     {
@@ -38,10 +60,6 @@ pub fn build_folder_groups(conn: &mut Connection, workspace_id: i64) -> rusqlite
         }
     }
 
-    // Load all file nodes with their parent + size.
-    let files = load_file_locs(conn, workspace_id)?;
-    // Load directory parent chain so we can walk a file's ancestor folders.
-    let parent_of = load_parent_of(conn, workspace_id)?;
     let source_of = load_source_of(conn, workspace_id)?;
 
     // For each directory: total subtree file bytes, and duplicated bytes (files
@@ -52,13 +70,13 @@ pub fn build_folder_groups(conn: &mut Connection, workspace_id: i64) -> rusqlite
 
     // group_id -> list of (source_id, parent_dir_id) to detect cross-source dup.
     let mut group_sources: HashMap<i64, HashSet<i64>> = HashMap::new();
-    for f in &files {
+    for f in files {
         if let Some(gid) = file_group.get(&f.node_id) {
             group_sources.entry(*gid).or_default().insert(f.source_id);
         }
     }
 
-    for f in &files {
+    for f in files {
         // Accumulate this file's size into every ancestor directory's total.
         let mut cur = f.parent_id;
         while let Some(dir) = cur {
@@ -427,7 +445,10 @@ pub fn compute_listing_hashes(conn: &mut Connection, workspace_id: i64) -> rusql
     Ok(count)
 }
 
-fn load_file_locs(conn: &Connection, workspace_id: i64) -> rusqlite::Result<Vec<FileLoc>> {
+pub(crate) fn load_file_locs(
+    conn: &Connection,
+    workspace_id: i64,
+) -> rusqlite::Result<Vec<FileLoc>> {
     let mut stmt = conn.prepare(
         "SELECT n.id, n.source_id, n.parent_id, n.size FROM nodes n
          JOIN sources s ON s.id = n.source_id
@@ -470,7 +491,7 @@ fn load_leaf_locs(conn: &Connection, workspace_id: i64) -> rusqlite::Result<Vec<
     rows.collect()
 }
 
-fn load_parent_of(
+pub(crate) fn load_parent_of(
     conn: &Connection,
     workspace_id: i64,
 ) -> rusqlite::Result<HashMap<i64, Option<i64>>> {
@@ -638,7 +659,28 @@ pub fn cross_dup_size_by_source(
 /// without re-walking the tree client-side. `in_folder_group` (directories
 /// only) is whether the directory is a genuine member of a clustered
 /// folder-kind match group, as opposed to merely having `dup_pct > 0`.
-pub fn rebuild_annotations(conn: &mut Connection, workspace_id: i64) -> rusqlite::Result<()> {
+///
+/// Thin wrapper loading `files`/`parent_of` itself, kept only for tests that
+/// exercise this in isolation; see `build_folder_groups`'s doc comment --
+/// `dedup::run_with_progress` calls `rebuild_annotations_with` directly
+/// instead, reusing the same loads `build_folder_groups_with` made moments
+/// earlier in the same pass.
+#[cfg(test)]
+pub(crate) fn rebuild_annotations(
+    conn: &mut Connection,
+    workspace_id: i64,
+) -> rusqlite::Result<()> {
+    let files = load_file_locs(conn, workspace_id)?;
+    let parent_of = load_parent_of(conn, workspace_id)?;
+    rebuild_annotations_with(conn, workspace_id, &files, &parent_of)
+}
+
+pub(crate) fn rebuild_annotations_with(
+    conn: &mut Connection,
+    workspace_id: i64,
+    files: &[FileLoc],
+    parent_of: &HashMap<i64, Option<i64>>,
+) -> rusqlite::Result<()> {
     // A file is a duplicate when its group has >= 2 members anywhere (cross-
     // source or internal).
     let mut dup_files: HashSet<i64> = HashSet::new();
@@ -655,12 +697,9 @@ pub fn rebuild_annotations(conn: &mut Connection, workspace_id: i64) -> rusqlite
         }
     }
 
-    let files = load_file_locs(conn, workspace_id)?;
-    let parent_of = load_parent_of(conn, workspace_id)?;
-
     // Roll duplicated bytes up the ancestor chain.
     let mut dir_dup: HashMap<i64, i64> = HashMap::new();
-    for f in &files {
+    for f in files {
         if !dup_files.contains(&f.node_id) {
             continue;
         }
@@ -691,7 +730,7 @@ pub fn rebuild_annotations(conn: &mut Connection, workspace_id: i64) -> rusqlite
         }
     }
     let mut group_sources: HashMap<i64, HashSet<i64>> = HashMap::new();
-    for f in &files {
+    for f in files {
         if let Some(gid) = file_group.get(&f.node_id) {
             group_sources.entry(*gid).or_default().insert(f.source_id);
         }
@@ -740,7 +779,7 @@ pub fn rebuild_annotations(conn: &mut Connection, workspace_id: i64) -> rusqlite
     // dup_annot rows are needed for this.
     let mut dir_cross_size: HashMap<i64, i64> = HashMap::new();
     let mut dir_cross_count: HashMap<i64, i64> = HashMap::new();
-    for f in &files {
+    for f in files {
         if !cross_dup_files.contains(&f.node_id) {
             continue;
         }

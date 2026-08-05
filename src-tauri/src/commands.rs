@@ -21,13 +21,24 @@ fn map_err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
+/// Turns a single-row `query_row` result into `Ok(None)` only for the
+/// "no such row" case, surfacing every other error instead of masking it as
+/// a plain "not found" the way a blanket `.ok()` would.
+fn optional_row<T>(res: rusqlite::Result<T>) -> CmdResult<Option<T>> {
+    match res {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(map_err(e)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Workspaces
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
 pub fn workspace_list(db: State<Db>) -> CmdResult<Vec<Workspace>> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     let mut stmt = conn
         .prepare("SELECT id, name, created_at, updated_at FROM workspaces ORDER BY id")
         .map_err(map_err)?;
@@ -46,7 +57,7 @@ pub fn workspace_list(db: State<Db>) -> CmdResult<Vec<Workspace>> {
 
 #[tauri::command]
 pub fn workspace_create(db: State<Db>, name: String) -> CmdResult<Workspace> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     let ts = now();
     conn.execute(
         "INSERT INTO workspaces (name, created_at, updated_at) VALUES (?1, ?2, ?2)",
@@ -64,7 +75,7 @@ pub fn workspace_create(db: State<Db>, name: String) -> CmdResult<Workspace> {
 
 #[tauri::command]
 pub fn workspace_rename(db: State<Db>, id: i64, name: String) -> CmdResult<()> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "UPDATE workspaces SET name = ?1, updated_at = ?2 WHERE id = ?3",
         params![name, now(), id],
@@ -75,7 +86,7 @@ pub fn workspace_rename(db: State<Db>, id: i64, name: String) -> CmdResult<()> {
 
 #[tauri::command]
 pub fn workspace_delete(db: State<Db>, id: i64) -> CmdResult<()> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     conn.execute("DELETE FROM workspaces WHERE id = ?1", params![id])
         .map_err(map_err)?;
     Ok(())
@@ -87,7 +98,7 @@ pub fn workspace_delete(db: State<Db>, id: i64) -> CmdResult<()> {
 
 #[tauri::command]
 pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     let dup_by_src = rollup::duplicated_size_by_source(&conn, workspace_id).map_err(map_err)?;
     let cross_dup_by_src =
         rollup::cross_dup_size_by_source(&conn, workspace_id).map_err(map_err)?;
@@ -165,7 +176,7 @@ pub async fn import_tree_json(
     tauri::async_runtime::spawn_blocking(move || -> CmdResult<Source> {
         let flat = parse::parse_tree_json(&json_text)?;
         let db = app.state::<Db>();
-        let mut conn = db.0.lock().unwrap();
+        let mut conn = db.lock();
         let ts = now();
         let device_label = label.clone();
         let tx = conn.transaction().map_err(map_err)?;
@@ -248,7 +259,7 @@ pub async fn scan_folder(
         let volume_id = detected.volume_id.clone();
         let filesystem = filesystem_override.or(detected.filesystem);
         let db = app.state::<Db>();
-        let mut conn = db.0.lock().unwrap();
+        let mut conn = db.lock();
         let ts = now();
         let device_label = label.clone();
         let tx = conn.transaction().map_err(map_err)?;
@@ -362,7 +373,7 @@ fn to_hash_spec_dto(spec: hashing::HashSpec) -> HashSpecDto {
 /// in the UI once any source in the workspace has been hashed.
 #[tauri::command]
 pub fn hash_settings_get(db: State<Db>, workspace_id: i64) -> CmdResult<HashSettings> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     let (spec, locked) = hashing::get_hash_settings(&conn, workspace_id).map_err(map_err)?;
     Ok(HashSettings {
         spec: to_hash_spec_dto(spec),
@@ -374,7 +385,7 @@ pub fn hash_settings_get(db: State<Db>, workspace_id: i64) -> CmdResult<HashSett
 /// (as an `Err` the frontend should surface plainly) once locked.
 #[tauri::command]
 pub fn hash_settings_set(db: State<Db>, workspace_id: i64, spec: HashSpecDto) -> CmdResult<()> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     hashing::set_hash_settings(
         &conn,
         workspace_id,
@@ -498,14 +509,14 @@ pub fn cancel_hash_scan(flags: State<hashing::HashCancelFlags>, source_id: i64) 
 /// hashing" banner when a previous `run_hash_scan` call was interrupted.
 #[tauri::command]
 pub fn get_scan_progress(db: State<Db>, source_id: i64) -> CmdResult<Option<ScanProgressInfo>> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     let progress = hashing::get_scan_progress(&conn, source_id).map_err(map_err)?;
     Ok(progress.map(|(phase, last_cursor)| ScanProgressInfo { phase, last_cursor }))
 }
 
 #[tauri::command]
 pub fn source_rename_device(db: State<Db>, source_id: i64, device_label: String) -> CmdResult<()> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "UPDATE sources SET device_label = ?1 WHERE id = ?2",
         params![device_label, source_id],
@@ -516,7 +527,7 @@ pub fn source_rename_device(db: State<Db>, source_id: i64, device_label: String)
 
 #[tauri::command]
 pub fn source_set_excluded(db: State<Db>, source_id: i64, excluded: bool) -> CmdResult<()> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "UPDATE sources SET excluded = ?1 WHERE id = ?2",
         params![excluded as i64, source_id],
@@ -531,7 +542,7 @@ pub fn source_copy_to_workspace(
     source_id: i64,
     target_workspace_id: i64,
 ) -> CmdResult<()> {
-    let mut conn = db.0.lock().unwrap();
+    let mut conn = db.lock();
     crate::dbio::copy_source_to_workspace(&mut conn, source_id, target_workspace_id)
         .map_err(map_err)?;
     Ok(())
@@ -539,7 +550,7 @@ pub fn source_copy_to_workspace(
 
 #[tauri::command]
 pub fn source_delete(db: State<Db>, source_id: i64) -> CmdResult<()> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     conn.execute("DELETE FROM sources WHERE id = ?1", params![source_id])
         .map_err(map_err)?;
     Ok(())
@@ -561,7 +572,7 @@ pub fn get_tree(
     parent_id: Option<i64>,
 ) -> CmdResult<Vec<Node>> {
     let _ = workspace_id;
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
 
     let sql = if parent_id.is_some() {
         "SELECT n.id, n.source_id, n.parent_id, n.name, n.rel_path, n.type, n.size, n.mtime, n.inode, n.dev, n.depth, n.subtree_size, n.subtree_file_count,
@@ -685,7 +696,7 @@ pub fn get_groups(
     offset: i64,
     limit: i64,
 ) -> CmdResult<GroupPage> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     let kind_filter = kind.unwrap_or_default();
     let order = match sort.as_deref() {
         Some("size") => "size DESC, confidence DESC",
@@ -741,7 +752,7 @@ pub fn get_groups(
     if !groups.is_empty() {
         let ids: Vec<String> = groups.iter().map(|g| g.id.to_string()).collect();
         let sql = format!(
-            "SELECT mm.group_id, n.id, n.source_id, s.device_label, n.rel_path, n.name, n.size, n.mtime
+            "SELECT mm.group_id, n.id, n.source_id, s.device_label, n.rel_path, n.name, n.size, n.subtree_size, n.mtime
              FROM match_members mm
              JOIN nodes n ON n.id = mm.node_id
              JOIN sources s ON s.id = n.source_id
@@ -760,7 +771,8 @@ pub fn get_groups(
                         rel_path: r.get(4)?,
                         name: r.get(5)?,
                         size: r.get(6)?,
-                        mtime: r.get(7)?,
+                        subtree_size: r.get(7)?,
+                        mtime: r.get(8)?,
                     },
                 ))
             })
@@ -783,30 +795,28 @@ pub fn get_groups(
 /// Used by the "locate duplicate" button in the device trees.
 #[tauri::command]
 pub fn get_group_for_node(db: State<Db>, node_id: i64) -> CmdResult<Option<MatchGroup>> {
-    let conn = db.0.lock().unwrap();
-    let group: Option<MatchGroup> = conn
-        .query_row(
-            "SELECT mg.id, mg.workspace_id, mg.kind, mg.confidence, mg.primary_signal, mg.size
+    let conn = db.lock();
+    let group = optional_row(conn.query_row(
+        "SELECT mg.id, mg.workspace_id, mg.kind, mg.confidence, mg.primary_signal, mg.size
              FROM match_members mm JOIN match_groups mg ON mg.id = mm.group_id
              WHERE mm.node_id = ?1 ORDER BY mg.confidence DESC LIMIT 1",
-            params![node_id],
-            |r| {
-                Ok(MatchGroup {
-                    id: r.get(0)?,
-                    workspace_id: r.get(1)?,
-                    kind: r.get(2)?,
-                    confidence: r.get(3)?,
-                    primary_signal: r.get(4)?,
-                    size: r.get(5)?,
-                    members: Vec::new(),
-                })
-            },
-        )
-        .ok();
+        params![node_id],
+        |r| {
+            Ok(MatchGroup {
+                id: r.get(0)?,
+                workspace_id: r.get(1)?,
+                kind: r.get(2)?,
+                confidence: r.get(3)?,
+                primary_signal: r.get(4)?,
+                size: r.get(5)?,
+                members: Vec::new(),
+            })
+        },
+    ))?;
     let Some(mut g) = group else { return Ok(None) };
     let mut mstmt = conn
         .prepare(
-            "SELECT n.id, n.source_id, s.device_label, n.rel_path, n.name, n.size, n.mtime
+            "SELECT n.id, n.source_id, s.device_label, n.rel_path, n.name, n.size, n.subtree_size, n.mtime
              FROM match_members mm
              JOIN nodes n ON n.id = mm.node_id
              JOIN sources s ON s.id = n.source_id
@@ -822,53 +832,14 @@ pub fn get_group_for_node(db: State<Db>, node_id: i64) -> CmdResult<Option<Match
                 rel_path: r.get(3)?,
                 name: r.get(4)?,
                 size: r.get(5)?,
-                mtime: r.get(6)?,
+                subtree_size: r.get(6)?,
+                mtime: r.get(7)?,
             })
         })
         .map_err(map_err)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(map_err)?;
     Ok(Some(g))
-}
-
-/// Per-device duplicate statistics.
-#[tauri::command]
-pub fn get_device_stats(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<DeviceStats>> {
-    let conn = db.0.lock().unwrap();
-    let dup_by_src = rollup::duplicated_size_by_source(&conn, workspace_id).map_err(map_err)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, device_label, total_size, file_count FROM sources WHERE workspace_id = ?1 ORDER BY id",
-        )
-        .map_err(map_err)?;
-    let rows = stmt
-        .query_map(params![workspace_id], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)?,
-            ))
-        })
-        .map_err(map_err)?;
-    let mut out = Vec::new();
-    for row in rows {
-        let (id, label, total, count) = row.map_err(map_err)?;
-        let dup = *dup_by_src.get(&id).unwrap_or(&0);
-        out.push(DeviceStats {
-            source_id: id,
-            device_label: label,
-            total_size: total,
-            file_count: count,
-            duplicated_size: dup,
-            duplicated_pct: if total > 0 {
-                dup as f64 / total as f64 * 100.0
-            } else {
-                0.0
-            },
-        });
-    }
-    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -880,7 +851,7 @@ pub fn consolidation_get(
     db: State<Db>,
     workspace_id: i64,
 ) -> CmdResult<(i64, Vec<ConsolidationNode>)> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     // Ensure a single consolidation exists per workspace.
     let id: i64 = {
         let existing: Option<i64> = conn
@@ -948,7 +919,7 @@ pub fn consolidation_add_node(
     node_type: String,
     source_node_id: Option<i64>,
 ) -> CmdResult<ConsolidationNode> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     let sort_order: i64 = conn
         .query_row(
             "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM consolidation_nodes
@@ -1005,7 +976,7 @@ pub fn consolidation_add_source_subtree(
     parent_id: Option<i64>,
     source_node_id: i64,
 ) -> CmdResult<Vec<ConsolidationNode>> {
-    let mut conn = db.0.lock().unwrap();
+    let mut conn = db.lock();
     crate::consolidate::materialize_subtree(&mut conn, consolidation_id, parent_id, source_node_id)
         .map_err(map_err)
 }
@@ -1017,7 +988,7 @@ pub fn consolidation_move_node(
     parent_id: Option<i64>,
     sort_order: i64,
 ) -> CmdResult<()> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "UPDATE consolidation_nodes SET parent_id = ?1, sort_order = ?2 WHERE id = ?3",
         params![parent_id, sort_order, node_id],
@@ -1028,7 +999,7 @@ pub fn consolidation_move_node(
 
 #[tauri::command]
 pub fn consolidation_rename_node(db: State<Db>, node_id: i64, name: String) -> CmdResult<()> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "UPDATE consolidation_nodes SET name = ?1 WHERE id = ?2",
         params![name, node_id],
@@ -1048,7 +1019,7 @@ pub fn consolidation_rename_node(db: State<Db>, node_id: i64, name: String) -> C
 
 #[tauri::command]
 pub fn consolidation_delete_node(db: State<Db>, node_id: i64) -> CmdResult<()> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "DELETE FROM consolidation_nodes WHERE id = ?1",
         params![node_id],
@@ -1067,7 +1038,7 @@ pub fn consolidation_delete_node(db: State<Db>, node_id: i64) -> CmdResult<()> {
 /// offending root-to-leaf chain.
 #[tauri::command]
 pub fn pathfix_tree(db: State<Db>, workspace_id: i64, limit: i64) -> CmdResult<Vec<PathTreeNode>> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     pathfix::build_tree(&conn, workspace_id, limit).map_err(map_err)
 }
 
@@ -1079,7 +1050,7 @@ pub fn pathfix_rename(
     node_id: i64,
     new_name: String,
 ) -> CmdResult<()> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     pathfix::rename(&conn, workspace_id, node_id, &new_name).map_err(map_err)?;
     Ok(())
 }
@@ -1090,20 +1061,17 @@ pub fn pathfix_rename(
 
 #[tauri::command]
 pub fn app_state_get(db: State<Db>, key: String) -> CmdResult<Option<String>> {
-    let conn = db.0.lock().unwrap();
-    let v: Option<String> = conn
-        .query_row(
-            "SELECT value FROM app_state WHERE key = ?1",
-            params![key],
-            |r| r.get(0),
-        )
-        .ok();
-    Ok(v)
+    let conn = db.lock();
+    optional_row(conn.query_row(
+        "SELECT value FROM app_state WHERE key = ?1",
+        params![key],
+        |r| r.get(0),
+    ))
 }
 
 #[tauri::command]
 pub fn app_state_set(db: State<Db>, key: String, value: String) -> CmdResult<()> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "INSERT INTO app_state (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1122,15 +1090,12 @@ pub fn workspace_state_get(
     workspace_id: i64,
     key: String,
 ) -> CmdResult<Option<String>> {
-    let conn = db.0.lock().unwrap();
-    let v: Option<String> = conn
-        .query_row(
-            "SELECT value FROM workspace_state WHERE workspace_id = ?1 AND key = ?2",
-            params![workspace_id, key],
-            |r| r.get(0),
-        )
-        .ok();
-    Ok(v)
+    let conn = db.lock();
+    optional_row(conn.query_row(
+        "SELECT value FROM workspace_state WHERE workspace_id = ?1 AND key = ?2",
+        params![workspace_id, key],
+        |r| r.get(0),
+    ))
 }
 
 #[tauri::command]
@@ -1140,7 +1105,7 @@ pub fn workspace_state_set(
     key: String,
     value: String,
 ) -> CmdResult<()> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     conn.execute(
         "INSERT INTO workspace_state (workspace_id, key, value) VALUES (?1, ?2, ?3)
          ON CONFLICT(workspace_id, key) DO UPDATE SET value = excluded.value",
@@ -1158,7 +1123,7 @@ pub fn workspace_state_set(
 /// at the user-chosen `path`.
 #[tauri::command]
 pub fn db_export(db: State<Db>, path: String) -> CmdResult<()> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.lock();
     crate::dbio::export_to(&conn, Path::new(&path)).map_err(map_err)
 }
 
@@ -1167,7 +1132,7 @@ pub fn db_export(db: State<Db>, path: String) -> CmdResult<()> {
 /// workspaces. Nothing already present is modified or deleted.
 #[tauri::command]
 pub fn db_import(db: State<Db>, path: String) -> CmdResult<crate::dbio::ImportSummary> {
-    let mut conn = db.0.lock().unwrap();
+    let mut conn = db.lock();
     crate::dbio::import_merge(&mut conn, Path::new(&path)).map_err(map_err)
 }
 

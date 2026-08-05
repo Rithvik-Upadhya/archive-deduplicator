@@ -36,15 +36,26 @@
     function slidersChanged() {
         clearTimeout(sliderTimer);
         sliderTimer = setTimeout(() => {
-            app.refreshGroups();
-            app.saveTuning();
-            app.setDedupStale(true);
+            Promise.all([
+                app.refreshGroups(),
+                app.saveTuning(),
+                app.setDedupStale(true),
+            ]).catch(err =>
+                taskTray.notify('Failed to update tuning', 'error', String(err))
+            );
         }, 250);
     }
 
     async function onselect(node: TreeNode) {
         selectedNode = node;
-        selectedGroup = await getGroupForNode(node.id);
+        try {
+            const group = await getGroupForNode(node.id);
+            if (selectedNode?.id === node.id) selectedGroup = group;
+        } catch (err) {
+            if (selectedNode?.id === node.id) {
+                taskTray.notify('Failed to load duplicates', 'error', String(err));
+            }
+        }
     }
 
     /** "Locate duplicate" from a tree row: select, then reveal the review panel. */
@@ -55,20 +66,21 @@
 
     async function runDedup() {
         const taskId = taskTray.start('dedup', 'Finding duplicates…');
-        const unlisten = await listen<DedupProgress>('dedup:progress', e => {
-            taskTray.update(taskId, {
-                phase: e.payload.phase,
-                current: e.payload.current,
-                total: e.payload.total,
-            });
-        });
+        let unlisten: (() => void) | undefined;
         try {
+            unlisten = await listen<DedupProgress>('dedup:progress', e => {
+                taskTray.update(taskId, {
+                    phase: e.payload.phase,
+                    current: e.payload.current,
+                    total: e.payload.total,
+                });
+            });
             await app.runDedup();
             taskTray.resolve(taskId, 'success', 'Analysis complete.');
         } catch (err) {
             taskTray.resolve(taskId, 'error', String(err));
         } finally {
-            unlisten();
+            unlisten?.();
         }
     }
 
@@ -77,7 +89,11 @@
         const el = sentinel;
         if (!el) return;
         const obs = new IntersectionObserver(entries => {
-            if (entries.some(e => e.isIntersecting)) app.loadMoreGroups();
+            if (entries.some(e => e.isIntersecting)) {
+                app.loadMoreGroups().catch(err =>
+                    taskTray.notify('Failed to load more results', 'error', String(err))
+                );
+            }
         });
         obs.observe(el);
         return () => obs.disconnect();
@@ -293,9 +309,12 @@
                                                 >{m.rel_path}</span>
                                             <span
                                                 class="shrink-0 whitespace-nowrap text-muted-foreground">
-                                                {formatBytes(m.size)} · {formatTime(
-                                                    m.mtime
-                                                )}
+                                                {formatBytes(
+                                                    selectedGroup.kind ===
+                                                        'folder'
+                                                        ? m.subtree_size
+                                                        : m.size
+                                                )} · {formatTime(m.mtime)}
                                             </span>
                                         </li>
                                     {/each}

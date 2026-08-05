@@ -186,6 +186,11 @@ pub struct MatchMember {
     pub rel_path: String,
     pub name: String,
     pub size: i64,
+    /// Aggregated bytes under this node -- the meaningful figure for a
+    /// folder-kind match member, since a directory's own `size` column is
+    /// just its raw filesystem dir-entry size (a few bytes or zero), not
+    /// the duplicated content total.
+    pub subtree_size: i64,
     pub mtime: Option<String>,
 }
 
@@ -209,17 +214,6 @@ pub struct ConsolidationNode {
     /// `nodes.rel_path` (full path from the source root) of the origin node.
     #[serde(default)]
     pub origin_path: Option<String>,
-}
-
-/// Per-source (device) statistics summary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceStats {
-    pub source_id: i64,
-    pub device_label: String,
-    pub total_size: i64,
-    pub file_count: i64,
-    pub duplicated_size: i64,
-    pub duplicated_pct: f64,
 }
 
 /// One node in the consolidated end-state tree, annotated with path-length

@@ -4,7 +4,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
     ConsolidationNode,
-    DeviceStats,
     GroupPage,
     GroupSort,
     HashScanReportDto,
@@ -120,8 +119,6 @@ export const getGroups = (args: {
     });
 export const getGroupForNode = (nodeId: number) =>
     invoke<MatchGroup | null>('get_group_for_node', { nodeId });
-export const getDeviceStats = (workspaceId: number) =>
-    invoke<DeviceStats[]>('get_device_stats', { workspaceId });
 
 // --- Consolidation ---
 
