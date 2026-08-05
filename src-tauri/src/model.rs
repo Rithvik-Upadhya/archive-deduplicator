@@ -271,3 +271,46 @@ pub struct ScanPreview {
     pub files_above_threshold: i64,
     pub bytes_above_threshold: i64,
 }
+
+/// A workspace's digest-affecting hash settings (§6.1). `spec_string` is the
+/// canonical encoding stored on `sources.hash_spec`/`nodes.hash_spec`;
+/// `threshold: None` means "full hash everything".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HashSpecDto {
+    pub threshold: Option<i64>,
+    pub probe: i64,
+    pub stride: i64,
+    pub spec_string: String,
+}
+
+/// Returned by `hash_settings_get`. Once `locked`, the workspace settings UI
+/// should show these read-only rather than editable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HashSettings {
+    pub spec: HashSpecDto,
+    pub locked: bool,
+}
+
+/// Summary of one `run_hash_scan` call (which may itself be a resume).
+#[derive(Debug, Clone, Serialize)]
+pub struct HashScanReportDto {
+    pub hashed: i64,
+    pub cached: i64,
+    pub errors: i64,
+}
+
+/// Progress payload emitted while a hashing pass is executing.
+#[derive(Debug, Clone, Serialize)]
+pub struct HashProgress {
+    pub current: u64,
+    pub total: u64,
+}
+
+/// Current `scan_progress` state for a source -- drives a "Resume hashing"
+/// banner when `phase == "hashing"` (interrupted) rather than absent (never
+/// started) or `"done"`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScanProgressInfo {
+    pub phase: String,
+    pub last_cursor: i64,
+}

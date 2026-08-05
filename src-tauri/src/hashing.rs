@@ -5,9 +5,15 @@
 //! Only live scans ever reach this module -- `tree` JSON imports have no
 //! content to read, so they stay permanently unhashed (see `parse.rs`).
 
+use crate::medium;
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+
+fn now() -> String {
+    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
 
 /// The digest-affecting settings for a workspace (see db.rs's `SCHEMA_VERSION`
 /// doc and the design spec's §6.1): sample threshold, probe size, and stride.
@@ -219,10 +225,403 @@ pub fn hash_files_pooled(
     results
 }
 
+// ---------------------------------------------------------------------
+// Workspace-level hash-spec locking (§6.1, §6.3)
+// ---------------------------------------------------------------------
+
+/// Current hash spec for `workspace_id` (defaulting to `HashSpec::default_spec()`
+/// if never set) and whether it is locked. Locking happens automatically the
+/// first time a hashing pass actually writes a digest -- see `lock_and_record_spec`.
+pub fn get_hash_settings(
+    conn: &Connection,
+    workspace_id: i64,
+) -> rusqlite::Result<(HashSpec, bool)> {
+    let spec_str: Option<String> = conn
+        .query_row(
+            "SELECT value FROM workspace_state WHERE workspace_id = ?1 AND key = 'hash.spec'",
+            params![workspace_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let locked: bool = conn
+        .query_row(
+            "SELECT value FROM workspace_state WHERE workspace_id = ?1 AND key = 'hash.locked'",
+            params![workspace_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+        .is_some_and(|v| v == "1");
+    let spec = spec_str
+        .and_then(|s| HashSpec::parse(&s))
+        .unwrap_or_else(HashSpec::default_spec);
+    Ok((spec, locked))
+}
+
+/// Change the workspace's hash spec. Rejected once locked -- the UI should
+/// surface this as "workspace is locked", not retry or silently ignore it.
+pub fn set_hash_settings(
+    conn: &Connection,
+    workspace_id: i64,
+    spec: HashSpec,
+) -> Result<(), String> {
+    let (_, locked) = get_hash_settings(conn, workspace_id).map_err(|e| e.to_string())?;
+    if locked {
+        return Err(
+            "Hash settings are locked for this workspace after its first hashed scan".to_string(),
+        );
+    }
+    conn.execute(
+        "INSERT INTO workspace_state (workspace_id, key, value) VALUES (?1, 'hash.spec', ?2)
+         ON CONFLICT(workspace_id, key) DO UPDATE SET value = excluded.value",
+        params![workspace_id, spec.spec_string()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Record which spec was actually used and lock it in, bypassing the
+/// `set_hash_settings` locked-check -- this IS the act of locking, called
+/// once (idempotently) after a hashing pass writes its first real digest.
+fn lock_and_record_spec(
+    tx: &Transaction,
+    workspace_id: i64,
+    spec: &HashSpec,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO workspace_state (workspace_id, key, value) VALUES (?1, 'hash.spec', ?2)
+         ON CONFLICT(workspace_id, key) DO UPDATE SET value = excluded.value",
+        params![workspace_id, spec.spec_string()],
+    )?;
+    tx.execute(
+        "INSERT INTO workspace_state (workspace_id, key, value) VALUES (?1, 'hash.locked', '1')
+         ON CONFLICT(workspace_id, key) DO UPDATE SET value = excluded.value",
+        params![workspace_id],
+    )?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// Resumable hashing pass
+// ---------------------------------------------------------------------
+
+struct CandidateNode {
+    node_id: i64,
+    rel_path: String,
+    size: i64,
+    dev: i64,
+    inode: i64,
+    mtime: Option<String>,
+}
+
+fn load_hashable_nodes(
+    conn: &Connection,
+    source_id: i64,
+    hash_min_size: i64,
+) -> rusqlite::Result<Vec<CandidateNode>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, rel_path, size, dev, inode, mtime FROM nodes
+         WHERE source_id = ?1 AND type = 'file' AND alias_of IS NULL
+           AND size >= ?2 AND dev IS NOT NULL AND inode IS NOT NULL
+           AND content_hash IS NULL
+         ORDER BY id",
+    )?;
+    stmt.query_map(params![source_id, hash_min_size], |r| {
+        Ok(CandidateNode {
+            node_id: r.get(0)?,
+            rel_path: r.get(1)?,
+            size: r.get(2)?,
+            dev: r.get(3)?,
+            inode: r.get(4)?,
+            mtime: r.get(5)?,
+        })
+    })?
+    .collect()
+}
+
+/// Apply any already-cached digest to matching nodes with zero file reads
+/// (a re-scan of an unchanged tree should touch no content at all), then
+/// return the remaining nodes that still need real hashing -- in physical
+/// order on HDD, insertion order otherwise.
+fn resolve_candidates(
+    tx: &Transaction,
+    source_id: i64,
+    hash_min_size: i64,
+    spec: &HashSpec,
+    sort_by_physical_order: bool,
+) -> rusqlite::Result<(Vec<CandidateNode>, usize)> {
+    let spec_str = spec.spec_string();
+    let all = load_hashable_nodes(tx, source_id, hash_min_size)?;
+
+    let mut remaining = Vec::new();
+    let mut cached = 0usize;
+    for node in all {
+        let hit: Option<(Vec<u8>, String, String)> = tx
+            .query_row(
+                "SELECT content_hash, hash_kind, computed_at FROM hash_cache
+                 WHERE volume_id = ?1 AND file_id = ?2 AND size = ?3 AND mtime = ?4 AND hash_spec = ?5",
+                params![
+                    node.dev.to_string(),
+                    node.inode,
+                    node.size,
+                    node.mtime.clone().unwrap_or_default(),
+                    spec_str
+                ],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        match hit {
+            Some((content_hash, hash_kind, computed_at)) => {
+                tx.execute(
+                    "UPDATE nodes SET content_hash = ?1, hash_kind = ?2, hash_spec = ?3, hashed_at = ?4 WHERE id = ?5",
+                    params![content_hash, hash_kind, spec_str, computed_at, node.node_id],
+                )?;
+                cached += 1;
+            }
+            None => remaining.push(node),
+        }
+    }
+    if sort_by_physical_order {
+        remaining.sort_by_key(|n| (n.dev, n.inode, n.node_id));
+    }
+    Ok((remaining, cached))
+}
+
+/// Outcome of one `run_hash_scan` call (which may itself be a resume of a
+/// previously-interrupted pass).
+#[derive(Debug, Default)]
+pub struct HashScanReport {
+    pub hashed: usize,
+    pub cached: usize,
+    pub errors: Vec<(i64, String)>,
+}
+
+const HASH_BATCH_SIZE: usize = 2000;
+
+/// Hash every eligible file in `source_id` under the workspace's (locked or
+/// default) hash spec that doesn't already have a digest, in batches of
+/// `HASH_BATCH_SIZE` committed one at a time. Follows `run_dedup`'s pattern
+/// of taking its own connection rather than holding the shared `Db` mutex
+/// for a potentially multi-hour pass -- see `commands.rs`'s doc comment.
+///
+/// Resumability comes entirely from `content_hash IS NULL` being the
+/// candidate filter: since each batch's `nodes` update and `scan_progress`
+/// update commit in the same transaction, a candidate is never "in-flight"
+/// across a crash -- it's either fully hashed or not attempted yet. Calling
+/// this again after any interruption (or never having started) always does
+/// the right thing by construction, with no separate resume path to keep in
+/// sync. `scan_progress.last_cursor` is therefore purely informational (the
+/// cumulative hashed-file count for this source, continuing across calls
+/// rather than restarting at zero) -- **not** used to slice the candidate
+/// list. An index-based cursor would desync from this filter: on a resumed
+/// call the candidate list is already shorter (everything hashed so far is
+/// filtered out), so slicing it by an old absolute offset would silently
+/// skip unprocessed files.
+///
+/// A `tree` JSON import has no `orig_root_path` to read content from and is
+/// always a no-op here.
+pub fn run_hash_scan(
+    conn: &mut Connection,
+    source_id: i64,
+    queue_depth: usize,
+    mut on_progress: impl FnMut(u64, u64),
+) -> rusqlite::Result<HashScanReport> {
+    let (workspace_id, orig_root_path, hash_min_size, medium_kind_str): (
+        i64,
+        Option<String>,
+        i64,
+        Option<String>,
+    ) = conn.query_row(
+        "SELECT workspace_id, orig_root_path, hash_min_size, medium_kind FROM sources WHERE id = ?1",
+        params![source_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    let Some(root) = orig_root_path else {
+        return Ok(HashScanReport::default());
+    };
+    let (spec, _locked) = get_hash_settings(conn, workspace_id)?;
+    let medium_kind = medium_kind_str
+        .as_deref()
+        .and_then(medium::MediumKind::parse)
+        .unwrap_or(medium::MediumKind::Unknown);
+    let sort_by_physical_order = medium::profile_for(medium_kind).sort_by_physical_order;
+
+    let tx = conn.transaction()?;
+    let (candidates, cached) =
+        resolve_candidates(&tx, source_id, hash_min_size, &spec, sort_by_physical_order)?;
+    tx.commit()?;
+
+    // Baseline for the informational cursor: files already hashed for this
+    // source before this call, so a resumed run's reported progress
+    // continues rather than restarting from zero.
+    let already_hashed: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM nodes
+         WHERE source_id = ?1 AND type = 'file' AND alias_of IS NULL
+           AND size >= ?2 AND content_hash IS NOT NULL",
+        params![source_id, hash_min_size],
+        |r| r.get(0),
+    )?;
+
+    let mut cursor = 0usize;
+    let total = candidates.len() as u64;
+    let mut hashed = 0usize;
+    let mut errors = Vec::new();
+
+    while cursor < candidates.len() {
+        let end = (cursor + HASH_BATCH_SIZE).min(candidates.len());
+        let batch = &candidates[cursor..end];
+        let jobs: Vec<HashJob> = batch
+            .iter()
+            .map(|c| (c.node_id, Path::new(&root).join(&c.rel_path), c.size))
+            .collect();
+        let results = hash_files_pooled(jobs, spec, queue_depth.max(1));
+
+        let ts = now();
+        let tx = conn.transaction()?;
+        let mut batch_bytes = 0i64;
+        let mut batch_files = 0i64;
+        for (node_id, result) in results {
+            let Some(node) = batch.iter().find(|c| c.node_id == node_id) else {
+                continue;
+            };
+            match result {
+                Ok((digest, kind, bytes_read)) => {
+                    let digest_bytes = digest.as_bytes().to_vec();
+                    tx.execute(
+                        "UPDATE nodes SET content_hash = ?1, hash_kind = ?2, hash_spec = ?3, hash_bytes_read = ?4, hashed_at = ?5 WHERE id = ?6",
+                        params![digest_bytes, kind, spec.spec_string(), bytes_read, ts, node_id],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO hash_cache (volume_id, file_id, size, mtime, hash_spec, content_hash, hash_kind, computed_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                         ON CONFLICT(volume_id, file_id, size, mtime, hash_spec)
+                         DO UPDATE SET content_hash = excluded.content_hash, hash_kind = excluded.hash_kind, computed_at = excluded.computed_at",
+                        params![
+                            node.dev.to_string(),
+                            node.inode,
+                            node.size,
+                            node.mtime.clone().unwrap_or_default(),
+                            spec.spec_string(),
+                            digest_bytes,
+                            kind,
+                            ts
+                        ],
+                    )?;
+                    hashed += 1;
+                    batch_files += 1;
+                    batch_bytes += bytes_read;
+                }
+                Err(e) => errors.push((node_id, e.to_string())),
+            }
+        }
+        tx.execute(
+            "UPDATE sources SET hash_spec = ?1, hash_coverage_files = hash_coverage_files + ?2, hash_coverage_bytes = hash_coverage_bytes + ?3 WHERE id = ?4",
+            params![spec.spec_string(), batch_files, batch_bytes, source_id],
+        )?;
+        tx.execute(
+            "INSERT INTO scan_progress (source_id, phase, last_cursor, updated_at) VALUES (?1, 'hashing', ?2, ?3)
+             ON CONFLICT(source_id) DO UPDATE SET phase = 'hashing', last_cursor = excluded.last_cursor, updated_at = excluded.updated_at",
+            params![source_id, already_hashed + hashed as i64, ts],
+        )?;
+        tx.commit()?;
+
+        cursor = end;
+        on_progress(
+            already_hashed as u64 + hashed as u64,
+            already_hashed as u64 + total,
+        );
+    }
+
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO scan_progress (source_id, phase, last_cursor, updated_at) VALUES (?1, 'done', ?2, ?3)
+         ON CONFLICT(source_id) DO UPDATE SET phase = 'done', last_cursor = excluded.last_cursor, updated_at = excluded.updated_at",
+        params![source_id, already_hashed + hashed as i64, now()],
+    )?;
+    if hashed > 0 {
+        lock_and_record_spec(&tx, workspace_id, &spec)?;
+    }
+    tx.commit()?;
+
+    Ok(HashScanReport {
+        hashed,
+        cached,
+        errors,
+    })
+}
+
+/// Current `scan_progress` phase/cursor for `source_id`, if any -- drives a
+/// "Resume hashing" banner when `phase == "hashing"` (interrupted) rather
+/// than `"done"` or absent (never started).
+pub fn get_scan_progress(
+    conn: &Connection,
+    source_id: i64,
+) -> rusqlite::Result<Option<(String, i64)>> {
+    conn.query_row(
+        "SELECT phase, last_cursor FROM scan_progress WHERE source_id = ?1",
+        params![source_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        let n = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "adedup_{label}_{}_{}_{n}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    /// Build an in-memory workspace with one real `kind='scan'` source over
+    /// a temp directory containing `files`, so `run_hash_scan` can actually
+    /// open and read them. Returns (conn, workspace_id, source_id, temp_dir).
+    fn setup_scan_source(files: &[(&str, &[u8])]) -> (Connection, i64, i64, std::path::PathBuf) {
+        let dir = unique_temp_dir("hashscan");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, content) in files {
+            std::fs::write(dir.join(name), content).unwrap();
+        }
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (name, created_at, updated_at) VALUES ('w', 't', 't')",
+            [],
+        )
+        .unwrap();
+        let ws = conn.last_insert_rowid();
+
+        let flat = crate::scan::scan_folder(&dir, |_| {}).unwrap();
+        let tx = conn.transaction().unwrap();
+        tx.execute(
+            "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, imported_at, total_size, file_count, hash_min_size)
+             VALUES (?1, 'scan', 'disc-a', 'disc-a', ?2, 't', ?3, ?4, 0)",
+            params![
+                ws,
+                dir.to_string_lossy().to_string(),
+                flat.total_size,
+                flat.file_count
+            ],
+        )
+        .unwrap();
+        let source_id = tx.last_insert_rowid();
+        crate::parse::insert_nodes(&tx, source_id, &flat).unwrap();
+        tx.commit().unwrap();
+
+        (conn, ws, source_id, dir)
+    }
 
     fn sampled_spec() -> HashSpec {
         HashSpec {
@@ -432,6 +831,242 @@ mod tests {
         for (_, r) in &results {
             assert!(r.is_ok());
         }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hash_settings_default_to_a_sane_spec_and_start_unlocked() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (name, created_at, updated_at) VALUES ('w', 't', 't')",
+            [],
+        )
+        .unwrap();
+        let ws = conn.last_insert_rowid();
+
+        let (spec, locked) = get_hash_settings(&conn, ws).unwrap();
+        assert_eq!(spec, HashSpec::default_spec());
+        assert!(!locked);
+    }
+
+    #[test]
+    fn hash_settings_set_then_get_round_trips_before_locking() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (name, created_at, updated_at) VALUES ('w', 't', 't')",
+            [],
+        )
+        .unwrap();
+        let ws = conn.last_insert_rowid();
+
+        let custom = HashSpec {
+            threshold: Some(1024),
+            probe: 512,
+            stride: 4096,
+        };
+        set_hash_settings(&conn, ws, custom).unwrap();
+        let (spec, locked) = get_hash_settings(&conn, ws).unwrap();
+        assert_eq!(spec, custom);
+        assert!(!locked);
+    }
+
+    #[test]
+    fn run_hash_scan_hashes_files_and_locks_the_workspace() {
+        let (mut conn, ws, source_id, dir) =
+            setup_scan_source(&[("a.bin", b"hello world"), ("b.bin", b"a different file")]);
+
+        let (_, locked_before) = get_hash_settings(&conn, ws).unwrap();
+        assert!(!locked_before);
+
+        let report = run_hash_scan(&mut conn, source_id, 4, |_, _| {}).unwrap();
+        assert_eq!(report.hashed, 2);
+        assert_eq!(report.cached, 0);
+        assert!(report.errors.is_empty());
+
+        let (_, locked_after) = get_hash_settings(&conn, ws).unwrap();
+        assert!(
+            locked_after,
+            "the workspace must lock its hash spec after the first hashed write"
+        );
+
+        // set_hash_settings must now be rejected.
+        assert!(set_hash_settings(&conn, ws, HashSpec::default_spec()).is_err());
+
+        // Every hashed node actually got a digest, and scan_progress is 'done'.
+        let hashed_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE source_id = ?1 AND content_hash IS NOT NULL",
+                params![source_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hashed_count, 2);
+        let phase: String = conn
+            .query_row(
+                "SELECT phase FROM scan_progress WHERE source_id = ?1",
+                params![source_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(phase, "done");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn run_hash_scan_is_a_no_op_for_json_sources() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (name, created_at, updated_at) VALUES ('w', 't', 't')",
+            [],
+        )
+        .unwrap();
+        let ws = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO sources (workspace_id, kind, label, device_label, imported_at, total_size, file_count)
+             VALUES (?1, 'json', 'disc-a', 'disc-a', 't', 0, 0)",
+            params![ws],
+        )
+        .unwrap();
+        let source_id = conn.last_insert_rowid();
+
+        let report = run_hash_scan(&mut conn, source_id, 4, |_, _| {}).unwrap();
+        assert_eq!(report.hashed, 0);
+        assert_eq!(report.cached, 0);
+    }
+
+    #[test]
+    fn cache_hit_skips_content_read_entirely() {
+        let (mut conn, ws, source_id, dir) = setup_scan_source(&[("a.bin", b"hello world")]);
+        let spec = get_hash_settings(&conn, ws).unwrap().0;
+
+        let (dev, inode, size, mtime): (i64, i64, i64, Option<String>) = conn
+            .query_row(
+                "SELECT dev, inode, size, mtime FROM nodes WHERE source_id = ?1 AND name = 'a.bin'",
+                params![source_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO hash_cache (volume_id, file_id, size, mtime, hash_spec, content_hash, hash_kind, computed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'full', 't')",
+            params![dev.to_string(), inode, size, mtime.unwrap_or_default(), spec.spec_string(), vec![0xAB_u8; 32]],
+        )
+        .unwrap();
+
+        // Delete the real file on disk -- if the cache hit didn't work, a
+        // real hash attempt would fail with a read error, not just produce
+        // the wrong digest, making this a strong test of "zero content reads".
+        std::fs::remove_file(dir.join("a.bin")).unwrap();
+
+        let report = run_hash_scan(&mut conn, source_id, 4, |_, _| {}).unwrap();
+        assert_eq!(report.hashed, 0, "no real hashing should have happened");
+        assert_eq!(report.cached, 1);
+        assert!(report.errors.is_empty());
+
+        let content_hash: Vec<u8> = conn
+            .query_row(
+                "SELECT content_hash FROM nodes WHERE source_id = ?1 AND name = 'a.bin'",
+                params![source_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(content_hash, vec![0xAB_u8; 32]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_second_run_after_completion_hashes_nothing_more() {
+        let files: Vec<(&str, &[u8])> =
+            vec![("a.bin", b"aaa"), ("b.bin", b"bbb"), ("c.bin", b"ccc")];
+        let (mut conn, _ws, source_id, dir) = setup_scan_source(&files);
+
+        let first = run_hash_scan(&mut conn, source_id, 4, |_, _| {}).unwrap();
+        assert_eq!(first.hashed, 3);
+
+        let second = run_hash_scan(&mut conn, source_id, 4, |_, _| {}).unwrap();
+        assert_eq!(
+            second.hashed, 0,
+            "nothing is left to hash once every candidate has a digest"
+        );
+        assert!(second.errors.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_run_after_a_simulated_interruption_only_hashes_what_never_committed() {
+        // A crash mid-batch never leaves a *partial* hash (the nodes update
+        // and scan_progress update commit in the same transaction) -- the
+        // realistic post-crash state is "some files have a full commit, the
+        // rest simply never got their content_hash set at all". Simulate
+        // that directly by clearing one file's hash back to NULL after a
+        // full run, rather than by fabricating a cursor value.
+        let files: Vec<(&str, &[u8])> =
+            vec![("a.bin", b"aaa"), ("b.bin", b"bbb"), ("c.bin", b"ccc")];
+        let (mut conn, _ws, source_id, dir) = setup_scan_source(&files);
+
+        let first = run_hash_scan(&mut conn, source_id, 4, |_, _| {}).unwrap();
+        assert_eq!(first.hashed, 3);
+
+        let b_id: i64 = conn
+            .query_row(
+                "SELECT id FROM nodes WHERE source_id = ?1 AND name = 'a.bin'",
+                params![source_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // A sentinel value on the OTHER two files' hash_spec proves they are
+        // never re-touched by the resumed call below.
+        conn.execute(
+            "UPDATE nodes SET hash_spec = 'sentinel' WHERE source_id = ?1 AND name != 'a.bin'",
+            params![source_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE nodes SET content_hash = NULL, hash_kind = NULL, hash_spec = NULL, hashed_at = NULL WHERE id = ?1",
+            params![b_id],
+        )
+        .unwrap();
+        // A real crash never commits the node update *or* the hash_cache
+        // write it shares a transaction with -- clear both, or this "resume"
+        // would just be served from cache instead of exercising a real
+        // re-hash (already covered separately by `cache_hit_skips_content_read_entirely`).
+        conn.execute("DELETE FROM hash_cache", []).unwrap();
+
+        let resumed = run_hash_scan(&mut conn, source_id, 4, |_, _| {}).unwrap();
+        assert_eq!(
+            resumed.hashed, 1,
+            "only the one file with a cleared digest should be re-hashed"
+        );
+
+        let untouched_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE source_id = ?1 AND name != 'a.bin' AND hash_spec = 'sentinel'",
+                params![source_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            untouched_count, 2,
+            "already-hashed files must not be re-processed by the resumed call"
+        );
+        let new_content_hash: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT content_hash FROM nodes WHERE id = ?1",
+                params![b_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            new_content_hash.is_some(),
+            "the cleared file must have a real digest again after the resumed call"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

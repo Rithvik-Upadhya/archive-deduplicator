@@ -4,7 +4,7 @@
 use crate::db::Db;
 use crate::dedup::DedupParams;
 use crate::model::*;
-use crate::{links, medium, parse, pathfix, rollup, scan};
+use crate::{hashing, links, medium, parse, pathfix, rollup, scan};
 use chrono::Utc;
 use rusqlite::params;
 use std::collections::HashMap;
@@ -333,6 +333,89 @@ pub async fn preview_scan(path: String, hash_min_size: i64) -> CmdResult<ScanPre
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn to_hash_spec_dto(spec: hashing::HashSpec) -> HashSpecDto {
+    HashSpecDto {
+        threshold: spec.threshold,
+        probe: spec.probe,
+        stride: spec.stride,
+        spec_string: spec.spec_string(),
+    }
+}
+
+/// A workspace's digest-affecting hash settings (§6.1) -- locked read-only
+/// in the UI once any source in the workspace has been hashed.
+#[tauri::command]
+pub fn hash_settings_get(db: State<Db>, workspace_id: i64) -> CmdResult<HashSettings> {
+    let conn = db.0.lock().unwrap();
+    let (spec, locked) = hashing::get_hash_settings(&conn, workspace_id).map_err(map_err)?;
+    Ok(HashSettings {
+        spec: to_hash_spec_dto(spec),
+        locked,
+    })
+}
+
+/// Change the workspace's hash spec before its first hashed scan. Rejected
+/// (as an `Err` the frontend should surface plainly) once locked.
+#[tauri::command]
+pub fn hash_settings_set(db: State<Db>, workspace_id: i64, spec: HashSpecDto) -> CmdResult<()> {
+    let conn = db.0.lock().unwrap();
+    hashing::set_hash_settings(
+        &conn,
+        workspace_id,
+        hashing::HashSpec {
+            threshold: spec.threshold,
+            probe: spec.probe,
+            stride: spec.stride,
+        },
+    )
+}
+
+/// Hash every eligible file in `source_id` under the workspace's hash spec.
+/// Safe to call again after an interruption -- see `hashing::run_hash_scan`'s
+/// doc comment for why resumability needs no separate resume path. Follows
+/// `run_dedup`'s own-connection pattern since this can run for hours.
+#[tauri::command]
+pub async fn run_hash_scan(app: tauri::AppHandle, source_id: i64) -> CmdResult<HashScanReportDto> {
+    tauri::async_runtime::spawn_blocking(move || -> CmdResult<HashScanReportDto> {
+        let db_path = app.state::<crate::db::DbPath>().0.clone();
+        let mut conn = crate::db::open(&db_path).map_err(map_err)?;
+
+        let medium_kind_str: Option<String> = conn
+            .query_row(
+                "SELECT medium_kind FROM sources WHERE id = ?1",
+                params![source_id],
+                |r| r.get(0),
+            )
+            .map_err(map_err)?;
+        let medium_kind = medium_kind_str
+            .as_deref()
+            .and_then(medium::MediumKind::parse)
+            .unwrap_or(medium::MediumKind::Unknown);
+        let queue_depth = medium::profile_for(medium_kind).reader_queue_depth;
+
+        let report = hashing::run_hash_scan(&mut conn, source_id, queue_depth, |current, total| {
+            let _ = app.emit("hash:progress", HashProgress { current, total });
+        })
+        .map_err(map_err)?;
+        Ok(HashScanReportDto {
+            hashed: report.hashed as i64,
+            cached: report.cached as i64,
+            errors: report.errors.len() as i64,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Current `scan_progress` state for a source, if any -- drives a "Resume
+/// hashing" banner when a previous `run_hash_scan` call was interrupted.
+#[tauri::command]
+pub fn get_scan_progress(db: State<Db>, source_id: i64) -> CmdResult<Option<ScanProgressInfo>> {
+    let conn = db.0.lock().unwrap();
+    let progress = hashing::get_scan_progress(&conn, source_id).map_err(map_err)?;
+    Ok(progress.map(|(phase, last_cursor)| ScanProgressInfo { phase, last_cursor }))
 }
 
 #[tauri::command]
