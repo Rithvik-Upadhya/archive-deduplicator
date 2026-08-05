@@ -40,6 +40,19 @@ pub struct ImportSummary {
     pub new_workspace_ids: Vec<i64>,
 }
 
+/// Whether `table` in the attached `ext` schema has a column named `column`.
+/// Used to tolerate an external database exported before a later migration
+/// added a column this import path wants to read.
+fn ext_has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA ext.table_info({table})"))?;
+    let found = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|c| c == column);
+    Ok(found)
+}
+
 /// Merge the workspaces (and everything under them) found in the SQLite
 /// database at `src_path` into `conn`, as brand-new workspaces. Nothing in
 /// the destination database is modified or deleted.
@@ -105,10 +118,29 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
             workspaces_added += 1;
 
             // --- sources ---
+            // `hashing_enabled` was added by a schema migration after this
+            // import path shipped, so an export made on an older version of
+            // the app won't have the column at all -- reading it unconditionally
+            // via `ext.sources` would hard-fail the whole import outright.
+            // Look it up separately (defaulting missing rows to enabled, the
+            // same default the column's own migration uses) instead of
+            // selecting it directly.
+            let ext_hashing_enabled: HashMap<i64, i64> =
+                if ext_has_column(&tx, "sources", "hashing_enabled")? {
+                    let mut stmt = tx.prepare(
+                        "SELECT id, hashing_enabled FROM ext.sources WHERE workspace_id = ?1",
+                    )?;
+                    stmt.query_map(params![old_ws_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                        .into_iter()
+                        .collect()
+                } else {
+                    HashMap::new()
+                };
             let mut src_id_map: HashMap<i64, i64> = HashMap::new();
             {
                 let mut stmt = tx.prepare(
-                    "SELECT id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id, hashing_enabled
+                    "SELECT id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id
                      FROM ext.sources WHERE workspace_id = ?1",
                 )?;
                 #[allow(clippy::type_complexity)]
@@ -132,7 +164,6 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                     i64,
                     i64,
                     Option<String>,
-                    i64,
                 )> = stmt
                     .query_map(params![old_ws_id], |r| {
                         Ok((
@@ -155,7 +186,6 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                             r.get(16)?,
                             r.get(17)?,
                             r.get(18)?,
-                            r.get(19)?,
                         ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -179,9 +209,9 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                     hash_coverage_files,
                     hash_coverage_bytes,
                     volume_id,
-                    hashing_enabled,
                 ) in rows
                 {
+                    let hashing_enabled = ext_hashing_enabled.get(&old_id).copied().unwrap_or(1);
                     tx.execute(
                         "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id, hashing_enabled)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
@@ -915,5 +945,69 @@ mod tests {
             .unwrap();
         assert_eq!(content_hash, Some(vec![0xDE, 0xAD, 0xBE, 0xEF]));
         assert_eq!(hash_kind.as_deref(), Some("full"));
+    }
+
+    struct CleanupOnDrop(std::path::PathBuf);
+    impl Drop for CleanupOnDrop {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+            let _ = fs::remove_file(self.0.with_extension("sqlite-wal"));
+            let _ = fs::remove_file(self.0.with_extension("sqlite-shm"));
+        }
+    }
+
+    #[test]
+    fn import_merge_tolerates_a_source_export_missing_hashing_enabled() {
+        // Simulates a `.sqlite` export made before the `hashing_enabled`
+        // migration existed: a real schema with that one column dropped
+        // back out, so the file matches what an older app version wrote.
+        let path = std::env::temp_dir().join(format!(
+            "archive-dedup-preimport-test-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _cleanup = CleanupOnDrop(path.clone());
+
+        {
+            let seed = db::open(&path).unwrap();
+            seed.execute(
+                "INSERT INTO workspaces (name, created_at, updated_at) VALUES ('old-export', 't', 't')",
+                [],
+            )
+            .unwrap();
+            let ws = seed.last_insert_rowid();
+            seed.execute(
+                "INSERT INTO sources (workspace_id, kind, label, device_label, imported_at, total_size, file_count)
+                 VALUES (?1, 'scan', 'disc-a', 'disc-a', 't', 100, 1)",
+                params![ws],
+            )
+            .unwrap();
+            seed.execute("ALTER TABLE sources DROP COLUMN hashing_enabled", [])
+                .unwrap();
+        }
+
+        let mut dest = Connection::open_in_memory().unwrap();
+        db::init_schema(&dest).unwrap();
+
+        let summary = import_merge(&mut dest, &path).expect(
+            "import must not hard-fail just because an older export predates hashing_enabled",
+        );
+        assert_eq!(summary.workspaces_added, 1);
+        assert_eq!(summary.sources_added, 1);
+
+        let hashing_enabled: i64 = dest
+            .query_row(
+                "SELECT hashing_enabled FROM sources WHERE label = 'disc-a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            hashing_enabled, 1,
+            "missing column must default to enabled, matching the column's own migration default"
+        );
     }
 }
