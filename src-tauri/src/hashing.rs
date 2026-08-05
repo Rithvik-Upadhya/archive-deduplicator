@@ -19,7 +19,8 @@ fn now() -> String {
 }
 
 /// The digest-affecting settings for a workspace (see db.rs's `SCHEMA_VERSION`
-/// doc and the design spec's §6.1): sample threshold, probe size, and stride.
+/// doc and the design spec's §6.1): sample threshold, probe size, and the cap
+/// on total probes (head + tail + interior) a sampled hash ever takes.
 /// `threshold: None` means "full hash everything" -- implemented as an
 /// infinity sentinel rather than a separate boolean, so there is one fewer
 /// combination to reason about and one fewer way for two sources to disagree.
@@ -27,13 +28,18 @@ fn now() -> String {
 pub struct HashSpec {
     pub threshold: Option<i64>,
     pub probe: i64,
-    pub stride: i64,
+    /// Total probes (including head and tail) a sampled hash ever takes, so
+    /// sampled bytes read stays bounded (`max_probes * probe`) no matter how
+    /// large the file is -- see `interior_probe_count`'s doc comment for how
+    /// this replaces the old fixed-byte-stride approach, which made sampled
+    /// bytes grow roughly linearly with file size.
+    pub max_probes: i64,
 }
 
 impl HashSpec {
     /// A reasonable out-of-the-box default: 32 MiB threshold, 1 MiB probe,
-    /// 32 MiB stride -- used only until a workspace's first hashed scan
-    /// locks in whatever spec was actually in force. 32 MiB (rather than a
+    /// 8 max probes -- used only until a workspace's first hashed scan locks
+    /// in whatever spec was actually in force. 32 MiB (rather than a
     /// tighter threshold) is chosen so that files in the 8-32 MiB range get
     /// a full, hash-proven (tier A) comparison instead of a sampled (tier B)
     /// one -- on a typical archive-disc corpus that band is a small slice of
@@ -43,14 +49,14 @@ impl HashSpec {
         HashSpec {
             threshold: Some(32 * 1024 * 1024),
             probe: 1024 * 1024,
-            stride: 32 * 1024 * 1024,
+            max_probes: 8,
         }
     }
 
     pub fn spec_string(&self) -> String {
         match self.threshold {
             None => "blake3/v1/full".to_string(),
-            Some(t) => format!("blake3/v1/th{t}-s{}-t{}", self.probe, self.stride),
+            Some(t) => format!("blake3/v1/th{t}-s{}-m{}", self.probe, self.max_probes),
         }
     }
 
@@ -62,16 +68,16 @@ impl HashSpec {
             return Some(HashSpec {
                 threshold: None,
                 probe: 0,
-                stride: 0,
+                max_probes: 0,
             });
         }
         let rest = s.strip_prefix("blake3/v1/th")?;
         let (th, rest) = rest.split_once("-s")?;
-        let (probe_str, stride_str) = rest.split_once("-t")?;
+        let (probe_str, max_probes_str) = rest.split_once("-m")?;
         Some(HashSpec {
             threshold: Some(th.parse().ok()?),
             probe: probe_str.parse().ok()?,
-            stride: stride_str.parse().ok()?,
+            max_probes: max_probes_str.parse().ok()?,
         })
     }
 }
@@ -89,9 +95,9 @@ fn hash_kind_for(size: i64, spec: &HashSpec) -> &'static str {
 
 /// §6.5's region plan: full hash below threshold (or when threshold is
 /// infinite), otherwise head + tail (always, at full probe width) plus up to
-/// 4096 interior probes, merged. Offsets derive **only** from `size` and the
-/// spec constants -- never scan order or a running counter -- so the same
-/// file samples identically on any two media.
+/// `max_probes - 2` interior probes, merged. Offsets derive **only** from
+/// `size` and the spec constants -- never scan order or a running counter --
+/// so the same file samples identically on any two media.
 #[allow(clippy::single_range_in_vec_init)]
 pub fn plan_regions(size: i64, spec: &HashSpec) -> Vec<Range<i64>> {
     let size = size.max(0);
@@ -103,15 +109,43 @@ pub fn plan_regions(size: i64, spec: &HashSpec) -> Vec<Range<i64>> {
         return full;
     }
     let p = spec.probe.max(0);
-    let t = spec.stride.max(1);
 
     let mut regions = vec![0..p.min(size), (size - p).max(0)..size];
-    let n = (size / t).clamp(0, 4096);
+    let n = interior_probe_count(size, threshold, spec.max_probes);
     for i in 1..=n {
         let off = align_down(i * size / (n + 1), 4096);
         regions.push(off..(off + p).min(size));
     }
     merge_overlapping(regions)
+}
+
+/// Floor of log2(x), or 0 for non-positive `x`. Pure integer bit-length
+/// arithmetic -- no floats -- so it's exactly reproducible on any platform,
+/// which matters here because it feeds directly into which bytes get hashed
+/// (see `plan_regions`' doc comment on cross-platform determinism).
+fn log2_floor(x: i64) -> i64 {
+    if x <= 0 {
+        0
+    } else {
+        63 - (x as u64).leading_zeros() as i64
+    }
+}
+
+/// How many interior probes a sampled hash takes: one more each time `size`
+/// doubles past `threshold`, capped at `max_probes - 2` (the interior budget
+/// once head and tail are accounted for). This replaces a fixed-byte-stride
+/// divisor (`size / stride`), which had no upper bound -- sampled bytes read
+/// grew roughly linearly with file size, and a stride large enough to cap
+/// that on huge files forced every smaller file down to 0 interior probes.
+/// A doubling-based count instead grows smoothly from 0 right at the
+/// threshold up to a small fixed cap, so sampled bytes read is bounded by
+/// `max_probes * probe` regardless of how large the file is.
+fn interior_probe_count(size: i64, threshold: i64, max_probes: i64) -> i64 {
+    let max_interior = (max_probes - 2).max(0);
+    if max_interior == 0 {
+        return 0;
+    }
+    (log2_floor(size) - log2_floor(threshold.max(1))).clamp(0, max_interior)
 }
 
 fn align_down(x: i64, align: i64) -> i64 {
@@ -905,7 +939,7 @@ mod tests {
         HashSpec {
             threshold: Some(8 * 1024 * 1024),
             probe: 1024 * 1024,
-            stride: 32 * 1024 * 1024,
+            max_probes: 8,
         }
     }
 
@@ -914,22 +948,19 @@ mod tests {
         let full = HashSpec {
             threshold: None,
             probe: 0,
-            stride: 0,
+            max_probes: 0,
         };
         assert_eq!(HashSpec::parse(&full.spec_string()), Some(full));
 
         let sampled = sampled_spec();
         assert_eq!(HashSpec::parse(&sampled.spec_string()), Some(sampled));
-        assert_eq!(
-            sampled.spec_string(),
-            "blake3/v1/th8388608-s1048576-t33554432"
-        );
+        assert_eq!(sampled.spec_string(), "blake3/v1/th8388608-s1048576-m8");
     }
 
     #[test]
     fn parse_rejects_garbage() {
         assert_eq!(HashSpec::parse("not-a-spec"), None);
-        assert_eq!(HashSpec::parse("blake3/v1/thX-s1-t1"), None);
+        assert_eq!(HashSpec::parse("blake3/v1/thX-s1-m1"), None);
     }
 
     #[test]
@@ -944,7 +975,7 @@ mod tests {
         let spec = HashSpec {
             threshold: None,
             probe: 1024,
-            stride: 4096,
+            max_probes: 4096,
         };
         let regions = plan_regions(50_000_000, &spec);
         assert_eq!(regions, vec![0..50_000_000]);
@@ -972,33 +1003,64 @@ mod tests {
     }
 
     #[test]
-    fn boundary_size_exactly_at_stride_has_one_interior_probe() {
+    fn interior_probe_count_is_flat_zero_up_to_the_first_doubling_past_threshold() {
         let spec = sampled_spec();
-        // size == stride => n = clamp(size/stride, 0, 4096) = 1.
-        let regions = plan_regions(spec.stride, &spec);
-        // head, one interior probe, tail => at least 2 after any merging,
-        // and never fewer than head+tail.
-        assert!(regions.len() >= 2);
+        // Anywhere in [threshold, 2*threshold) => 0 interior probes: only
+        // head+tail (2 total, possibly merged into 1 region if they overlap).
+        for size in [spec.threshold.unwrap(), spec.threshold.unwrap() * 2 - 1] {
+            let regions = plan_regions(size, &spec);
+            assert!(
+                regions.len() <= 2,
+                "size {size} should have no interior probes yet, got {regions:?}"
+            );
+        }
     }
 
     #[test]
-    fn boundary_size_one_below_stride_has_zero_interior_probes() {
+    fn interior_probe_count_increases_by_one_at_each_size_doubling() {
         let spec = sampled_spec();
-        let regions = plan_regions(spec.stride - 1, &spec);
-        // n = (stride-1)/stride = 0 => only head+tail (possibly merged if
-        // the file is small enough that head/tail overlap).
-        assert!(!regions.is_empty());
+        let threshold = spec.threshold.unwrap();
+        let max_interior = spec.max_probes - 2;
+
+        let mut prev_len = 0usize;
+        for k in 0..=(max_interior + 2) {
+            let size = threshold * (1i64 << k);
+            let regions = plan_regions(size, &spec);
+            assert!(
+                regions.len() >= prev_len,
+                "region count must never decrease as size grows: k={k}, size={size}"
+            );
+            prev_len = regions.len();
+        }
+        // By the time size has doubled past threshold enough times, the cap
+        // (max_probes total) must have been reached.
+        let capped = plan_regions(threshold * (1i64 << (max_interior + 2)), &spec);
+        assert_eq!(capped.len() as i64, spec.max_probes);
+    }
+
+    /// An exact-count assertion at a deliberately non-saturated size, so a
+    /// wrong clamp bound (e.g. off-by-one on `max_interior`) or a formula
+    /// that jumps/stalls between doublings would fail this even though the
+    /// saturation tests above (which only exercise already-capped sizes)
+    /// would not catch it.
+    #[test]
+    fn interior_probe_count_is_exactly_two_at_the_second_doubling_past_threshold() {
+        let spec = sampled_spec(); // threshold = 8 MiB, max_probes = 8
+        // log2_floor(32 MiB) = 25, log2_floor(8 MiB) = 23 => n = 2 interior
+        // probes, plus head and tail => 4 regions total.
+        let regions = plan_regions(32 * 1024 * 1024, &spec);
+        assert_eq!(regions.len(), 4);
     }
 
     #[test]
     fn size_smaller_than_probe_merges_head_and_tail_into_one_region() {
         // A spec where the probe is wider than the threshold (unusual, but
         // not disallowed) -- head (0..size) and tail (0..size) fully overlap
-        // whenever size <= probe, regardless of how they compare to stride.
+        // whenever size <= probe, regardless of interior probe count.
         let spec = HashSpec {
             threshold: Some(100),
             probe: 1000,
-            stride: 4096,
+            max_probes: 8,
         };
         let size = 150; // just above threshold, well below probe
         let regions = plan_regions(size, &spec);
@@ -1019,7 +1081,7 @@ mod tests {
         let spec = HashSpec {
             threshold: None,
             probe: 0,
-            stride: 0,
+            max_probes: 0,
         }; // full hash, simplest to reason about
         let (hash_a, kind_a, read_a) = hash_file(&a, content.len() as i64, &spec).unwrap();
         let (hash_b, kind_b, read_b) = hash_file(&b, content.len() as i64, &spec).unwrap();
@@ -1044,7 +1106,7 @@ mod tests {
         let spec = HashSpec {
             threshold: None,
             probe: 0,
-            stride: 0,
+            max_probes: 0,
         };
         let (hash_a, ..) = hash_file(&a, 11, &spec).unwrap();
         let (hash_b, ..) = hash_file(&b, 11, &spec).unwrap();
@@ -1069,30 +1131,28 @@ mod tests {
         let spec = HashSpec {
             threshold: Some(8192),
             probe: 64,
-            stride: 4096,
+            max_probes: 8,
         };
         let size: usize = 20_000;
-        // `align_down` rounds an offset down to the nearest 4096-byte
-        // boundary, so probe offsets below 4096 all collapse to 0 -- pick a
-        // size large enough that interior probes land past that boundary.
-        // n = clamp(20000/4096, 0, 4096) = 4 interior probes at
-        // align_down(i*20000/5, 4096) for i in 1..=4 => 0, 4096, 8192, 12288,
-        // each covering [off..off+64). Head is [0..64), tail is [19936..20000).
-        // Offset 4100 falls inside the second interior probe [4096..4160)
-        // and outside both head and tail, so only a real interior read
-        // detects a difference there.
+        // log2_floor(20000) = 14 (2^14 = 16384 <= 20000 < 32768 = 2^15),
+        // log2_floor(8192) = 13, so n = clamp(14-13, 0, 6) = 1 interior probe
+        // at align_down(1*20000/2, 4096) = align_down(10000, 4096) = 8192,
+        // covering [8192..8256). Head is [0..64), tail is [19936..20000).
+        // Offset 8200 falls inside that interior probe and outside both
+        // head and tail, so only a real interior read detects a difference
+        // there.
         assert!(regions_cover_offset(
             &plan_regions(size as i64, &spec),
-            4100
+            8200
         ));
-        assert!(!(0..64).contains(&4100) && !(19936..20_000).contains(&4100));
+        assert!(!(0..64).contains(&8200) && !(19936..20_000).contains(&8200));
 
         let mut content_a = vec![0u8; size];
         for (i, b) in content_a.iter_mut().enumerate() {
             *b = (i % 251) as u8;
         }
         let mut content_b = content_a.clone();
-        content_b[4100] ^= 0xFF;
+        content_b[8200] ^= 0xFF;
 
         let a = dir.join("a.bin");
         let b = dir.join("b.bin");
@@ -1122,6 +1182,67 @@ mod tests {
         assert_eq!(HashSpec::default_spec().threshold, Some(32 * 1024 * 1024));
     }
 
+    /// Pins the deliberately-chosen default probe cap so any future change
+    /// to it is an explicit, visible edit rather than an accidental drift.
+    #[test]
+    fn default_spec_max_probes_is_eight() {
+        assert_eq!(HashSpec::default_spec().max_probes, 8);
+    }
+
+    #[test]
+    fn interior_probe_count_saturates_for_arbitrarily_large_files() {
+        let spec = HashSpec {
+            threshold: Some(1024),
+            probe: 16,
+            max_probes: 8,
+        };
+        // However large the file, total regions never exceed max_probes --
+        // this is the core bounded-sampled-bytes guarantee this design
+        // exists for (sampled bytes read is capped at max_probes * probe,
+        // never growing with file size once past a handful of doublings).
+        // 100 GiB is already far past saturation for this spec and stays
+        // safely within i64 arithmetic used internally by `plan_regions`.
+        let regions = plan_regions(100 * 1024 * 1024 * 1024, &spec);
+        assert_eq!(regions.len() as i64, spec.max_probes);
+    }
+
+    #[test]
+    fn probes_spread_across_the_full_file_not_clustered_near_the_start() {
+        let spec = HashSpec {
+            threshold: Some(1024),
+            probe: 16,
+            max_probes: 8,
+        };
+        let size = 10 * 1024 * 1024 * 1024; // large enough to hit the cap
+        let regions = plan_regions(size, &spec);
+        assert_eq!(regions.len() as i64, spec.max_probes);
+        // The last interior probe (second-to-last region; the very last is
+        // the tail) must land well past the start of the file, proving the
+        // proportional placement formula spreads probes across the whole
+        // file rather than bunching them in the first few probe-widths.
+        let last_interior = &regions[regions.len() - 2];
+        assert!(
+            last_interior.start > size * 3 / 4,
+            "last interior probe at {last_interior:?} should be past 3/4 of size {size}"
+        );
+    }
+
+    #[test]
+    fn max_probes_of_two_forces_head_and_tail_only_regardless_of_size() {
+        let spec = HashSpec {
+            threshold: Some(1024),
+            probe: 16,
+            max_probes: 2,
+        };
+        for size in [2048, 1024 * 1024, 10 * 1024 * 1024 * 1024] {
+            let regions = plan_regions(size, &spec);
+            assert!(
+                regions.len() <= 2,
+                "max_probes=2 must never add interior probes (size={size}, got {regions:?})"
+            );
+        }
+    }
+
     #[test]
     fn differing_spec_produces_a_different_digest_for_identical_bytes() {
         let dir = std::env::temp_dir().join(format!("adedup_hash_test3_{}", std::process::id()));
@@ -1134,12 +1255,12 @@ mod tests {
         let spec_a = HashSpec {
             threshold: None,
             probe: 0,
-            stride: 0,
+            max_probes: 0,
         };
         let spec_b = HashSpec {
             threshold: Some(1),
             probe: 4096,
-            stride: 4096,
+            max_probes: 4096,
         };
         let (hash_a, ..) = hash_file(&path, size, &spec_a).unwrap();
         let (hash_b, ..) = hash_file(&path, size, &spec_b).unwrap();
@@ -1167,7 +1288,7 @@ mod tests {
         let spec = HashSpec {
             threshold: None,
             probe: 0,
-            stride: 0,
+            max_probes: 0,
         };
         let results = hash_files_pooled(jobs, spec, LaneConfig::flat(4));
         assert_eq!(results.len(), 20);
@@ -1204,7 +1325,7 @@ mod tests {
         let spec = HashSpec {
             threshold: None,
             probe: 0,
-            stride: 0,
+            max_probes: 0,
         };
         let lanes = LaneConfig {
             small_depth: 3,
@@ -1254,7 +1375,7 @@ mod tests {
         let custom = HashSpec {
             threshold: Some(1024),
             probe: 512,
-            stride: 4096,
+            max_probes: 4096,
         };
         set_hash_settings(&conn, ws, custom).unwrap();
         let (spec, locked) = get_hash_settings(&conn, ws).unwrap();

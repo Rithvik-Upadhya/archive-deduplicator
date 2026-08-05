@@ -38,7 +38,7 @@
     let samplingMode = $state<'full' | 'sampled'>('sampled');
     let thresholdKb = $state(32768); // 32 MiB -- mirrors HashSpec::default_spec() in hashing.rs
     let probeKb = $state(1024); // 1 MiB
-    let strideKb = $state(32768); // 32 MiB
+    let maxProbes = $state(8); // total probes incl. head/tail, mirrors HashSpec::default_spec()
     let specLocked = $state(false);
 
     // Step 2 -- per-source scan options.
@@ -66,7 +66,7 @@
                     thresholdKb = Math.round(settings.spec.threshold / 1024);
                 }
                 probeKb = Math.round(settings.spec.probe / 1024);
-                strideKb = Math.round(settings.spec.stride / 1024);
+                maxProbes = settings.spec.max_probes;
             }
         } catch (err) {
             taskTray.notify('Detection failed', 'error', String(err));
@@ -85,22 +85,21 @@
         }
     });
 
-    function specString(threshold: number | null, probe: number, stride: number): string {
+    function specString(threshold: number | null, probe: number, maxProbes: number): string {
         return threshold == null
             ? 'blake3/v1/full'
-            : `blake3/v1/th${threshold}-s${probe}-t${stride}`;
+            : `blake3/v1/th${threshold}-s${probe}-m${maxProbes}`;
     }
 
     function confirm() {
         const threshold = samplingMode === 'full' ? null : thresholdKb * 1024;
         const probe = probeKb * 1024;
-        const stride = strideKb * 1024;
         onConfirm({
             hashSpec: {
                 threshold,
                 probe,
-                stride,
-                spec_string: specString(threshold, probe, stride),
+                max_probes: maxProbes,
+                spec_string: specString(threshold, probe, maxProbes),
             },
             specLocked,
             hashMinSize: hashMinSizeKb * 1024,
@@ -179,13 +178,18 @@
                             bind:value={probeKb} />
                     </div>
                     <div class="flex flex-col gap-1.5">
-                        <Label for="stride-kb">Stride between probes (KB)</Label>
+                        <Label for="max-probes">Max probes (2-8)</Label>
                         <Input
-                            id="stride-kb"
+                            id="max-probes"
                             type="number"
-                            min="1"
+                            min="2"
+                            max="8"
                             disabled={specLocked}
-                            bind:value={strideKb} />
+                            bind:value={maxProbes} />
+                        <p class="text-xs text-muted-foreground">
+                            How many sample points a large file gets, at most (including the start
+                            and end).
+                        </p>
                     </div>
                 {/if}
             </div>
