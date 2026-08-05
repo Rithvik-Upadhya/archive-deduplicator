@@ -12,7 +12,7 @@
     import { Badge } from '$lib/components/ui/badge';
     import { ScrollArea } from '$lib/components/ui/scroll-area';
     import * as AlertDialog from '$lib/components/ui/alert-dialog';
-    import { toast } from 'svelte-sonner';
+    import { taskTray } from '$lib/stores/tasks.svelte';
 
     type DragMeta = { name: string; type: TreeNode['type'] };
 
@@ -81,7 +81,7 @@
             try {
                 await app.renameDevice(source.id, name);
             } catch (err) {
-                toast.error(String(err));
+                taskTray.notify('Rename failed', 'error', String(err));
             }
         }
     }
@@ -90,9 +90,13 @@
         confirmingDelete = false;
         try {
             await app.deleteSource(source.id);
-            toast.success(`Removed “${source.device_label}”.`);
+            taskTray.notify(
+                'Device removed',
+                'success',
+                `Removed “${source.device_label}”.`
+            );
         } catch (err) {
-            toast.error(String(err));
+            taskTray.notify('Remove failed', 'error', String(err));
         }
     }
 </script>

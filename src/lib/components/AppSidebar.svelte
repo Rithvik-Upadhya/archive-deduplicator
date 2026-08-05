@@ -9,8 +9,8 @@
     import * as Field from '$lib/components/ui/field';
     import { Input } from '$lib/components/ui/input';
     import { app, VIEWS } from '$lib/stores/app.svelte';
+    import { taskTray } from '$lib/stores/tasks.svelte';
     import { open, save } from '@tauri-apps/plugin-dialog';
-    import { toast } from 'svelte-sonner';
     import { mode, toggleMode } from 'mode-watcher';
 
     let dbBusy = $state(false);
@@ -51,7 +51,11 @@
                 await app.renameWorkspace(nameDialogTargetId, name);
             }
         } catch (err) {
-            toast.error(String(err));
+            taskTray.notify(
+                nameDialogMode === 'create' ? 'Create failed' : 'Rename failed',
+                'error',
+                String(err)
+            );
         }
     }
 
@@ -64,9 +68,13 @@
         if (!target) return;
         try {
             await app.deleteWorkspace(target.id);
-            toast.success(`Deleted “${target.name}”.`);
+            taskTray.notify(
+                'Workspace deleted',
+                'success',
+                `Deleted “${target.name}”.`
+            );
         } catch (err) {
-            toast.error(String(err));
+            taskTray.notify('Delete failed', 'error', String(err));
         }
     }
 
@@ -82,9 +90,13 @@
         dbBusy = true;
         try {
             await app.exportDatabase(path);
-            toast.success('Database exported.');
+            taskTray.notify(
+                'Database exported',
+                'success',
+                'The workspace database was saved.'
+            );
         } catch (err) {
-            toast.error(String(err));
+            taskTray.notify('Export failed', 'error', String(err));
         } finally {
             dbBusy = false;
         }
@@ -101,14 +113,15 @@
         dbBusy = true;
         try {
             const summary = await app.importDatabase(selected);
-            toast.success('Database imported.', {
-                description:
-                    `${summary.workspaces_added} workspace(s), ` +
+            taskTray.notify(
+                'Database imported',
+                'success',
+                `${summary.workspaces_added} workspace(s), ` +
                     `${summary.sources_added} source(s), ` +
-                    `${summary.nodes_added} node(s).`,
-            });
+                    `${summary.nodes_added} node(s).`
+            );
         } catch (err) {
-            toast.error(String(err));
+            taskTray.notify('Import failed', 'error', String(err));
         } finally {
             dbBusy = false;
         }

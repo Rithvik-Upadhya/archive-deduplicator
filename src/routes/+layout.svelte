@@ -5,7 +5,6 @@
     import * as Sidebar from '$lib/components/ui/sidebar';
     import AppSidebar from '$lib/components/AppSidebar.svelte';
     import * as Breadcrumb from '$lib/components/ui/breadcrumb/index.js';
-    import { Toaster } from '$lib/components/ui/sonner';
     import TaskTray from '$lib/components/TaskTray.svelte';
     import { app, viewLabel } from '$lib/stores/app.svelte';
     let { children } = $props();
@@ -35,5 +34,4 @@
     </main>
 </Sidebar.Provider>
 <ModeWatcher defaultMode="dark" />
-<Toaster richColors closeButton />
 <TaskTray />

@@ -6,16 +6,22 @@
     import { Button } from '$lib/components/ui/button';
     import { Progress } from '$lib/components/ui/progress';
     import * as Card from '$lib/components/ui/card';
-    import { toast } from 'svelte-sonner';
 
     const PHASE_LABELS: Record<string, string> = {
         loading: 'Loading files…',
-        matching: 'Comparing files…',
-        grouping: 'Recording matches…',
-        folder_rollup: 'Clustering folders…',
-        annotating: 'Updating tree annotations…',
-        done: 'Finalizing…',
+        matching: 'Comparing file signatures…',
+        grouping: 'Recording duplicate matches…',
+        folder_rollup: 'Finding duplicate folders…',
+        annotating: 'Updating duplicate counts…',
+        done: 'Finalizing results…',
     };
+
+    // A `kind: 'scan'` task morphs into the dedup phases once its scan/hash
+    // step finishes and `app.runDedup()` starts emitting `dedup:progress` --
+    // so this dispatches on the phase name itself rather than `task.kind`,
+    // or a `'scan'` task would keep rendering the "N files scanned…" text
+    // (with the dedup pass's numbers) straight through the analysis stage.
+    const DEDUP_PHASES = new Set(Object.keys(PHASE_LABELS));
 
     async function onCancel(task: Task) {
         if (task.sourceId == null) return;
@@ -29,16 +35,13 @@
             // happen.
             if (!ok) taskTray.update(task.id, { cancelling: false });
         } catch (err) {
-            toast.error(String(err));
+            taskTray.notify('Cancel failed', 'error', String(err));
             taskTray.update(task.id, { cancelling: false });
         }
     }
 </script>
 
 {#if taskTray.tasks.length > 0}
-    <!-- Offset above the sonner toaster's default bottom-right corner so a
-         transient toast (rename/delete/copy confirmations) doesn't overlap a
-         standing task card. -->
     <div class="fixed right-4 bottom-4 z-40 flex w-80 flex-col-reverse gap-2">
         {#each taskTray.tasks as task (task.id)}
             <Card.Root class="gap-2 py-3 shadow-lg">
@@ -73,7 +76,7 @@
                         {/if}
                     </div>
                     {#if task.status === 'running'}
-                        {#if task.kind === 'dedup' && task.total > 0}
+                        {#if DEDUP_PHASES.has(task.phase ?? '') && task.total > 0}
                             <Progress
                                 value={task.current}
                                 max={task.total}

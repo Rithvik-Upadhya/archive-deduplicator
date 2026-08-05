@@ -22,7 +22,6 @@
     import * as AlertDialog from '$lib/components/ui/alert-dialog';
     import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
     import { Separator } from '$lib/components/ui/separator';
-    import { toast } from 'svelte-sonner';
     import ScanConfigDialog from '$lib/components/ScanConfigDialog.svelte';
 
     let scanDialogOpen = $state(false);
@@ -46,7 +45,7 @@
             try {
                 await app.renameDevice(id, name);
             } catch (err) {
-                toast.error(String(err));
+                taskTray.notify('Rename failed', 'error', String(err));
             }
         }
     }
@@ -55,7 +54,7 @@
         try {
             await app.setSourceExcluded(s.id, !s.excluded);
         } catch (err) {
-            toast.error(String(err));
+            taskTray.notify('Update failed', 'error', String(err));
         }
     }
 
@@ -65,9 +64,13 @@
         if (!target) return;
         try {
             await app.deleteSource(target.id);
-            toast.success(`Removed “${target.label}”.`);
+            taskTray.notify(
+                'Device removed',
+                'success',
+                `Removed “${target.label}”.`
+            );
         } catch (err) {
-            toast.error(String(err));
+            taskTray.notify('Remove failed', 'error', String(err));
         }
     }
 
@@ -77,11 +80,13 @@
     ) {
         try {
             await app.copySourceToWorkspace(s.id, ws.id);
-            toast.success(`Copied “${s.device_label}” to “${ws.name}”.`, {
-                description: 'Duplicate results will need re-running there.',
-            });
+            taskTray.notify(
+                'Copied to workspace',
+                'success',
+                `Copied “${s.device_label}” to “${ws.name}”. Duplicate results will need re-running there.`
+            );
         } catch (err) {
-            toast.error(String(err));
+            taskTray.notify('Copy failed', 'error', String(err));
         }
     }
 
@@ -164,7 +169,12 @@
                     // arrives once the first batch commits) so the Cancel
                     // button is available for the *entire* hashing phase,
                     // not just from the second batch onward.
-                    taskTray.update(taskId, { phase: 'hashing', current: 0, total: 0 });
+                    taskTray.update(taskId, {
+                        label: `Hashing “${label}”…`,
+                        phase: 'hashing',
+                        current: 0,
+                        total: 0,
+                    });
                     unlistenHash = await listen<HashProgress>('hash:progress', e => {
                         if (e.payload.source_id !== source.id) return;
                         taskTray.update(taskId, {
@@ -178,14 +188,29 @@
                         taskTray.resolve(
                             taskId,
                             'success',
-                            `Scanned “${label}”. Hashing paused -- resume anytime.`
+                            `Scanned “${label}” -- hashing paused, resume anytime.`
                         );
                         return;
                     }
                 }
             }
+            // Reset progress before the dedup pass's own `dedup:progress`
+            // events land, so the card doesn't flash stale hashing numbers
+            // under the new "Analyzing" label.
+            taskTray.update(taskId, {
+                label: `Analyzing “${label}” for duplicates…`,
+                phase: undefined,
+                current: 0,
+                total: 0,
+            });
             await app.runDedup();
-            taskTray.resolve(taskId, 'success', `Scanned “${label}”.`);
+            taskTray.resolve(
+                taskId,
+                'success',
+                config.hashingEnabled
+                    ? `Scanned, hashed, and analyzed “${label}”.`
+                    : `Scanned and analyzed “${label}”.`
+            );
         } catch (err) {
             taskTray.resolve(taskId, 'error', String(err));
         } finally {
@@ -218,7 +243,7 @@
                 taskId,
                 'success',
                 report.cancelled
-                    ? `Hashing paused for “${source.device_label}”.`
+                    ? `Hashing paused for “${source.device_label}” -- resume anytime.`
                     : `Hashing complete for “${source.device_label}”.`
             );
         } catch (err) {

@@ -12,7 +12,7 @@
     import * as AlertDialog from '$lib/components/ui/alert-dialog';
     import * as Field from '$lib/components/ui/field';
     import * as Empty from '$lib/components/ui/empty';
-    import { toast } from 'svelte-sonner';
+    import { taskTray } from '$lib/stores/tasks.svelte';
 
     let consolidationId = $state<number | null>(null);
     let nodes = $state<ConsolidationNode[]>([]);
@@ -137,7 +137,7 @@
                     nodes = [...nodes, created];
                 }
             } catch (err) {
-                toast.error(String(err));
+                taskTray.notify('Add failed', 'error', String(err));
                 allOk = false;
             }
         }
@@ -192,7 +192,11 @@
             newParentId != null &&
             descendantsOfAll(topLevel).has(newParentId)
         ) {
-            toast.error("Can't move a folder into itself.");
+            taskTray.notify(
+                'Move failed',
+                'error',
+                "Can't move a folder into itself."
+            );
             return;
         }
         const base =
@@ -216,7 +220,7 @@
                         : n
                 );
             } catch (err) {
-                toast.error(String(err));
+                taskTray.notify('Move failed', 'error', String(err));
                 break;
             }
         }
@@ -241,7 +245,7 @@
             await api.consolidationRenameNode(node.id, name);
             nodes = nodes.map(n => (n.id === node.id ? { ...n, name } : n));
         } catch (err) {
-            toast.error(String(err));
+            taskTray.notify('Rename failed', 'error', String(err));
         }
     }
 
@@ -254,7 +258,7 @@
             await api.consolidationDeleteNode(target.id);
             nodes = nodes.filter(n => !toRemove.has(n.id));
         } catch (err) {
-            toast.error(String(err));
+            taskTray.notify('Remove failed', 'error', String(err));
         }
     }
 
@@ -280,7 +284,7 @@
             });
             nodes = [...nodes, created];
         } catch (err) {
-            toast.error(String(err));
+            taskTray.notify('Create failed', 'error', String(err));
         }
     }
 </script>

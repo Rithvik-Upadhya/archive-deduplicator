@@ -11,7 +11,7 @@
     import { ScrollArea } from '$lib/components/ui/scroll-area';
     import * as Empty from '$lib/components/ui/empty';
     import * as AlertDialog from '$lib/components/ui/alert-dialog';
-    import { toast } from 'svelte-sonner';
+    import { taskTray } from '$lib/stores/tasks.svelte';
 
     let limit = $state(260);
     let nodes = $state<PathTreeNode[]>([]);
@@ -25,7 +25,7 @@
         try {
             nodes = await api.pathfixTree(app.activeWorkspaceId, limit);
         } catch (err) {
-            toast.error(String(err));
+            taskTray.notify('Scan failed', 'error', String(err));
         } finally {
             loading = false;
         }
@@ -112,7 +112,11 @@
             newParentId != null &&
             descendantsOfAll(topLevel).has(newParentId)
         ) {
-            toast.error("Can't move a folder into itself.");
+            taskTray.notify(
+                'Move failed',
+                'error',
+                "Can't move a folder into itself."
+            );
             return;
         }
         const base = Math.max(0, ...childrenOf(newParentId).map(n => n.sort_order)) + 1;
@@ -122,7 +126,7 @@
             }
             await reload();
         } catch (err) {
-            toast.error(String(err));
+            taskTray.notify('Move failed', 'error', String(err));
         }
     }
 
@@ -143,7 +147,7 @@
             await api.pathfixRename(app.activeWorkspaceId, node.id, name);
             await reload();
         } catch (err) {
-            toast.error(String(err));
+            taskTray.notify('Rename failed', 'error', String(err));
         }
     }
 
@@ -153,7 +157,7 @@
             await api.pathfixRename(app.activeWorkspaceId, node.id, '');
             await reload();
         } catch (err) {
-            toast.error(String(err));
+            taskTray.notify('Revert failed', 'error', String(err));
         }
     }
 
@@ -165,7 +169,7 @@
             await api.consolidationDeleteNode(target.id);
             await reload();
         } catch (err) {
-            toast.error(String(err));
+            taskTray.notify('Remove failed', 'error', String(err));
         }
     }
 
