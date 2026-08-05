@@ -53,6 +53,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "chrono",
+ "crossbeam-channel",
  "libc",
  "rusqlite",
  "serde",

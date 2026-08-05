@@ -245,6 +245,37 @@ pub fn compute_listing_hashes(conn: &mut Connection, workspace_id: i64) -> rusql
         }
     }
 
+    // Symlinks fold into the fingerprint too: a directory containing one
+    // must not hash identically to one without, or two structurally
+    // different folders would cluster as a false positive -- the one place
+    // this app is least tolerant of them. `link_target` is NULL until Stage 4
+    // populates it, but even NULL still distinguishes "has a link named X"
+    // from "has no link", which is the part that matters here.
+    let mut links_by_parent: HashMap<i64, Vec<(String, Option<String>)>> = HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT n.parent_id, n.name, n.link_target FROM nodes n
+             JOIN sources s ON s.id = n.source_id
+             WHERE s.workspace_id = ?1 AND n.type = 'link'",
+        )?;
+        let rows = stmt.query_map(params![workspace_id], |r| {
+            Ok((
+                r.get::<_, Option<i64>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (parent_id, name, link_target) = row?;
+            if let Some(pid) = parent_id {
+                links_by_parent
+                    .entry(pid)
+                    .or_default()
+                    .push((name, link_target));
+            }
+        }
+    }
+
     let mut children_dirs: HashMap<i64, Vec<usize>> = HashMap::new();
     for (i, d) in dirs.iter().enumerate() {
         if let Some(pid) = d.parent_id {
@@ -272,6 +303,15 @@ pub fn compute_listing_hashes(conn: &mut Connection, workspace_id: i64) -> rusql
                 entries.push((name.clone(), bytes));
             }
         }
+        if let Some(links) = links_by_parent.get(&dir_id) {
+            for (name, link_target) in links {
+                let mut bytes = Vec::with_capacity(name.len() + 16);
+                bytes.extend_from_slice(b"link:");
+                bytes.extend_from_slice(name.as_bytes());
+                bytes.extend_from_slice(link_target.as_deref().unwrap_or_default().as_bytes());
+                entries.push((name.clone(), bytes));
+            }
+        }
         if let Some(child_idxs) = children_dirs.get(&dir_id) {
             for &ci in child_idxs {
                 let mut bytes = Vec::with_capacity(dirs[ci].name.len() + 37);
@@ -294,6 +334,11 @@ pub fn compute_listing_hashes(conn: &mut Connection, workspace_id: i64) -> rusql
 
     let tx = conn.transaction()?;
     {
+        // One `UPDATE` per directory inside a single transaction with a
+        // statement prepared once (see `links.rs::recompute_subtree_totals`'s
+        // matching note) -- chunking into savepoints or a temp-table
+        // `UPDATE ... FROM` would add real complexity for a gain that
+        // hasn't been measured to exist on top of that.
         let mut stmt = tx.prepare("UPDATE nodes SET listing_hash = ?1 WHERE id = ?2")?;
         for (i, d) in dirs.iter().enumerate() {
             stmt.execute(params![listing_hash[i].to_vec(), d.id])?;
@@ -312,12 +357,50 @@ pub fn compute_listing_hashes(conn: &mut Connection, workspace_id: i64) -> rusql
         by_hash.entry(listing_hash[i]).or_default().push(d.id);
     }
 
+    let dir_parent: HashMap<i64, Option<i64>> = dirs.iter().map(|d| (d.id, d.parent_id)).collect();
+
+    // A parent directory's fingerprint folds in its children's fingerprints,
+    // so a matched root also makes every directory beneath it match -- that
+    // would otherwise emit a listing group at every level of an identical
+    // subtree. `clustered` holds every dir id that qualifies for a group (>=2
+    // members, >=2 distinct sources) so the emission pass below can skip a
+    // dir whose parent is *also* clustered, keeping only the highest
+    // (root) matching level.
+    let mut clustered: HashMap<i64, [u8; 32]> = HashMap::new();
+    for (&hash, dir_ids) in &by_hash {
+        if dir_ids.len() < 2 {
+            continue;
+        }
+        let distinct_sources: HashSet<i64> = dir_ids
+            .iter()
+            .filter_map(|d| source_of.get(d).copied())
+            .collect();
+        if distinct_sources.len() < 2 {
+            continue;
+        }
+        for &did in dir_ids {
+            clustered.insert(did, hash);
+        }
+    }
+
     let mut count = 0usize;
     for dir_ids in by_hash.into_values() {
         if dir_ids.len() < 2 {
             continue;
         }
-        let distinct_sources: HashSet<i64> = dir_ids
+        // Emit only cluster roots: drop any member whose parent is also
+        // clustered, since that parent's group already covers this level.
+        let root_ids: Vec<i64> = dir_ids
+            .iter()
+            .filter(|did| {
+                !matches!(dir_parent.get(did), Some(Some(pid)) if clustered.contains_key(pid))
+            })
+            .copied()
+            .collect();
+        if root_ids.len() < 2 {
+            continue;
+        }
+        let distinct_sources: HashSet<i64> = root_ids
             .iter()
             .filter_map(|d| source_of.get(d).copied())
             .collect();
@@ -334,7 +417,7 @@ pub fn compute_listing_hashes(conn: &mut Connection, workspace_id: i64) -> rusql
             let mut stmt = tx.prepare(
                 "INSERT INTO match_members (group_id, node_id, role) VALUES (?1, ?2, 'member')",
             )?;
-            for did in &dir_ids {
+            for did in &root_ids {
                 stmt.execute(params![gid, did])?;
             }
         }
@@ -1259,6 +1342,91 @@ mod tests {
         assert_eq!(
             count, 0,
             "two unrelated empty directories must never be treated as a structural match"
+        );
+    }
+
+    #[test]
+    fn nested_identical_subtrees_emit_only_the_top_level_listing_group() {
+        // src_a: photos/2024/a.jpg ; src_b: photos/2024/a.jpg -- both the
+        // outer `photos` and the inner `2024` directories hash equal across
+        // sources, but only the root of that match should get a group.
+        let (mut conn, ws, src_a, src_b) = setup();
+        let photos_a = insert_node(&conn, src_a, None, "photos", "directory", 0);
+        let year_a = insert_node(&conn, src_a, Some(photos_a), "2024", "directory", 0);
+        insert_file_with_mtime(
+            &conn,
+            src_a,
+            Some(year_a),
+            "a.jpg",
+            100,
+            Some("2024-01-01_10:00:00"),
+        );
+
+        let photos_b = insert_node(&conn, src_b, None, "photos", "directory", 0);
+        let year_b = insert_node(&conn, src_b, Some(photos_b), "2024", "directory", 0);
+        insert_file_with_mtime(
+            &conn,
+            src_b,
+            Some(year_b),
+            "a.jpg",
+            100,
+            Some("2024-01-01_10:00:00"),
+        );
+
+        let count = compute_listing_hashes(&mut conn, ws).unwrap();
+        assert_eq!(
+            count, 1,
+            "a 2-level identical tree must emit exactly one listing group, not one per level"
+        );
+
+        let member_ids: HashSet<i64> = conn
+            .prepare(
+                "SELECT mm.node_id FROM match_members mm
+                 JOIN match_groups mg ON mg.id = mm.group_id
+                 WHERE mg.workspace_id = ?1 AND mg.primary_signal = 'listing'",
+            )
+            .unwrap()
+            .query_map(params![ws], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            member_ids,
+            HashSet::from([photos_a, photos_b]),
+            "the group must be on the top-level `photos` dirs, not the nested `2024` dirs"
+        );
+    }
+
+    #[test]
+    fn a_directory_with_a_symlink_does_not_match_one_without() {
+        let (mut conn, ws, src_a, src_b) = setup();
+        let dir_a = insert_node(&conn, src_a, None, "photos", "directory", 0);
+        let dir_b = insert_node(&conn, src_b, None, "photos", "directory", 0);
+        insert_file_with_mtime(
+            &conn,
+            src_a,
+            Some(dir_a),
+            "a.jpg",
+            100,
+            Some("2024-01-01_10:00:00"),
+        );
+        insert_file_with_mtime(
+            &conn,
+            src_b,
+            Some(dir_b),
+            "a.jpg",
+            100,
+            Some("2024-01-01_10:00:00"),
+        );
+        // Only dir_a has an extra symlink -- the two directories are
+        // structurally different and must not cluster.
+        insert_node(&conn, src_a, Some(dir_a), "link.jpg", "link", 0);
+
+        compute_listing_hashes(&mut conn, ws).unwrap();
+        assert_ne!(
+            listing_hash_of(&conn, dir_a),
+            listing_hash_of(&conn, dir_b),
+            "a directory with a symlink must not hash identically to one without"
         );
     }
 }

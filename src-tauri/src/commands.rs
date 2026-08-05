@@ -228,22 +228,27 @@ pub async fn scan_folder(
             .as_deref()
             .and_then(medium::MediumKind::parse)
             .unwrap_or(detected.medium_kind);
-        let filesystem = filesystem_override.or(detected.filesystem);
         let hash_min_size =
             hash_min_size.unwrap_or_else(|| medium::profile_for(medium_kind).hash_min_size_default);
 
-        let flat = scan::scan_folder(Path::new(&path), |current| {
+        let flat = scan::scan_folder(Path::new(&path), &detected, |current| {
             let _ = app.emit("scan:progress", ScanProgress { current });
         })?;
+        // The volume serial (Windows) / `st_dev` (Linux, unstable across
+        // remounts of removable media) -- kept separate from `nodes.dev`
+        // (used only for within-scan hardlink detection) because
+        // `hash_cache` needs a key stable enough to trust across sessions.
+        let volume_id = detected.volume_id.clone();
+        let filesystem = filesystem_override.or(detected.filesystem);
         let db = app.state::<Db>();
         let mut conn = db.0.lock().unwrap();
         let ts = now();
         let device_label = label.clone();
         let tx = conn.transaction().map_err(map_err)?;
         tx.execute(
-            "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, medium_kind, filesystem, hash_min_size)
-             VALUES (?1, 'scan', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![workspace_id, label, device_label, path, flat.root_dev, ts, flat.total_size, flat.file_count, medium_kind.as_str(), filesystem, hash_min_size],
+            "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, medium_kind, filesystem, hash_min_size, volume_id)
+             VALUES (?1, 'scan', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![workspace_id, label, device_label, path, flat.root_dev, ts, flat.total_size, flat.file_count, medium_kind.as_str(), filesystem, hash_min_size, volume_id],
         )
         .map_err(map_err)?;
         let source_id = tx.last_insert_rowid();

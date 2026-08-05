@@ -108,7 +108,7 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
             let mut src_id_map: HashMap<i64, i64> = HashMap::new();
             {
                 let mut stmt = tx.prepare(
-                    "SELECT id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes
+                    "SELECT id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id
                      FROM ext.sources WHERE workspace_id = ?1",
                 )?;
                 #[allow(clippy::type_complexity)]
@@ -131,6 +131,7 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                     Option<String>,
                     i64,
                     i64,
+                    Option<String>,
                 )> = stmt
                     .query_map(params![old_ws_id], |r| {
                         Ok((
@@ -152,6 +153,7 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                             r.get(15)?,
                             r.get(16)?,
                             r.get(17)?,
+                            r.get(18)?,
                         ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -174,12 +176,13 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                     hash_spec,
                     hash_coverage_files,
                     hash_coverage_bytes,
+                    volume_id,
                 ) in rows
                 {
                     tx.execute(
-                        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
-                        params![new_ws_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes],
+                        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                        params![new_ws_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id],
                     )?;
                     let new_id = tx.last_insert_rowid();
                     src_id_map.insert(old_id, new_id);
@@ -195,7 +198,7 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                 // parent rows are always created (and thus assigned a lower
                 // autoincrement id) before their children during scanning.
                 let mut stmt = tx.prepare(
-                    "SELECT id, parent_id, name, rel_path, type, size, mtime, inode, dev, depth, subtree_size, subtree_file_count, inode_trusted, alias_of, inode_high, content_hash, hash_kind, hash_spec, hash_bytes_read, hashed_at, listing_hash
+                    "SELECT id, parent_id, name, rel_path, type, size, mtime, inode, dev, depth, subtree_size, subtree_file_count, inode_trusted, alias_of, inode_high, content_hash, hash_kind, hash_spec, hash_bytes_read, hashed_at, listing_hash, link_target
                      FROM ext.nodes WHERE source_id = ?1 ORDER BY id",
                 )?;
                 #[allow(clippy::type_complexity)]
@@ -221,6 +224,7 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                     Option<i64>,
                     Option<String>,
                     Option<Vec<u8>>,
+                    Option<String>,
                 )> = stmt
                     .query_map(params![old_src_id], |r| {
                         Ok((
@@ -245,6 +249,7 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                             r.get(18)?,
                             r.get(19)?,
                             r.get(20)?,
+                            r.get(21)?,
                         ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -278,13 +283,14 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                     hash_bytes_read,
                     hashed_at,
                     listing_hash,
+                    link_target,
                 ) in rows
                 {
                     let new_parent_id = parent_id.and_then(|p| node_id_map.get(&p).copied());
                     tx.execute(
-                        "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, mtime, inode, dev, depth, subtree_size, subtree_file_count, inode_trusted, inode_high, content_hash, hash_kind, hash_spec, hash_bytes_read, hashed_at, listing_hash)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
-                        params![new_src_id, new_parent_id, name, rel_path, ntype, size, mtime, inode, dev, depth, subtree_size, subtree_file_count, inode_trusted, inode_high, content_hash, hash_kind, hash_spec, hash_bytes_read, hashed_at, listing_hash],
+                        "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, mtime, inode, dev, depth, subtree_size, subtree_file_count, inode_trusted, inode_high, content_hash, hash_kind, hash_spec, hash_bytes_read, hashed_at, listing_hash, link_target)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                        params![new_src_id, new_parent_id, name, rel_path, ntype, size, mtime, inode, dev, depth, subtree_size, subtree_file_count, inode_trusted, inode_high, content_hash, hash_kind, hash_spec, hash_bytes_read, hashed_at, listing_hash, link_target],
                     )?;
                     let new_id = tx.last_insert_rowid();
                     node_id_map.insert(old_id, new_id);
@@ -536,6 +542,7 @@ pub fn copy_source_to_workspace(
         hash_spec,
         hash_coverage_files,
         hash_coverage_bytes,
+        volume_id,
     ): (
         String,
         String,
@@ -554,8 +561,9 @@ pub fn copy_source_to_workspace(
         Option<String>,
         i64,
         i64,
+        Option<String>,
     ) = tx.query_row(
-        "SELECT kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes
+        "SELECT kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id
          FROM sources WHERE id = ?1",
         params![source_id],
         |r| {
@@ -577,13 +585,14 @@ pub fn copy_source_to_workspace(
                 r.get(14)?,
                 r.get(15)?,
                 r.get(16)?,
+                r.get(17)?,
             ))
         },
     )?;
 
     tx.execute(
-        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             target_workspace_id,
             kind,
@@ -602,7 +611,8 @@ pub fn copy_source_to_workspace(
             hash_min_size,
             hash_spec,
             hash_coverage_files,
-            hash_coverage_bytes
+            hash_coverage_bytes,
+            volume_id
         ],
     )?;
     let new_source_id = tx.last_insert_rowid();
@@ -630,9 +640,10 @@ pub fn copy_source_to_workspace(
         Option<i64>,
         Option<String>,
         Option<Vec<u8>>,
+        Option<String>,
     )> = {
         let mut stmt = tx.prepare(
-            "SELECT id, parent_id, name, rel_path, type, size, mtime, inode, dev, depth, subtree_size, subtree_file_count, inode_trusted, alias_of, inode_high, content_hash, hash_kind, hash_spec, hash_bytes_read, hashed_at, listing_hash
+            "SELECT id, parent_id, name, rel_path, type, size, mtime, inode, dev, depth, subtree_size, subtree_file_count, inode_trusted, alias_of, inode_high, content_hash, hash_kind, hash_spec, hash_bytes_read, hashed_at, listing_hash, link_target
              FROM nodes WHERE source_id = ?1 ORDER BY id",
         )?;
         stmt.query_map(params![source_id], |r| {
@@ -658,6 +669,7 @@ pub fn copy_source_to_workspace(
                 r.get(18)?,
                 r.get(19)?,
                 r.get(20)?,
+                r.get(21)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?
@@ -690,12 +702,13 @@ pub fn copy_source_to_workspace(
         hash_bytes_read,
         hashed_at,
         listing_hash,
+        link_target,
     ) in rows
     {
         let new_parent_id = parent_id.and_then(|p| node_id_map.get(&p).copied());
         tx.execute(
-            "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, mtime, inode, dev, depth, subtree_size, subtree_file_count, inode_trusted, inode_high, content_hash, hash_kind, hash_spec, hash_bytes_read, hashed_at, listing_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, mtime, inode, dev, depth, subtree_size, subtree_file_count, inode_trusted, inode_high, content_hash, hash_kind, hash_spec, hash_bytes_read, hashed_at, listing_hash, link_target)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 new_source_id,
                 new_parent_id,
@@ -716,7 +729,8 @@ pub fn copy_source_to_workspace(
                 hash_spec,
                 hash_bytes_read,
                 hashed_at,
-                listing_hash
+                listing_hash,
+                link_target
             ],
         )?;
         let new_id = tx.last_insert_rowid();

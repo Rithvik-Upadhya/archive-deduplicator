@@ -130,6 +130,88 @@ fn merge_overlapping(mut regions: Vec<Range<i64>>) -> Vec<Range<i64>> {
     merged
 }
 
+/// Open `path` ahead of a hashing read, hinting the OS toward sequential or
+/// random access depending on the region plan (a full hash is one long
+/// sequential read; a sampled hash is a handful of scattered probes). The
+/// hint is an optimization, never a correctness requirement -- every branch
+/// below ignores its own advisory return value, so a failed or unsupported
+/// hint must never fail the hash.
+#[cfg(windows)]
+fn open_for_hashing(path: &Path, sequential: bool) -> std::io::Result<std::fs::File> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
+    };
+
+    const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
+    const FILE_FLAG_RANDOM_ACCESS: u32 = 0x1000_0000;
+    let flags = if sequential {
+        FILE_FLAG_SEQUENTIAL_SCAN
+    } else {
+        FILE_FLAG_RANDOM_ACCESS
+    };
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let h = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            flags,
+            std::ptr::null_mut(),
+        )
+    };
+    if h == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    // `from_raw_handle` takes ownership, so the handle closes on drop -- no
+    // manual `CloseHandle`.
+    Ok(unsafe { std::fs::File::from_raw_handle(h as _) })
+}
+
+#[cfg(target_os = "linux")]
+fn open_for_hashing(path: &Path, sequential: bool) -> std::io::Result<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    let f = std::fs::File::open(path)?;
+    let advice = if sequential {
+        libc::POSIX_FADV_SEQUENTIAL
+    } else {
+        libc::POSIX_FADV_RANDOM
+    };
+    unsafe {
+        libc::posix_fadvise(f.as_raw_fd(), 0, 0, advice); // 0,0 = whole file
+    }
+    Ok(f)
+}
+
+#[cfg(target_os = "macos")]
+fn open_for_hashing(path: &Path, sequential: bool) -> std::io::Result<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    let f = std::fs::File::open(path)?;
+    unsafe {
+        libc::fcntl(
+            f.as_raw_fd(),
+            libc::F_RDAHEAD,
+            if sequential { 1 } else { 0 },
+        );
+    }
+    Ok(f)
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn open_for_hashing(path: &Path, _sequential: bool) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
 /// Hash `path` (a file of `size` bytes) under `spec`, reading `plan_regions`'
 /// regions in ascending offset order. Feeds
 /// `spec_string || size.to_le_bytes() || region_bytes` into BLAKE3, so a size
@@ -144,12 +226,33 @@ pub fn hash_file(
 ) -> std::io::Result<(blake3::Hash, &'static str, i64)> {
     let regions = plan_regions(size, spec);
     let kind = hash_kind_for(size, spec);
+    // A single region is one long sequential read (full hash or a
+    // below-threshold file); more than one is a handful of scattered probes,
+    // where a "sequential" hint would make the OS read ahead across gaps
+    // never touched, wasting the very I/O sampling saved.
+    let sequential = regions.len() == 1;
 
     let mut hasher = blake3::Hasher::new();
     hasher.update(spec.spec_string().as_bytes());
     hasher.update(&size.to_le_bytes());
 
-    let mut file = std::fs::File::open(path)?;
+    let mut file = open_for_hashing(path, sequential)?;
+
+    // Sampled reads: hand the kernel every probe's range up front so it can
+    // start them all before we block on the first `read_exact` -- the same
+    // NCQ-reordering effect the reader pool gets across files, now applied
+    // within one large file.
+    #[cfg(target_os = "linux")]
+    if !sequential {
+        use std::os::unix::io::AsRawFd;
+        let fd = file.as_raw_fd();
+        for r in &regions {
+            unsafe {
+                libc::posix_fadvise(fd, r.start, r.end - r.start, libc::POSIX_FADV_WILLNEED);
+            }
+        }
+    }
+
     let mut bytes_read: i64 = 0;
     for region in &regions {
         let len = (region.end - region.start) as usize;
@@ -180,32 +283,26 @@ pub fn hash_files_pooled(
     spec: HashSpec,
     queue_depth: usize,
 ) -> Vec<(i64, std::io::Result<(blake3::Hash, &'static str, i64)>)> {
-    use std::sync::mpsc;
-    use std::sync::{Arc, Mutex};
-
     let expected = jobs.len();
-    let (work_tx, work_rx) = mpsc::channel::<HashJob>();
+    // An MPMC channel: every worker clones its own `Receiver` and pulls
+    // directly, no `Mutex` serializing access to a single `mpsc::Receiver`
+    // (which would make every worker contend on one lock just to grab its
+    // next job). Unbounded is fine -- the full job list is already in
+    // memory as `jobs` before this call.
+    let (work_tx, work_rx) = crossbeam_channel::unbounded::<HashJob>();
     for job in jobs {
         let _ = work_tx.send(job);
     }
     drop(work_tx);
-    let work_rx = Arc::new(Mutex::new(work_rx));
 
-    let (result_tx, result_rx) = mpsc::channel();
+    let (result_tx, result_rx) = crossbeam_channel::unbounded();
     let n_workers = queue_depth.max(1);
     let mut handles = Vec::with_capacity(n_workers);
     for _ in 0..n_workers {
-        let work_rx = Arc::clone(&work_rx);
+        let work_rx = work_rx.clone();
         let result_tx = result_tx.clone();
         handles.push(std::thread::spawn(move || {
-            loop {
-                let next = {
-                    let rx = work_rx.lock().unwrap();
-                    rx.recv()
-                };
-                let Ok((node_id, path, size)) = next else {
-                    break;
-                };
+            while let Ok((node_id, path, size)) = work_rx.recv() {
                 let result = hash_file(&path, size, &spec);
                 if result_tx.send((node_id, result)).is_err() {
                     break;
@@ -308,8 +405,8 @@ struct CandidateNode {
     node_id: i64,
     rel_path: String,
     size: i64,
-    dev: i64,
-    inode: i64,
+    dev: Option<i64>,
+    inode: Option<i64>,
     mtime: Option<String>,
 }
 
@@ -321,8 +418,7 @@ fn load_hashable_nodes(
     let mut stmt = conn.prepare(
         "SELECT id, rel_path, size, dev, inode, mtime FROM nodes
          WHERE source_id = ?1 AND type = 'file' AND alias_of IS NULL
-           AND size >= ?2 AND dev IS NOT NULL AND inode IS NOT NULL
-           AND content_hash IS NULL
+           AND size >= ?2 AND content_hash IS NULL
          ORDER BY id",
     )?;
     stmt.query_map(params![source_id, hash_min_size], |r| {
@@ -338,6 +434,22 @@ fn load_hashable_nodes(
     .collect()
 }
 
+/// The `hash_cache.volume_id` to key on for a node whose live `dev` is
+/// `dev`: the source's detected volume id when one was recorded (the NTFS
+/// volume serial on Windows -- stable across sessions), falling back to
+/// `dev` itself for sources scanned before Stage 5.4 or on platforms where
+/// `st_dev` is all that's available. A stale `st_dev` on its own just causes
+/// a cache miss (harmless); the volume id exists to rule out the case where
+/// a *reused* `st_dev` also happens to collide on `(file_id, size, mtime)`
+/// and returns a wrong digest -- low probability, unbounded consequence,
+/// and the one subsystem here where a wrong answer is unrecoverable.
+fn cache_volume_id(source_volume_id: &Option<String>, dev: i64) -> String {
+    match source_volume_id {
+        Some(v) if !v.is_empty() => v.clone(),
+        _ => dev.to_string(),
+    }
+}
+
 /// Apply any already-cached digest to matching nodes with zero file reads
 /// (a re-scan of an unchanged tree should touch no content at all), then
 /// return the remaining nodes that still need real hashing -- in physical
@@ -345,6 +457,7 @@ fn load_hashable_nodes(
 fn resolve_candidates(
     tx: &Transaction,
     source_id: i64,
+    source_volume_id: &Option<String>,
     hash_min_size: i64,
     spec: &HashSpec,
     sort_by_physical_order: bool,
@@ -354,21 +467,29 @@ fn resolve_candidates(
 
     let mut remaining = Vec::new();
     let mut cached = 0usize;
+    // The real bytes a cache hit covers -- `node.size`, not
+    // `hash_bytes_read` (a read-cost metric that isn't even recoverable from
+    // a `hash_cache` row). Without this, a re-scan of an unchanged tree
+    // reports near-zero coverage despite every file already being hashed.
+    let mut cached_bytes = 0i64;
     for node in all {
-        let hit: Option<(Vec<u8>, String, String)> = tx
-            .query_row(
-                "SELECT content_hash, hash_kind, computed_at FROM hash_cache
-                 WHERE volume_id = ?1 AND file_id = ?2 AND size = ?3 AND mtime = ?4 AND hash_spec = ?5",
-                params![
-                    node.dev.to_string(),
-                    node.inode,
-                    node.size,
-                    node.mtime.clone().unwrap_or_default(),
-                    spec_str
-                ],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()?;
+        let hit: Option<(Vec<u8>, String, String)> = match (node.dev, node.inode) {
+            (Some(dev), Some(inode)) => tx
+                .query_row(
+                    "SELECT content_hash, hash_kind, computed_at FROM hash_cache
+                     WHERE volume_id = ?1 AND file_id = ?2 AND size = ?3 AND mtime = ?4 AND hash_spec = ?5",
+                    params![
+                        cache_volume_id(source_volume_id, dev),
+                        inode,
+                        node.size,
+                        node.mtime.clone().unwrap_or_default(),
+                        spec_str
+                    ],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?,
+            _ => None,
+        };
         match hit {
             Some((content_hash, hash_kind, computed_at)) => {
                 tx.execute(
@@ -376,12 +497,19 @@ fn resolve_candidates(
                     params![content_hash, hash_kind, spec_str, computed_at, node.node_id],
                 )?;
                 cached += 1;
+                cached_bytes += node.size;
             }
             None => remaining.push(node),
         }
     }
+    if cached > 0 {
+        tx.execute(
+            "UPDATE sources SET hash_coverage_files = hash_coverage_files + ?1, hash_coverage_bytes = hash_coverage_bytes + ?2 WHERE id = ?3",
+            params![cached as i64, cached_bytes, source_id],
+        )?;
+    }
     if sort_by_physical_order {
-        remaining.sort_by_key(|n| (n.dev, n.inode, n.node_id));
+        remaining.sort_by_key(|n| (n.dev.is_none(), n.dev, n.inode, n.node_id));
     }
     Ok((remaining, cached))
 }
@@ -425,15 +553,16 @@ pub fn run_hash_scan(
     queue_depth: usize,
     mut on_progress: impl FnMut(u64, u64),
 ) -> rusqlite::Result<HashScanReport> {
-    let (workspace_id, orig_root_path, hash_min_size, medium_kind_str): (
+    let (workspace_id, orig_root_path, hash_min_size, medium_kind_str, source_volume_id): (
         i64,
         Option<String>,
         i64,
+        Option<String>,
         Option<String>,
     ) = conn.query_row(
-        "SELECT workspace_id, orig_root_path, hash_min_size, medium_kind FROM sources WHERE id = ?1",
+        "SELECT workspace_id, orig_root_path, hash_min_size, medium_kind, volume_id FROM sources WHERE id = ?1",
         params![source_id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     )?;
     let Some(root) = orig_root_path else {
         return Ok(HashScanReport::default());
@@ -446,8 +575,14 @@ pub fn run_hash_scan(
     let sort_by_physical_order = medium::profile_for(medium_kind).sort_by_physical_order;
 
     let tx = conn.transaction()?;
-    let (candidates, cached) =
-        resolve_candidates(&tx, source_id, hash_min_size, &spec, sort_by_physical_order)?;
+    let (candidates, cached) = resolve_candidates(
+        &tx,
+        source_id,
+        &source_volume_id,
+        hash_min_size,
+        &spec,
+        sort_by_physical_order,
+    )?;
     tx.commit()?;
 
     // Baseline for the informational cursor: files already hashed for this
@@ -490,22 +625,24 @@ pub fn run_hash_scan(
                         "UPDATE nodes SET content_hash = ?1, hash_kind = ?2, hash_spec = ?3, hash_bytes_read = ?4, hashed_at = ?5 WHERE id = ?6",
                         params![digest_bytes, kind, spec.spec_string(), bytes_read, ts, node_id],
                     )?;
-                    tx.execute(
-                        "INSERT INTO hash_cache (volume_id, file_id, size, mtime, hash_spec, content_hash, hash_kind, computed_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                         ON CONFLICT(volume_id, file_id, size, mtime, hash_spec)
-                         DO UPDATE SET content_hash = excluded.content_hash, hash_kind = excluded.hash_kind, computed_at = excluded.computed_at",
-                        params![
-                            node.dev.to_string(),
-                            node.inode,
-                            node.size,
-                            node.mtime.clone().unwrap_or_default(),
-                            spec.spec_string(),
-                            digest_bytes,
-                            kind,
-                            ts
-                        ],
-                    )?;
+                    if let (Some(dev), Some(inode)) = (node.dev, node.inode) {
+                        tx.execute(
+                            "INSERT INTO hash_cache (volume_id, file_id, size, mtime, hash_spec, content_hash, hash_kind, computed_at)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                             ON CONFLICT(volume_id, file_id, size, mtime, hash_spec)
+                             DO UPDATE SET content_hash = excluded.content_hash, hash_kind = excluded.hash_kind, computed_at = excluded.computed_at",
+                            params![
+                                cache_volume_id(&source_volume_id, dev),
+                                inode,
+                                node.size,
+                                node.mtime.clone().unwrap_or_default(),
+                                spec.spec_string(),
+                                digest_bytes,
+                                kind,
+                                ts
+                            ],
+                        )?;
+                    }
                     hashed += 1;
                     batch_files += 1;
                     batch_bytes += bytes_read;
@@ -537,7 +674,7 @@ pub fn run_hash_scan(
          ON CONFLICT(source_id) DO UPDATE SET phase = 'done', last_cursor = excluded.last_cursor, updated_at = excluded.updated_at",
         params![source_id, already_hashed + hashed as i64, now()],
     )?;
-    if hashed > 0 {
+    if hashed > 0 || cached > 0 {
         lock_and_record_spec(&tx, workspace_id, &spec)?;
     }
     tx.commit()?;
@@ -584,6 +721,35 @@ mod tests {
         ))
     }
 
+    /// There's no portable way to assert an fadvise/CreateFileW-flag hint
+    /// actually took effect -- what's testable, and what actually matters
+    /// for correctness, is that `open_for_hashing` still hands back a normal
+    /// readable file regardless of the `sequential` hint.
+    #[test]
+    fn open_for_hashing_reads_identical_bytes_to_plain_open() {
+        let dir = unique_temp_dir("open_for_hashing");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("data.bin");
+        let content: Vec<u8> = (0..10_000).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &content).unwrap();
+
+        for sequential in [true, false] {
+            let mut f = open_for_hashing(&path, sequential).unwrap();
+            let mut buf = Vec::new();
+            f.read_to_end(&mut buf).unwrap();
+            assert_eq!(buf, content, "sequential={sequential}");
+        }
+
+        let (digest, _, _) = hash_file(&path, content.len() as i64, &HashSpec::default_spec())
+            .unwrap();
+        let expected = blake3::Hasher::new()
+            .update(HashSpec::default_spec().spec_string().as_bytes())
+            .update(&(content.len() as i64).to_le_bytes())
+            .update(&content)
+            .finalize();
+        assert_eq!(digest, expected);
+    }
+
     /// Build an in-memory workspace with one real `kind='scan'` source over
     /// a temp directory containing `files`, so `run_hash_scan` can actually
     /// open and read them. Returns (conn, workspace_id, source_id, temp_dir).
@@ -603,7 +769,12 @@ mod tests {
         .unwrap();
         let ws = conn.last_insert_rowid();
 
-        let flat = crate::scan::scan_folder(&dir, |_| {}).unwrap();
+        let no_medium = crate::medium::MediumInfo {
+            medium_kind: crate::medium::MediumKind::Unknown,
+            filesystem: None,
+            volume_id: String::new(),
+        };
+        let flat = crate::scan::scan_folder(&dir, &no_medium, |_| {}).unwrap();
         let tx = conn.transaction().unwrap();
         tx.execute(
             "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, imported_at, total_size, file_count, hash_min_size)

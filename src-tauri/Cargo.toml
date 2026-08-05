@@ -27,6 +27,7 @@ walkdir = "2"
 chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.40.1", features = ["backup", "bundled"] }
 blake3 = "1"
+crossbeam-channel = "0.5"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

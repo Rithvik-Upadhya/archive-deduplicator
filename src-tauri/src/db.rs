@@ -56,7 +56,8 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             hash_min_size INTEGER NOT NULL DEFAULT 65536,
             hash_spec TEXT,
             hash_coverage_files INTEGER NOT NULL DEFAULT 0,
-            hash_coverage_bytes INTEGER NOT NULL DEFAULT 0
+            hash_coverage_bytes INTEGER NOT NULL DEFAULT 0,
+            volume_id TEXT
         );
 
         CREATE TABLE IF NOT EXISTS nodes (
@@ -81,7 +82,8 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             hash_spec TEXT,
             hash_bytes_read INTEGER,
             hashed_at TEXT,
-            listing_hash BLOB
+            listing_hash BLOB,
+            link_target TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_nodes_source ON nodes(source_id);
         CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_id);
@@ -195,9 +197,11 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             PRIMARY KEY (volume_id, file_id, size, mtime, hash_spec)
         );
 
-        -- Resumability for a multi-hour hashing pass: `last_cursor` is the
-        -- index into the (deterministically ordered) candidate list that the
-        -- next run should resume from.
+        -- Resumability for a multi-hour hashing pass. `last_cursor` is
+        -- INFORMATIONAL ONLY: the cumulative count of files hashed for this
+        -- source, for progress display. It is NOT an index into a candidate
+        -- list and must never be used to slice one -- resumption works purely
+        -- off `content_hash IS NULL` (see hashing.rs::run_hash_scan).
         CREATE TABLE IF NOT EXISTS scan_progress (
             source_id INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
             phase TEXT NOT NULL,
@@ -211,7 +215,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 
 /// Target schema version. Bump this and add an entry to `migrate`'s
 /// `alterations` list whenever a column is added to an already-shipped table.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 5;
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
@@ -327,6 +331,16 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             "hash_coverage_bytes",
             "ALTER TABLE sources ADD COLUMN hash_coverage_bytes INTEGER NOT NULL DEFAULT 0",
         ),
+        (
+            "nodes",
+            "link_target",
+            "ALTER TABLE nodes ADD COLUMN link_target TEXT",
+        ),
+        (
+            "sources",
+            "volume_id",
+            "ALTER TABLE sources ADD COLUMN volume_id TEXT",
+        ),
     ];
     for (table, column, ddl) in alterations {
         if !column_exists(conn, table, column)? {
@@ -343,6 +357,11 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
              hash_kind TEXT NOT NULL, computed_at TEXT NOT NULL,
              PRIMARY KEY (volume_id, file_id, size, mtime, hash_spec)
          );
+         -- Resumability for a multi-hour hashing pass. `last_cursor` is
+         -- INFORMATIONAL ONLY: the cumulative count of files hashed for this
+         -- source, for progress display. It is NOT an index into a candidate
+         -- list and must never be used to slice one -- resumption works purely
+         -- off `content_hash IS NULL` (see hashing.rs::run_hash_scan).
          CREATE TABLE IF NOT EXISTS scan_progress (
              source_id INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
              phase TEXT NOT NULL, last_cursor INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL
@@ -469,6 +488,7 @@ mod tests {
             "hash_bytes_read",
             "hashed_at",
             "listing_hash",
+            "link_target",
         ] {
             assert!(column_exists(&conn, "nodes", col).unwrap(), "nodes.{col}");
         }
@@ -479,6 +499,7 @@ mod tests {
             "hash_spec",
             "hash_coverage_files",
             "hash_coverage_bytes",
+            "volume_id",
         ] {
             assert!(
                 column_exists(&conn, "sources", col).unwrap(),

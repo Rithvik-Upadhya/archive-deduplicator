@@ -197,6 +197,13 @@ fn recompute_subtree_totals(tx: &Transaction, source_id: i64) -> rusqlite::Resul
         }
     }
 
+    // One `UPDATE` per node (~337k on the largest real corpus this app
+    // targets), but the statement is prepared once above and every execute
+    // shares this single transaction -- the two costs actual per-statement
+    // overhead comes from (SQL re-parsing, transaction fsync). Chunking into
+    // savepoints or a temp-table `UPDATE ... FROM` would add real complexity
+    // for a gain that hasn't been measured to exist on top of that; revisit
+    // only if profiling a real large scan shows this loop dominating.
     let mut stmt =
         tx.prepare("UPDATE nodes SET subtree_size = ?1, subtree_file_count = ?2 WHERE id = ?3")?;
     for (i, n) in nodes.iter().enumerate() {
@@ -416,6 +423,14 @@ mod tests {
         // high-order half -- they must NOT be treated as the same physical
         // file. This is the correctness reason inode_high is stored as a
         // separate column rather than folding a 128-bit ID into one i64.
+        //
+        // No real ReFS volume is available in this dev/CI environment, so
+        // `inode_high` is set by hand here rather than produced by an actual
+        // scan; `scan_win::read_dir_ex`'s split of `FILE_ID_128` is what
+        // populates it for real (Stage 4.1/4.2), and that production path is
+        // exercised only by `scan.rs`'s
+        // `scan_produces_identical_flat_nodes_as_the_walkdir_path` parity
+        // test, which needs a real Windows target to run.
         let (mut conn, _ws, source_id) = setup("scan", HARDLINK_TREE);
         let a = node_id(&conn, source_id, "photos/a.jpg");
         let b = node_id(&conn, source_id, "photos/b.jpg");

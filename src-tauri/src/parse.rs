@@ -20,6 +20,8 @@ pub struct FlatNode {
     pub depth: i64,
     pub subtree_size: i64,
     pub subtree_file_count: i64,
+    pub inode_high: Option<i64>,
+    pub link_target: Option<String>,
 }
 
 /// Result of flattening: the node list plus device-level totals.
@@ -93,6 +95,8 @@ fn walk(node: &TreeNode, parent_index: Option<usize>, parent_path: &str, flat: &
         depth,
         subtree_size: 0,
         subtree_file_count: 0,
+        inode_high: None,
+        link_target: None,
     });
 
     if node.node_type == "file" {
@@ -141,8 +145,8 @@ pub fn insert_nodes(tx: &Transaction, source_id: i64, flat: &Flattened) -> rusql
     let mut ids: Vec<i64> = Vec::with_capacity(flat.nodes.len());
     {
         let mut stmt = tx.prepare(
-            "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, mtime, inode, dev, depth, subtree_size, subtree_file_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, mtime, inode, dev, depth, subtree_size, subtree_file_count, inode_high, link_target)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         )?;
         for n in &flat.nodes {
             let parent_id = n.parent_index.map(|pi| ids[pi]);
@@ -159,6 +163,8 @@ pub fn insert_nodes(tx: &Transaction, source_id: i64, flat: &Flattened) -> rusql
                 n.depth,
                 n.subtree_size,
                 n.subtree_file_count,
+                n.inode_high,
+                n.link_target,
             ])?;
             ids.push(tx.last_insert_rowid());
         }

@@ -419,7 +419,17 @@ fn group_has_hash_conflict(files: &[FileRow], group: &[usize]) -> bool {
 /// groups, then folder-level groups, all inside one transaction.
 ///
 /// The extension veto is applied by sub-bucketing on it (see
-/// `resolve_groups_in_bucket`); a file's own veto conditions -- being a
+/// `resolve_groups_in_bucket`) and scoped to the metadata tiers (C-E) only --
+/// tiers A and B rest on content evidence, which supersedes every metadata
+/// veto except the structural exclusions (alias, symlink) applied upstream in
+/// `load_files` (§9.1 of the design spec: "Vetoes apply to the metadata tiers
+/// (C-E). Tiers A and B rest on content evidence, which supersedes every
+/// metadata veto except the structural exclusions (alias, symlink) applied
+/// upstream in load_files."). Identical bytes are identical bytes: the
+/// extension veto exists to stop metadata coincidence (same size, same stem,
+/// different container), and that reasoning has no force once content is
+/// verified -- a `clip.mov` / `clip.mp4` pair with the same digest is a true
+/// duplicate the user should see. A file's own veto conditions -- being a
 /// hardlink alias or a symlink -- never apply here at all, because
 /// `load_files` excludes both from the candidate pool entirely (aliases via
 /// `alias_of IS NULL`, symlinks via `type = 'file'`). A file may legitimately
@@ -468,7 +478,13 @@ pub fn run_with_progress(
         }
     }
     for group in by_hash.into_values() {
-        if group.len() < 2 || group.len() > MAX_GROUP_SIZE {
+        // No MAX_GROUP_SIZE cap here, unlike the metadata tiers below: the cap
+        // exists because a large metadata cluster is probably systematic
+        // noise. Hash-confirmed identity is proof, not noise -- a file
+        // copied to 40 discs is ordinary in this corpus, and dropping that
+        // group would be exactly the silent-loss failure the cap was meant
+        // to prevent elsewhere.
+        if group.len() < 2 {
             continue;
         }
         let tier = if group
@@ -514,6 +530,17 @@ pub fn run_with_progress(
     // results must not erase them.
     tx.execute(
         "DELETE FROM match_groups WHERE workspace_id = ?1 AND kind != 'hardlink'",
+        params![workspace_id],
+    )?;
+    // Sweep hardlink groups orphaned by any route (source deletion, alias
+    // rows removed, etc.) -- including down to a single surviving member,
+    // which is meaningless for a "these names are the same file" group.
+    // Doing this at the start of every dedup pass rather than at
+    // source-deletion time keeps the cleanup in one place and self-healing.
+    tx.execute(
+        "DELETE FROM match_groups
+         WHERE workspace_id = ?1 AND kind = 'hardlink'
+           AND (SELECT COUNT(*) FROM match_members mm WHERE mm.group_id = match_groups.id) < 2",
         params![workspace_id],
     )?;
 
@@ -821,7 +848,7 @@ mod tests {
             parse::insert_nodes(&tx, sid, &flat).unwrap();
             tx.commit().unwrap();
         }
-        // With the default 4KB threshold + high min confidence, tiny files drop out.
+        // With an explicitly-lowered 4 KB threshold (the default is 64 KB) + high min confidence, tiny files drop out.
         let params = DedupParams {
             min_size_bytes: 4096,
             min_confidence: 60.0,

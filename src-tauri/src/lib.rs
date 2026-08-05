@@ -11,6 +11,8 @@ mod parse;
 mod pathfix;
 mod rollup;
 mod scan;
+#[cfg(windows)]
+mod scan_win;
 
 use db::{Db, DbPath};
 use std::sync::Mutex;
