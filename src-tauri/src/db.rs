@@ -57,7 +57,8 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             hash_spec TEXT,
             hash_coverage_files INTEGER NOT NULL DEFAULT 0,
             hash_coverage_bytes INTEGER NOT NULL DEFAULT 0,
-            volume_id TEXT
+            volume_id TEXT,
+            hashing_enabled INTEGER NOT NULL DEFAULT 1
         );
 
         CREATE TABLE IF NOT EXISTS nodes (
@@ -215,7 +216,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 
 /// Target schema version. Bump this and add an entry to `migrate`'s
 /// `alterations` list whenever a column is added to an already-shipped table.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
@@ -340,6 +341,11 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             "sources",
             "volume_id",
             "ALTER TABLE sources ADD COLUMN volume_id TEXT",
+        ),
+        (
+            "sources",
+            "hashing_enabled",
+            "ALTER TABLE sources ADD COLUMN hashing_enabled INTEGER NOT NULL DEFAULT 1",
         ),
     ];
     for (table, column, ddl) in alterations {
@@ -500,6 +506,7 @@ mod tests {
             "hash_coverage_files",
             "hash_coverage_bytes",
             "volume_id",
+            "hashing_enabled",
         ] {
             assert!(
                 column_exists(&conn, "sources", col).unwrap(),

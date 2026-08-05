@@ -154,11 +154,12 @@
             const source = await app.scanFolder(
                 path,
                 label,
+                config.hashingEnabled,
                 config.hashMinSize,
                 config.mediumOverride,
                 config.filesystemOverride
             );
-            if (source) {
+            if (source && config.hashingEnabled) {
                 await app.runHashScan(source.id);
             }
             await app.runDedup();

@@ -182,6 +182,7 @@ class AppState {
     async scanFolder(
         path: string,
         label: string,
+        hashingEnabled: boolean,
         hashMinSize?: number,
         mediumOverride?: string,
         filesystemOverride?: string,
@@ -191,6 +192,7 @@ class AppState {
             this.activeWorkspaceId,
             path,
             label,
+            hashingEnabled,
             hashMinSize,
             mediumOverride,
             filesystemOverride,

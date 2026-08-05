@@ -42,6 +42,9 @@ export interface Source {
     hash_spec: string | null;
     hash_coverage_files: number;
     hash_coverage_bytes: number;
+    /** Whether content hashing runs for this source at all. When false, the
+     *  device is matched on filesystem metadata only. */
+    hashing_enabled: boolean;
 }
 
 export type MediumKind = 'hdd' | 'ssd' | 'network' | 'optical' | 'unknown';
@@ -200,6 +203,7 @@ export interface ScanConfig {
     hashMinSize: number;
     mediumOverride: string;
     filesystemOverride: string;
+    hashingEnabled: boolean;
 }
 
 export interface ImportSummary {
