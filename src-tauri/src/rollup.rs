@@ -585,10 +585,10 @@ pub fn cross_dup_size_by_source(
     workspace_id: i64,
 ) -> rusqlite::Result<HashMap<i64, (i64, i64)>> {
     let mut group_srcs: HashMap<i64, HashSet<i64>> = HashMap::new();
-    let mut members: Vec<(i64, i64, i64)> = Vec::new();
+    let mut members: Vec<(i64, i64, i64, i64)> = Vec::new();
 
     let mut stmt = conn.prepare(
-        "SELECT mm.group_id, n.source_id, n.size FROM match_members mm
+        "SELECT mm.group_id, mm.node_id, n.source_id, n.size FROM match_members mm
          JOIN match_groups mg ON mg.id = mm.group_id
          JOIN nodes n ON n.id = mm.node_id
          WHERE mg.workspace_id = ?1 AND mg.kind = 'file'",
@@ -598,18 +598,23 @@ pub fn cross_dup_size_by_source(
             r.get::<_, i64>(0)?,
             r.get::<_, i64>(1)?,
             r.get::<_, i64>(2)?,
+            r.get::<_, i64>(3)?,
         ))
     })?;
     for row in rows {
-        let (gid, src, size) = row?;
+        let (gid, node_id, src, size) = row?;
         group_srcs.entry(gid).or_default().insert(src);
-        members.push((gid, src, size));
+        members.push((gid, node_id, src, size));
     }
 
+    // A file may legitimately sit in more than one match group across tiers
+    // (see dedup.rs's note on mixed groups); count each node's bytes at most
+    // once per source, even if several of its groups are cross-device.
+    let mut counted: HashMap<i64, HashSet<i64>> = HashMap::new();
     let mut result: HashMap<i64, (i64, i64)> = HashMap::new();
-    for (gid, src, size) in members {
+    for (gid, node_id, src, size) in members {
         let cross = group_srcs.get(&gid).map(|s| s.len() > 1).unwrap_or(false);
-        if cross {
+        if cross && counted.entry(src).or_default().insert(node_id) {
             let entry = result.entry(src).or_insert((0, 0));
             entry.0 += size;
             entry.1 += 1;
@@ -1071,6 +1076,25 @@ mod tests {
         let stats = cross_dup_size_by_source(&conn, ws).unwrap();
         assert_eq!(stats.get(&src_a), Some(&(100, 1)));
         assert_eq!(stats.get(&src_b), Some(&(100, 1)));
+    }
+
+    #[test]
+    fn cross_dup_size_by_source_counts_a_file_once_even_in_multiple_groups() {
+        // A file can legitimately persist in more than one match group across
+        // tiers (e.g. a tier-D match with one partner and a separate tier-E
+        // match with a different partner). Both groups are cross-source, but
+        // `a`'s bytes must only be counted once for src_a, or the "exclusive
+        // to this device" subtraction in the frontend goes negative.
+        let (conn, ws, src_a, src_b) = setup();
+        let a = insert_node(&conn, src_a, None, "shared.jpg", "file", 100);
+        let b1 = insert_node(&conn, src_b, None, "shared.jpg", "file", 100);
+        let b2 = insert_node(&conn, src_b, None, "shared_alt.jpg", "file", 100);
+        insert_file_group(&conn, ws, &[a, b1]);
+        insert_file_group(&conn, ws, &[a, b2]);
+
+        let stats = cross_dup_size_by_source(&conn, ws).unwrap();
+        assert_eq!(stats.get(&src_a), Some(&(100, 1)), "a's bytes counted once");
+        assert_eq!(stats.get(&src_b), Some(&(200, 2)));
     }
 
     #[test]
