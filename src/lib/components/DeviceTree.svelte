@@ -38,6 +38,7 @@
     /** Populated when a rename begins. */
     let editValue = $state('');
     let confirmingDelete = $state(false);
+    let deleteBusy = $state(false);
     /** Hides nodes whose only duplicates live on another device. */
     const filterCrossDevice = $derived(deviceFilterOn.has(source.id));
 
@@ -87,9 +88,10 @@
     }
 
     async function confirmDelete() {
-        confirmingDelete = false;
+        deleteBusy = true;
         try {
             await app.deleteSource(source.id);
+            confirmingDelete = false;
             taskTray.notify(
                 'Device removed',
                 'success',
@@ -97,6 +99,8 @@
             );
         } catch (err) {
             taskTray.notify('Remove failed', 'error', String(err));
+        } finally {
+            deleteBusy = false;
         }
     }
 </script>
@@ -174,6 +178,7 @@
             size="icon"
             class="size-6 shrink-0 text-muted-foreground hover:text-destructive"
             aria-label="Remove device"
+            disabled={deleteBusy}
             onclick={() => (confirmingDelete = true)}>
             <Icon icon="ph:trash-fill" />
         </Button>
@@ -238,11 +243,12 @@
             </AlertDialog.Description>
         </AlertDialog.Header>
         <AlertDialog.Footer>
-            <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+            <AlertDialog.Cancel disabled={deleteBusy}>Cancel</AlertDialog.Cancel>
             <AlertDialog.Action
+                disabled={deleteBusy}
                 onclick={confirmDelete}
                 class="bg-destructive text-white hover:bg-destructive/90">
-                Remove
+                {deleteBusy ? 'Removing…' : 'Remove'}
             </AlertDialog.Action>
         </AlertDialog.Footer>
     </AlertDialog.Content>

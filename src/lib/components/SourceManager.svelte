@@ -30,6 +30,7 @@
     let editingId = $state<number | null>(null);
     let editValue = $state('');
     let deleteTarget = $state<{ id: number; label: string } | null>(null);
+    let deleteBusy = $state(false);
     let fileInput = $state<HTMLInputElement | null>(null);
 
     function startEdit(id: number, current: string) {
@@ -59,10 +60,11 @@
 
     async function confirmDelete() {
         const target = deleteTarget;
-        deleteTarget = null;
         if (!target) return;
+        deleteBusy = true;
         try {
             await app.deleteSource(target.id);
+            deleteTarget = null;
             taskTray.notify(
                 'Device removed',
                 'success',
@@ -70,6 +72,8 @@
             );
         } catch (err) {
             taskTray.notify('Remove failed', 'error', String(err));
+        } finally {
+            deleteBusy = false;
         }
     }
 
@@ -423,6 +427,7 @@
                                     size="icon"
                                     class="size-6 text-muted-foreground opacity-0 transition-opacity group-hover/device:opacity-100 hover:text-destructive"
                                     title="Remove device"
+                                    disabled={deleteBusy}
                                     onclick={() =>
                                         (deleteTarget = {
                                             id: s.id,
@@ -492,11 +497,12 @@
             </AlertDialog.Description>
         </AlertDialog.Header>
         <AlertDialog.Footer>
-            <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+            <AlertDialog.Cancel disabled={deleteBusy}>Cancel</AlertDialog.Cancel>
             <AlertDialog.Action
+                disabled={deleteBusy}
                 onclick={confirmDelete}
                 class="bg-destructive text-white hover:bg-destructive/90">
-                Remove
+                {deleteBusy ? 'Removing…' : 'Remove'}
             </AlertDialog.Action>
         </AlertDialog.Footer>
     </AlertDialog.Content>
