@@ -50,9 +50,13 @@ class AppState {
     /** True when sources changed after the last dedup run (nudges a re-run). */
     dedupStale = $state(false);
 
-    /** Bumped every `loadWorkspace()`, so tree panels know their cached
-     *  `roots`/`children` (fetched via `getTree`) may be stale and should
-     *  refetch -- e.g. after a dedup rerun changes duplicate annotations. */
+    /** Bumped by whichever mutation can actually change tree shape or
+     *  duplicate annotations (import, scan, delete, copy-to-workspace,
+     *  dedup rerun), so tree panels know their cached `roots`/`children`
+     *  (fetched via `getTree`) may be stale and should refetch. Switching
+     *  workspaces or hashing doesn't touch this -- a workspace switch
+     *  already remounts every device panel from scratch, and hashing alone
+     *  (without a dedup rerun) doesn't change what `getTree` returns. */
     treeVersion = $state(0);
 
     loading = $state(true);
@@ -112,7 +116,6 @@ class AppState {
             api.sourceList(ws).then((sources) => (this.sources = sources)),
             this.refreshGroups(),
         ]);
-        this.treeVersion++;
     }
 
     /** Persist the current min-size/min-confidence tuning for the active
@@ -177,6 +180,7 @@ class AppState {
         await api.importTreeJson(this.activeWorkspaceId, jsonText, label);
         await this.setDedupStale(true);
         await this.loadWorkspace();
+        this.treeVersion++;
     }
 
     async scanFolder(
@@ -199,6 +203,7 @@ class AppState {
         );
         await this.setDedupStale(true);
         await this.loadWorkspace();
+        this.treeVersion++;
         return source;
     }
 
@@ -235,6 +240,7 @@ class AppState {
         if (targetWorkspaceId === this.activeWorkspaceId) {
             await this.setDedupStale(true);
             await this.loadWorkspace();
+            this.treeVersion++;
         } else {
             // setDedupStale only writes for the active workspace -- the
             // target isn't active, so flag it directly so loadWorkspace
@@ -247,6 +253,7 @@ class AppState {
         await api.sourceDelete(sourceId);
         await this.setDedupStale(true);
         await this.loadWorkspace();
+        this.treeVersion++;
     }
 
     async runDedup() {
@@ -259,6 +266,7 @@ class AppState {
         );
         await this.setDedupStale(false);
         await this.loadWorkspace();
+        this.treeVersion++;
     }
 
     /** Reload the first page of groups using the current filters. */
