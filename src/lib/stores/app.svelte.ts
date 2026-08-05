@@ -83,10 +83,11 @@ class AppState {
                 const ws = await api.workspaceCreate('Workspace 1');
                 this.workspaces = [ws];
             }
-            const [lastId, view] = await Promise.all([
+            const [lastId, rawView] = await Promise.all([
                 api.appStateGet('active_workspace'),
-                api.appStateGet('view') as Promise<ViewName | null>,
+                api.appStateGet('view'),
             ]);
+            const view = rawView as ViewName | null;
             const parsed = lastId ? Number(lastId) : null;
             this.activeWorkspaceId =
                 parsed && this.workspaces.some((w) => w.id === parsed)
