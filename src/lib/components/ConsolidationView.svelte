@@ -33,9 +33,19 @@
 
     async function load() {
         if (app.activeWorkspaceId == null) return;
-        const [cid, cnodes] = await api.consolidationGet(app.activeWorkspaceId);
-        consolidationId = cid;
-        nodes = cnodes;
+        try {
+            const [cid, cnodes] = await api.consolidationGet(
+                app.activeWorkspaceId
+            );
+            consolidationId = cid;
+            nodes = cnodes;
+        } catch (err) {
+            taskTray.notify(
+                'Failed to load consolidation tree',
+                'error',
+                String(err)
+            );
+        }
     }
 
     // Reload whenever the active workspace changes.

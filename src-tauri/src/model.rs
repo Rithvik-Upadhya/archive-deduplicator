@@ -186,6 +186,11 @@ pub struct MatchMember {
     pub rel_path: String,
     pub name: String,
     pub size: i64,
+    /// Aggregated bytes under this node -- the meaningful figure for a
+    /// folder-kind match member, since a directory's own `size` column is
+    /// just its raw filesystem dir-entry size (a few bytes or zero), not
+    /// the duplicated content total.
+    pub subtree_size: i64,
     pub mtime: Option<String>,
 }
 

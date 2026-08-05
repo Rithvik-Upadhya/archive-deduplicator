@@ -139,6 +139,7 @@ export interface MatchMember {
     rel_path: string;
     name: string;
     size: number;
+    subtree_size: number;
     mtime: string | null;
 }
 

@@ -33,6 +33,7 @@
     }: Props = $props();
 
     let roots = $state<TreeNode[] | null>(null);
+    let rootsError = $state(false);
     const expanded = $derived(!deviceCollapsed.has(source.id));
     let editing = $state(false);
     /** Populated when a rename begins. */
@@ -60,7 +61,13 @@
     );
 
     async function load() {
-        roots = await getTree(app.activeWorkspaceId!, source.id, null);
+        rootsError = false;
+        try {
+            roots = await getTree(app.activeWorkspaceId!, source.id, null);
+        } catch (err) {
+            rootsError = true;
+            taskTray.notify('Failed to load tree', 'error', String(err));
+        }
     }
 
     /** Tracks which `treeVersion` `roots` reflects, so a dedup rerun (or any
@@ -202,7 +209,17 @@
     {#if expanded}
         <ScrollArea class="min-h-0 grow" scrollbarYClasses="w-2">
             <div class="px-1 pb-1 mt-1">
-                {#if roots === null}
+                {#if roots === null && rootsError}
+                    <div
+                        class="flex items-center gap-1.5 px-2 py-1.5 text-xs text-destructive">
+                        <Icon icon="ph:warning-circle-fill" />
+                        Failed to load.
+                        <button
+                            type="button"
+                            class="underline hover:no-underline"
+                            onclick={load}>Retry</button>
+                    </div>
+                {:else if roots === null}
                     <div
                         class="flex items-center gap-1.5 px-2 py-1.5 text-xs text-muted-foreground">
                         <Icon icon="ph:spinner-gap-fill" class="animate-spin" />

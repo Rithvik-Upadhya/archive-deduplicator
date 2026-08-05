@@ -741,7 +741,7 @@ pub fn get_groups(
     if !groups.is_empty() {
         let ids: Vec<String> = groups.iter().map(|g| g.id.to_string()).collect();
         let sql = format!(
-            "SELECT mm.group_id, n.id, n.source_id, s.device_label, n.rel_path, n.name, n.size, n.mtime
+            "SELECT mm.group_id, n.id, n.source_id, s.device_label, n.rel_path, n.name, n.size, n.subtree_size, n.mtime
              FROM match_members mm
              JOIN nodes n ON n.id = mm.node_id
              JOIN sources s ON s.id = n.source_id
@@ -760,7 +760,8 @@ pub fn get_groups(
                         rel_path: r.get(4)?,
                         name: r.get(5)?,
                         size: r.get(6)?,
-                        mtime: r.get(7)?,
+                        subtree_size: r.get(7)?,
+                        mtime: r.get(8)?,
                     },
                 ))
             })
@@ -806,7 +807,7 @@ pub fn get_group_for_node(db: State<Db>, node_id: i64) -> CmdResult<Option<Match
     let Some(mut g) = group else { return Ok(None) };
     let mut mstmt = conn
         .prepare(
-            "SELECT n.id, n.source_id, s.device_label, n.rel_path, n.name, n.size, n.mtime
+            "SELECT n.id, n.source_id, s.device_label, n.rel_path, n.name, n.size, n.subtree_size, n.mtime
              FROM match_members mm
              JOIN nodes n ON n.id = mm.node_id
              JOIN sources s ON s.id = n.source_id
@@ -822,7 +823,8 @@ pub fn get_group_for_node(db: State<Db>, node_id: i64) -> CmdResult<Option<Match
                 rel_path: r.get(3)?,
                 name: r.get(4)?,
                 size: r.get(5)?,
-                mtime: r.get(6)?,
+                subtree_size: r.get(6)?,
+                mtime: r.get(7)?,
             })
         })
         .map_err(map_err)?

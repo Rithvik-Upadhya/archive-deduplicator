@@ -309,9 +309,12 @@
                                                 >{m.rel_path}</span>
                                             <span
                                                 class="shrink-0 whitespace-nowrap text-muted-foreground">
-                                                {formatBytes(m.size)} · {formatTime(
-                                                    m.mtime
-                                                )}
+                                                {formatBytes(
+                                                    selectedGroup.kind ===
+                                                        'folder'
+                                                        ? m.subtree_size
+                                                        : m.size
+                                                )} · {formatTime(m.mtime)}
                                             </span>
                                         </li>
                                     {/each}
