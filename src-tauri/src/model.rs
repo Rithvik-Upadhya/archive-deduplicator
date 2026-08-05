@@ -273,12 +273,27 @@ pub struct MediumInfoDto {
 
 /// A cheap walk-only dry run (no DB writes) used to show real numbers --
 /// "~87,300 of 337,000 files will be hashed" -- in the scan-config dialog.
+/// Also reused post-scan by `preview_hash_threshold`, which computes the
+/// same shape from already-scanned `nodes` rows instead of a disk walk.
 #[derive(Debug, Clone, Serialize)]
 pub struct ScanPreview {
     pub total_files: i64,
     pub total_bytes: i64,
     pub files_above_threshold: i64,
     pub bytes_above_threshold: i64,
+}
+
+/// One row of the post-scan file-size distribution table -- see
+/// `commands::get_size_buckets`'s doc comment for the exact bucket
+/// boundaries. Shown right after a scan completes so the hash-threshold
+/// refinement step can be set against real numbers instead of a blind guess.
+#[derive(Debug, Clone, Serialize)]
+pub struct SizeBucketDto {
+    pub bucket: String,
+    pub files: i64,
+    pub gib: f64,
+    pub pct_files: f64,
+    pub pct_bytes: f64,
 }
 
 /// A workspace's digest-affecting hash settings (§6.1). `spec_string` is the

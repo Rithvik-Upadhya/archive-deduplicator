@@ -360,6 +360,125 @@ pub async fn preview_scan(path: String, hash_min_size: i64) -> CmdResult<ScanPre
     .map_err(|e| e.to_string())?
 }
 
+/// Split out from `get_size_buckets` so it's testable without a Tauri
+/// `AppHandle`, mirroring `fetch_medium_and_hashing_enabled` above.
+fn size_buckets_for_source(
+    conn: &rusqlite::Connection,
+    source_id: i64,
+) -> rusqlite::Result<Vec<SizeBucketDto>> {
+    let mut stmt = conn.prepare(
+        "SELECT
+           CASE
+             WHEN n.size = 0          THEN '00. empty'
+             WHEN n.size <       1024 THEN '01. <1K'
+             WHEN n.size <       4096 THEN '02. 1K-4K'
+             WHEN n.size <      16384 THEN '03. 4K-16K'
+             WHEN n.size <      65536 THEN '04. 16K-64K'
+             WHEN n.size <     262144 THEN '05. 64K-256K'
+             WHEN n.size <    1048576 THEN '06. 256K-1M'
+             WHEN n.size <    4194304 THEN '07. 1M-4M'
+             WHEN n.size <    8388608 THEN '08. 4M-8M'
+             WHEN n.size <   33554432 THEN '09. 8M-32M'
+             WHEN n.size <  134217728 THEN '10. 32M-128M'
+             WHEN n.size <  536870912 THEN '11. 128M-512M'
+             WHEN n.size < 2147483648 THEN '12. 512M-2G'
+             WHEN n.size < 8589934592 THEN '13. 2G-8G'
+             ELSE                          '14. >=8G'
+           END AS bucket,
+           COUNT(*) AS files,
+           ROUND(SUM(n.size) / 1073741824.0, 3) AS gib,
+           ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS pct_files,
+           ROUND(100.0 * SUM(n.size) / SUM(SUM(n.size)) OVER (), 4) AS pct_bytes
+         FROM nodes n
+         WHERE n.source_id = ?1 AND n.type = 'file'
+         GROUP BY bucket
+         ORDER BY bucket",
+    )?;
+    let rows = stmt.query_map(params![source_id], |r| {
+        Ok(SizeBucketDto {
+            bucket: r.get(0)?,
+            files: r.get(1)?,
+            gib: r.get(2)?,
+            pct_files: r.get(3)?,
+            pct_bytes: r.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// The post-scan file-size distribution for `source_id`, bucketed for the
+/// hash-threshold refinement step (shown after a scan completes, before
+/// hashing starts) so "skip hashing below" can be set against this source's
+/// real size distribution rather than a blind pre-scan guess. Bucket
+/// boundaries are fixed powers-of-two-ish breakpoints, not user-configurable.
+#[tauri::command]
+pub fn get_size_buckets(db: State<Db>, source_id: i64) -> CmdResult<Vec<SizeBucketDto>> {
+    let conn = db.lock();
+    size_buckets_for_source(&conn, source_id).map_err(map_err)
+}
+
+/// Split out from `preview_hash_threshold` so it's testable without a Tauri
+/// `AppHandle`.
+fn hash_threshold_preview(
+    conn: &rusqlite::Connection,
+    source_id: i64,
+    hash_min_size: i64,
+) -> rusqlite::Result<ScanPreview> {
+    conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(size), 0),
+                COALESCE(SUM(CASE WHEN size >= ?2 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN size >= ?2 THEN size ELSE 0 END), 0)
+         FROM nodes WHERE source_id = ?1 AND type = 'file'",
+        params![source_id, hash_min_size],
+        |r| {
+            Ok(ScanPreview {
+                total_files: r.get(0)?,
+                total_bytes: r.get(1)?,
+                files_above_threshold: r.get(2)?,
+                bytes_above_threshold: r.get(3)?,
+            })
+        },
+    )
+}
+
+/// Live "N files / M bytes would be hashed" counts for `source_id` against a
+/// candidate `hash_min_size`, queried straight from already-scanned `nodes`
+/// rows (cheap -- no disk I/O, unlike `preview_scan`'s disk walk) so the
+/// hash-threshold refinement step can update its counter on every keystroke.
+#[tauri::command]
+pub fn preview_hash_threshold(
+    db: State<Db>,
+    source_id: i64,
+    hash_min_size: i64,
+) -> CmdResult<ScanPreview> {
+    let conn = db.lock();
+    hash_threshold_preview(&conn, source_id, hash_min_size).map_err(map_err)
+}
+
+/// Split out from `set_hash_min_size` so it's testable without a Tauri
+/// `AppHandle`.
+fn update_hash_min_size(
+    conn: &rusqlite::Connection,
+    source_id: i64,
+    hash_min_size: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE sources SET hash_min_size = ?1 WHERE id = ?2",
+        params![hash_min_size, source_id],
+    )?;
+    Ok(())
+}
+
+/// Applies the hash-threshold refinement step's confirmed value to
+/// `source_id` before hashing starts -- `run_hash_scan` reads
+/// `sources.hash_min_size` fresh on every call, so this UPDATE is all that's
+/// needed for the refined value to actually take effect.
+#[tauri::command]
+pub fn set_hash_min_size(db: State<Db>, source_id: i64, hash_min_size: i64) -> CmdResult<()> {
+    let conn = db.lock();
+    update_hash_min_size(&conn, source_id, hash_min_size).map_err(map_err)
+}
+
 fn to_hash_spec_dto(spec: hashing::HashSpec) -> HashSpecDto {
     HashSpecDto {
         threshold: spec.threshold,
@@ -1308,6 +1427,148 @@ mod tests {
             remaining_group_ids,
             vec![internal_group],
             "the orphaned cross-source group must be swept away, the unaffected internal group must survive"
+        );
+    }
+
+    fn insert_source(conn: &Connection, ws: i64) -> i64 {
+        conn.execute(
+            "INSERT INTO sources (workspace_id, kind, label, device_label, imported_at, total_size, file_count)
+             VALUES (?1, 'scan', 'disc-a', 'disc-a', 't', 0, 0)",
+            params![ws],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn insert_file(conn: &Connection, source_id: i64, name: &str, size: i64) {
+        conn.execute(
+            "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size)
+             VALUES (?1, NULL, ?2, ?2, 'file', ?3)",
+            params![source_id, name, size],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn size_buckets_for_source_groups_by_boundary_and_computes_percentages() {
+        let (conn, ws) = seeded_conn();
+        let source_id = insert_source(&conn, ws);
+        // Two files in the "<1K" bucket, one in "1K-4K" -- 3 files total,
+        // so pct_files should read 66.67 / 33.33 and pct_bytes should split
+        // by actual byte share, not file count.
+        insert_file(&conn, source_id, "a.txt", 100);
+        insert_file(&conn, source_id, "b.txt", 200);
+        insert_file(&conn, source_id, "c.txt", 2000);
+
+        let buckets = size_buckets_for_source(&conn, source_id).unwrap();
+        assert_eq!(
+            buckets.iter().map(|b| b.bucket.as_str()).collect::<Vec<_>>(),
+            vec!["01. <1K", "02. 1K-4K"]
+        );
+        let small = &buckets[0];
+        assert_eq!(small.files, 2);
+        let medium = &buckets[1];
+        assert_eq!(medium.files, 1);
+        let total_pct_files: f64 = buckets.iter().map(|b| b.pct_files).sum();
+        assert!(
+            (total_pct_files - 100.0).abs() < 0.1,
+            "pct_files across all buckets should sum to ~100, got {total_pct_files}"
+        );
+    }
+
+    #[test]
+    fn size_buckets_for_source_only_counts_files_not_directories() {
+        let (conn, ws) = seeded_conn();
+        let source_id = insert_source(&conn, ws);
+        conn.execute(
+            "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size)
+             VALUES (?1, NULL, 'dir', 'dir', 'directory', 0)",
+            params![source_id],
+        )
+        .unwrap();
+        insert_file(&conn, source_id, "a.txt", 100);
+
+        let buckets = size_buckets_for_source(&conn, source_id).unwrap();
+        let total_files: i64 = buckets.iter().map(|b| b.files).sum();
+        assert_eq!(total_files, 1, "the directory row must not be counted");
+    }
+
+    #[test]
+    fn size_buckets_for_source_is_scoped_to_one_source() {
+        let (conn, ws) = seeded_conn();
+        let source_a = insert_source(&conn, ws);
+        let source_b = insert_source(&conn, ws);
+        insert_file(&conn, source_a, "a.txt", 100);
+        insert_file(&conn, source_b, "b.txt", 100);
+        insert_file(&conn, source_b, "c.txt", 200);
+
+        let buckets_a = size_buckets_for_source(&conn, source_a).unwrap();
+        let total_a: i64 = buckets_a.iter().map(|b| b.files).sum();
+        assert_eq!(total_a, 1, "source_a's bucket table must not include source_b's files");
+    }
+
+    #[test]
+    fn hash_threshold_preview_counts_only_files_at_or_above_the_threshold() {
+        let (conn, ws) = seeded_conn();
+        let source_id = insert_source(&conn, ws);
+        insert_file(&conn, source_id, "small.txt", 100);
+        insert_file(&conn, source_id, "big.txt", 10_000);
+
+        let preview = hash_threshold_preview(&conn, source_id, 1000).unwrap();
+        assert_eq!(preview.total_files, 2);
+        assert_eq!(preview.total_bytes, 10_100);
+        assert_eq!(preview.files_above_threshold, 1);
+        assert_eq!(preview.bytes_above_threshold, 10_000);
+    }
+
+    #[test]
+    fn hash_threshold_preview_at_zero_counts_every_file() {
+        let (conn, ws) = seeded_conn();
+        let source_id = insert_source(&conn, ws);
+        insert_file(&conn, source_id, "a.txt", 1);
+        insert_file(&conn, source_id, "b.txt", 2);
+
+        let preview = hash_threshold_preview(&conn, source_id, 0).unwrap();
+        assert_eq!(preview.files_above_threshold, preview.total_files);
+        assert_eq!(preview.bytes_above_threshold, preview.total_bytes);
+    }
+
+    #[test]
+    fn hash_threshold_preview_on_an_empty_source_returns_zeros_not_an_error() {
+        let (conn, ws) = seeded_conn();
+        let source_id = insert_source(&conn, ws);
+
+        let preview = hash_threshold_preview(&conn, source_id, 1000).unwrap();
+        assert_eq!(preview.total_files, 0);
+        assert_eq!(preview.total_bytes, 0);
+        assert_eq!(preview.files_above_threshold, 0);
+        assert_eq!(preview.bytes_above_threshold, 0);
+    }
+
+    #[test]
+    fn update_hash_min_size_persists_and_only_touches_the_target_source() {
+        let (conn, ws) = seeded_conn();
+        let source_a = insert_source(&conn, ws);
+        let source_b = insert_source(&conn, ws);
+
+        // 131072 is deliberately different from the schema's own
+        // DEFAULT 65536 for `hash_min_size`, so source_b keeping its
+        // untouched default is a meaningful assertion, not a coincidence.
+        update_hash_min_size(&conn, source_a, 131072).unwrap();
+
+        let get_hash_min_size = |source_id: i64| -> i64 {
+            conn.query_row(
+                "SELECT hash_min_size FROM sources WHERE id = ?1",
+                params![source_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(get_hash_min_size(source_a), 131072);
+        assert_eq!(
+            get_hash_min_size(source_b),
+            65536,
+            "updating source_a must not touch source_b's default hash_min_size"
         );
     }
 }

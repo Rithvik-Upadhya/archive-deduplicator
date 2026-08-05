@@ -59,12 +59,24 @@ export interface MediumInfoDto {
     volume_id: string;
 }
 
-/** A cheap walk-only dry run (no DB writes) for the scan-config dialog. */
+/** A cheap walk-only dry run (no DB writes) for the scan-config dialog. Also
+ *  reused post-scan by `previewHashThreshold`, which computes the same shape
+ *  from already-scanned nodes instead of a disk walk. */
 export interface ScanPreview {
     total_files: number;
     total_bytes: number;
     files_above_threshold: number;
     bytes_above_threshold: number;
+}
+
+/** One row of the post-scan file-size distribution table, shown in the
+ *  hash-threshold refinement step right after a scan completes. */
+export interface SizeBucket {
+    bucket: string;
+    files: number;
+    gib: number;
+    pct_files: number;
+    pct_bytes: number;
 }
 
 /** `threshold: null` means "full hash everything" -- no sampling. */

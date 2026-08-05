@@ -3,7 +3,7 @@
     import { taskTray } from '$lib/stores/tasks.svelte';
     import { open } from '@tauri-apps/plugin-dialog';
     import { listen } from '@tauri-apps/api/event';
-    import { hashSettingsSet } from '$lib/api';
+    import { hashSettingsSet, setHashMinSize } from '$lib/api';
     import type {
         DedupProgress,
         HashProgress,
@@ -22,10 +22,40 @@
     import * as AlertDialog from '$lib/components/ui/alert-dialog';
     import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
     import ScanConfigDialog from '$lib/components/ScanConfigDialog.svelte';
+    import HashRefineDialog from '$lib/components/HashRefineDialog.svelte';
 
     let scanDialogOpen = $state(false);
     let scanPath = $state('');
     let scanLabel = $state('');
+
+    // Bridges the declarative `HashRefineDialog` (opened via `bind:open`,
+    // confirmed via its `onConfirm` prop) into the single `await`-chained
+    // scan -> refine -> hash -> dedup flow in `onScanConfirm` below.
+    let hashRefineOpen = $state(false);
+    let hashRefineSourceId = $state(0);
+    let hashRefineLabel = $state('');
+    let hashRefineInitialMinSize = $state(0);
+    let hashRefineResolve: ((hashMinSize: number) => void) | null = null;
+
+    function awaitHashRefine(
+        sourceId: number,
+        label: string,
+        initialMinSize: number
+    ): Promise<number> {
+        hashRefineSourceId = sourceId;
+        hashRefineLabel = label;
+        hashRefineInitialMinSize = initialMinSize;
+        hashRefineOpen = true;
+        return new Promise<number>(resolve => {
+            hashRefineResolve = resolve;
+        });
+    }
+
+    function onHashRefineConfirm(hashMinSize: number) {
+        hashRefineOpen = false;
+        hashRefineResolve?.(hashMinSize);
+        hashRefineResolve = null;
+    }
 
     let editingId = $state<number | null>(null);
     let editValue = $state('');
@@ -176,6 +206,23 @@
             if (source) {
                 taskTray.update(taskId, { sourceId: source.id });
                 if (config.hashingEnabled) {
+                    // The scan just populated real `nodes` rows for this
+                    // source -- pause here so the user can fine-tune the
+                    // blind pre-scan threshold from step 2 against the
+                    // actual size distribution before hashing starts.
+                    taskTray.update(taskId, {
+                        label: `Reviewing “${label}” before hashing…`,
+                        phase: undefined,
+                        current: 0,
+                        total: 0,
+                    });
+                    const refinedHashMinSize = await awaitHashRefine(
+                        source.id,
+                        label,
+                        config.hashMinSize
+                    );
+                    await setHashMinSize(source.id, refinedHashMinSize);
+
                     // Set before the first `hash:progress` event (which only
                     // arrives once the first batch commits) so the Cancel
                     // button is available for the *entire* hashing phase,
@@ -519,3 +566,10 @@
     path={scanPath}
     label={scanLabel}
     onConfirm={onScanConfirm} />
+
+<HashRefineDialog
+    bind:open={hashRefineOpen}
+    sourceId={hashRefineSourceId}
+    label={hashRefineLabel}
+    initialHashMinSize={hashRefineInitialMinSize}
+    onConfirm={onHashRefineConfirm} />

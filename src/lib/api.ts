@@ -16,6 +16,7 @@ import type {
     PathTreeNode,
     ScanPreview,
     ScanProgressInfo,
+    SizeBucket,
     Source,
     TreeNode,
     Workspace,
@@ -65,6 +66,12 @@ export const detectMedium = (path: string) =>
     invoke<MediumInfoDto>('detect_medium', { path });
 export const previewScan = (path: string, hashMinSize: number) =>
     invoke<ScanPreview>('preview_scan', { path, hashMinSize });
+export const getSizeBuckets = (sourceId: number) =>
+    invoke<SizeBucket[]>('get_size_buckets', { sourceId });
+export const previewHashThreshold = (sourceId: number, hashMinSize: number) =>
+    invoke<ScanPreview>('preview_hash_threshold', { sourceId, hashMinSize });
+export const setHashMinSize = (sourceId: number, hashMinSize: number) =>
+    invoke<void>('set_hash_min_size', { sourceId, hashMinSize });
 export const hashSettingsGet = (workspaceId: number) =>
     invoke<HashSettings>('hash_settings_get', { workspaceId });
 export const hashSettingsSet = (workspaceId: number, spec: HashSpecDto) =>
