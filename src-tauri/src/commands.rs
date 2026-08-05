@@ -21,6 +21,17 @@ fn map_err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
+/// Turns a single-row `query_row` result into `Ok(None)` only for the
+/// "no such row" case, surfacing every other error instead of masking it as
+/// a plain "not found" the way a blanket `.ok()` would.
+fn optional_row<T>(res: rusqlite::Result<T>) -> CmdResult<Option<T>> {
+    match res {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(map_err(e)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Workspaces
 // ---------------------------------------------------------------------------
@@ -785,25 +796,23 @@ pub fn get_groups(
 #[tauri::command]
 pub fn get_group_for_node(db: State<Db>, node_id: i64) -> CmdResult<Option<MatchGroup>> {
     let conn = db.lock();
-    let group: Option<MatchGroup> = conn
-        .query_row(
-            "SELECT mg.id, mg.workspace_id, mg.kind, mg.confidence, mg.primary_signal, mg.size
+    let group = optional_row(conn.query_row(
+        "SELECT mg.id, mg.workspace_id, mg.kind, mg.confidence, mg.primary_signal, mg.size
              FROM match_members mm JOIN match_groups mg ON mg.id = mm.group_id
              WHERE mm.node_id = ?1 ORDER BY mg.confidence DESC LIMIT 1",
-            params![node_id],
-            |r| {
-                Ok(MatchGroup {
-                    id: r.get(0)?,
-                    workspace_id: r.get(1)?,
-                    kind: r.get(2)?,
-                    confidence: r.get(3)?,
-                    primary_signal: r.get(4)?,
-                    size: r.get(5)?,
-                    members: Vec::new(),
-                })
-            },
-        )
-        .ok();
+        params![node_id],
+        |r| {
+            Ok(MatchGroup {
+                id: r.get(0)?,
+                workspace_id: r.get(1)?,
+                kind: r.get(2)?,
+                confidence: r.get(3)?,
+                primary_signal: r.get(4)?,
+                size: r.get(5)?,
+                members: Vec::new(),
+            })
+        },
+    ))?;
     let Some(mut g) = group else { return Ok(None) };
     let mut mstmt = conn
         .prepare(
@@ -1053,14 +1062,11 @@ pub fn pathfix_rename(
 #[tauri::command]
 pub fn app_state_get(db: State<Db>, key: String) -> CmdResult<Option<String>> {
     let conn = db.lock();
-    let v: Option<String> = conn
-        .query_row(
-            "SELECT value FROM app_state WHERE key = ?1",
-            params![key],
-            |r| r.get(0),
-        )
-        .ok();
-    Ok(v)
+    optional_row(conn.query_row(
+        "SELECT value FROM app_state WHERE key = ?1",
+        params![key],
+        |r| r.get(0),
+    ))
 }
 
 #[tauri::command]
@@ -1085,14 +1091,11 @@ pub fn workspace_state_get(
     key: String,
 ) -> CmdResult<Option<String>> {
     let conn = db.lock();
-    let v: Option<String> = conn
-        .query_row(
-            "SELECT value FROM workspace_state WHERE workspace_id = ?1 AND key = ?2",
-            params![workspace_id, key],
-            |r| r.get(0),
-        )
-        .ok();
-    Ok(v)
+    optional_row(conn.query_row(
+        "SELECT value FROM workspace_state WHERE workspace_id = ?1 AND key = ?2",
+        params![workspace_id, key],
+        |r| r.get(0),
+    ))
 }
 
 #[tauri::command]

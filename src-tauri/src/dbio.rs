@@ -225,7 +225,7 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
 
             // --- nodes (per source, preserving parent hierarchy via id map) ---
             let mut node_id_map: HashMap<i64, i64> = HashMap::new();
-            for (&old_src_id, &new_src_id) in src_id_map.clone().iter() {
+            for (&old_src_id, &new_src_id) in src_id_map.iter() {
                 // Nodes must be inserted in an order where parents precede
                 // children. `id` order is guaranteed to satisfy this since
                 // parent rows are always created (and thus assigned a lower
@@ -443,7 +443,7 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                     cons_id_map.insert(old_id, tx.last_insert_rowid());
                 }
             }
-            for (&old_cons_id, &new_cons_id) in cons_id_map.clone().iter() {
+            for (&old_cons_id, &new_cons_id) in cons_id_map.iter() {
                 let mut cnode_id_map: HashMap<i64, i64> = HashMap::new();
                 let mut stmt = tx.prepare(
                     "SELECT id, parent_id, name, type, source_node_id, sort_order

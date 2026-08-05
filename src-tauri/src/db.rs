@@ -102,7 +102,6 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_nodes_source ON nodes(source_id);
         CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_id);
-        CREATE INDEX IF NOT EXISTS idx_nodes_size ON nodes(size);
         CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type);
         -- get_tree's hot lazy-load path filters on both columns together
         -- (WHERE source_id = ? AND parent_id = ?) on every tree-expand
@@ -235,7 +234,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 
 /// Target schema version. Bump this and add an entry to `migrate`'s
 /// `alterations` list whenever a column is added to an already-shipped table.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
@@ -377,6 +376,7 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
          CREATE INDEX IF NOT EXISTS idx_nodes_inode ON nodes(source_id, dev, inode) WHERE inode IS NOT NULL;
          CREATE INDEX IF NOT EXISTS idx_nodes_hash ON nodes(content_hash) WHERE content_hash IS NOT NULL;
          CREATE INDEX IF NOT EXISTS idx_nodes_source_parent ON nodes(source_id, parent_id);
+         DROP INDEX IF EXISTS idx_nodes_size;
          CREATE TABLE IF NOT EXISTS hash_cache (
              volume_id TEXT NOT NULL, file_id INTEGER NOT NULL, size INTEGER NOT NULL,
              mtime TEXT NOT NULL, hash_spec TEXT NOT NULL, content_hash BLOB NOT NULL,
