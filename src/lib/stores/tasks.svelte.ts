@@ -15,6 +15,12 @@ export interface Task {
     total: number; // 0 = indeterminate
     status: TaskStatus;
     message?: string;
+    /** Set once the source a hashing phase applies to is known, so a Cancel
+     *  button can target `cancel_hash_scan` at the right source. */
+    sourceId?: number;
+    /** True while a cancel request is in flight, to disable the Cancel
+     *  button and avoid double-submitting it. */
+    cancelling?: boolean;
 }
 
 class TaskTrayState {

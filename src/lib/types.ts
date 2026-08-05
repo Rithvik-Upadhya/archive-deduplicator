@@ -45,6 +45,10 @@ export interface Source {
     /** Whether content hashing runs for this source at all. When false, the
      *  device is matched on filesystem metadata only. */
     hashing_enabled: boolean;
+    /** `"hashing"` means the last hash pass was paused or interrupted before
+     *  finishing (a "Resume" affordance applies), `"done"` means it finished,
+     *  `null` means hashing was never started. */
+    hashing_phase: string | null;
 }
 
 export type MediumKind = 'hdd' | 'ssd' | 'network' | 'optical' | 'unknown';
@@ -82,9 +86,13 @@ export interface HashScanReportDto {
     hashed: number;
     cached: number;
     errors: number;
+    /** True if the pass stopped early because it was cancelled, rather than
+     *  finishing every candidate. */
+    cancelled: boolean;
 }
 
 export interface HashProgress {
+    source_id: number;
     current: number;
     total: number;
 }

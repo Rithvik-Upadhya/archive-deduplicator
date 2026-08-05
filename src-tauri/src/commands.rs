@@ -91,6 +91,7 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
     let dup_by_src = rollup::duplicated_size_by_source(&conn, workspace_id).map_err(map_err)?;
     let cross_dup_by_src =
         rollup::cross_dup_size_by_source(&conn, workspace_id).map_err(map_err)?;
+    let hash_phase_by_src = hashing::hash_phase_by_source(&conn, workspace_id).map_err(map_err)?;
     let mut stmt = conn
         .prepare(
             "SELECT id, workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, hashing_enabled
@@ -123,6 +124,7 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
                 hash_coverage_files: r.get(17)?,
                 hash_coverage_bytes: r.get(18)?,
                 hashing_enabled: r.get::<_, i64>(19)? != 0,
+                hashing_phase: None,
             })
         })
         .map_err(map_err)?;
@@ -139,6 +141,7 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
         let (cross_size, cross_count) = cross_dup_by_src.get(&s.id).copied().unwrap_or((0, 0));
         s.cross_dup_size = cross_size;
         s.cross_dup_file_count = cross_count;
+        s.hashing_phase = hash_phase_by_src.get(&s.id).cloned();
     }
     Ok(sources)
 }
@@ -202,6 +205,7 @@ pub async fn import_tree_json(
             hash_coverage_files: 0,
             hash_coverage_bytes: 0,
             hashing_enabled: false,
+            hashing_phase: None,
             physical_size,
             alias_bytes,
         })
@@ -280,6 +284,7 @@ pub async fn scan_folder(
             hash_coverage_files: 0,
             hash_coverage_bytes: 0,
             hashing_enabled,
+            hashing_phase: None,
             cross_dup_size: 0,
             cross_dup_file_count: 0,
             physical_size,
@@ -419,6 +424,7 @@ pub async fn run_hash_scan(app: tauri::AppHandle, source_id: i64) -> CmdResult<H
                 hashed: 0,
                 cached: 0,
                 errors: 0,
+                cancelled: false,
             });
         }
         let medium_kind = medium_kind_str
@@ -427,18 +433,65 @@ pub async fn run_hash_scan(app: tauri::AppHandle, source_id: i64) -> CmdResult<H
             .unwrap_or(medium::MediumKind::Unknown);
         let queue_depth = medium::profile_for(medium_kind).reader_queue_depth;
 
-        let report = hashing::run_hash_scan(&mut conn, source_id, queue_depth, |current, total| {
-            let _ = app.emit("hash:progress", HashProgress { current, total });
-        })
-        .map_err(map_err)?;
+        // Registered for the duration of this call so `cancel_hash_scan` has
+        // something to flip. Removed below regardless of outcome (via
+        // `result`, before the `?`) so a stale entry never lingers past this
+        // call and makes a future cancel for the same source a silent no-op.
+        let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        app.state::<hashing::HashCancelFlags>()
+            .0
+            .lock()
+            .unwrap()
+            .insert(source_id, cancel_flag.clone());
+
+        let result = hashing::run_hash_scan(
+            &mut conn,
+            source_id,
+            queue_depth,
+            &cancel_flag,
+            |current, total| {
+                let _ = app.emit(
+                    "hash:progress",
+                    HashProgress {
+                        source_id,
+                        current,
+                        total,
+                    },
+                );
+            },
+        );
+
+        app.state::<hashing::HashCancelFlags>()
+            .0
+            .lock()
+            .unwrap()
+            .remove(&source_id);
+
+        let report = result.map_err(map_err)?;
         Ok(HashScanReportDto {
             hashed: report.hashed as i64,
             cached: report.cached as i64,
             errors: report.errors.len() as i64,
+            cancelled: report.cancelled,
         })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Requests that an in-progress `run_hash_scan` for `source_id` stop at its
+/// next batch boundary. Returns `true` if a running scan was found and
+/// flagged, `false` if nothing is currently hashing that source (a harmless
+/// no-op -- e.g. a stale click, or the pass already finished).
+#[tauri::command]
+pub fn cancel_hash_scan(flags: State<hashing::HashCancelFlags>, source_id: i64) -> CmdResult<bool> {
+    let map = flags.0.lock().unwrap();
+    if let Some(flag) = map.get(&source_id) {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 /// Current `scan_progress` state for a source, if any -- drives a "Resume

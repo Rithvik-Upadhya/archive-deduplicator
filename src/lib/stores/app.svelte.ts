@@ -6,6 +6,7 @@ import * as api from '../api';
 import type {
     DeviceStats,
     GroupSort,
+    HashScanReportDto,
     ImportSummary,
     MatchGroup,
     Source,
@@ -203,10 +204,16 @@ class AppState {
     }
 
     /** Run (or resume) the content-hashing pass for one source, then reload
-     *  so per-source hash coverage stats reflect the new state. */
-    async runHashScan(sourceId: number) {
-        await api.runHashScan(sourceId);
+     *  so per-source hash coverage stats reflect the new state. Flags dedup
+     *  as stale whenever new hashes were actually produced -- true whether
+     *  this call finished the pass or was cancelled partway through. */
+    async runHashScan(sourceId: number): Promise<HashScanReportDto> {
+        const report = await api.runHashScan(sourceId);
+        if (report.hashed > 0) {
+            await this.setDedupStale(true);
+        }
         await this.loadWorkspace();
+        return report;
     }
 
     async renameDevice(sourceId: number, label: string) {

@@ -33,6 +33,7 @@ pub fn run() {
             let conn = db::open(&db_path).expect("failed to open database");
             app.manage(Db(Mutex::new(conn)));
             app.manage(DbPath(db_path));
+            app.manage(hashing::HashCancelFlags::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -48,6 +49,7 @@ pub fn run() {
             commands::hash_settings_get,
             commands::hash_settings_set,
             commands::run_hash_scan,
+            commands::cancel_hash_scan,
             commands::get_scan_progress,
             commands::source_rename_device,
             commands::source_set_excluded,

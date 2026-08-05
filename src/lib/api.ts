@@ -72,6 +72,8 @@ export const hashSettingsSet = (workspaceId: number, spec: HashSpecDto) =>
     invoke<void>('hash_settings_set', { workspaceId, spec });
 export const runHashScan = (sourceId: number) =>
     invoke<HashScanReportDto>('run_hash_scan', { sourceId });
+export const cancelHashScan = (sourceId: number) =>
+    invoke<boolean>('cancel_hash_scan', { sourceId });
 export const getScanProgress = (sourceId: number) =>
     invoke<ScanProgressInfo | null>('get_scan_progress', { sourceId });
 export const sourceRenameDevice = (sourceId: number, deviceLabel: string) =>

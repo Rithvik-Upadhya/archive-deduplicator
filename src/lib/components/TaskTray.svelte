@@ -1,10 +1,12 @@
 <script lang="ts">
-    import { taskTray } from '$lib/stores/tasks.svelte';
+    import { taskTray, type Task } from '$lib/stores/tasks.svelte';
     import { TASK_STATUS_BAR, TASK_STATUS_ICON } from '$lib/util';
+    import { cancelHashScan } from '$lib/api';
     import Icon from '@iconify/svelte';
     import { Button } from '$lib/components/ui/button';
     import { Progress } from '$lib/components/ui/progress';
     import * as Card from '$lib/components/ui/card';
+    import { toast } from 'svelte-sonner';
 
     const PHASE_LABELS: Record<string, string> = {
         loading: 'Loading files…',
@@ -14,6 +16,23 @@
         annotating: 'Updating tree annotations…',
         done: 'Finalizing…',
     };
+
+    async function onCancel(task: Task) {
+        if (task.sourceId == null) return;
+        taskTray.update(task.id, { cancelling: true });
+        try {
+            const ok = await cancelHashScan(task.sourceId);
+            // `false` means nothing was actually found running for this
+            // source (already finished, or the flag beat the registry
+            // insert) -- re-enable the button rather than leaving it stuck
+            // on "Cancelling…" forever waiting for a stop that will never
+            // happen.
+            if (!ok) taskTray.update(task.id, { cancelling: false });
+        } catch (err) {
+            toast.error(String(err));
+            taskTray.update(task.id, { cancelling: false });
+        }
+    }
 </script>
 
 {#if taskTray.tasks.length > 0}
@@ -31,6 +50,16 @@
                                 .class}" />
                         <span class="flex-1 truncate text-sm font-medium"
                             >{task.label}</span>
+                        {#if task.status === 'running' && task.phase === 'hashing' && task.sourceId != null}
+                            <Button
+                                variant="ghost"
+                                size="sm"
+                                class="h-6 shrink-0 px-1.5 text-[0.7rem]"
+                                disabled={task.cancelling}
+                                onclick={() => onCancel(task)}>
+                                {task.cancelling ? 'Cancelling…' : 'Cancel'}
+                            </Button>
+                        {/if}
                         {#if task.status !== 'running'}
                             <Button
                                 variant="ghost"
@@ -56,7 +85,16 @@
                             </span>
                         {:else if task.kind === 'scan'}
                             <span class="text-[0.7rem] text-muted-foreground">
-                                {task.current.toLocaleString()} files scanned…
+                                {#if task.phase === 'hashing'}
+                                    {#if task.total > 0}
+                                        {task.current.toLocaleString()} / {task.total.toLocaleString()}
+                                        files hashed…
+                                    {:else}
+                                        Hashing…
+                                    {/if}
+                                {:else}
+                                    {task.current.toLocaleString()} files scanned…
+                                {/if}
                             </span>
                         {/if}
                     {:else if task.message}

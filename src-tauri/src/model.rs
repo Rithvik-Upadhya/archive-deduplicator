@@ -93,6 +93,12 @@ pub struct Source {
     /// JSON-imported or pre-migration rows deserialize as enabled.
     #[serde(default = "default_true")]
     pub hashing_enabled: bool,
+    /// `scan_progress.phase` for this source: `Some("hashing")` means the
+    /// last hash pass was paused or interrupted before finishing (a "Resume"
+    /// affordance applies), `Some("done")` means it finished, `None` means
+    /// hashing was never started (or the source is JSON-only / disabled).
+    #[serde(default)]
+    pub hashing_phase: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -306,11 +312,15 @@ pub struct HashScanReportDto {
     pub hashed: i64,
     pub cached: i64,
     pub errors: i64,
+    /// True if the pass stopped early because the user cancelled it via
+    /// `cancel_hash_scan`, rather than finishing every candidate.
+    pub cancelled: bool,
 }
 
 /// Progress payload emitted while a hashing pass is executing.
 #[derive(Debug, Clone, Serialize)]
 pub struct HashProgress {
+    pub source_id: i64,
     pub current: u64,
     pub total: u64,
 }
