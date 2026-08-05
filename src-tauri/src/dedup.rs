@@ -543,16 +543,19 @@ pub fn run_with_progress(
 
     tx.commit()?;
 
-    // Folder-level rollup uses the freshly written file groups.
+    // Folder-level rollup uses the freshly written file groups; the listing-
+    // hash pass is independent of file groups entirely (pure structure) but
+    // shares this phase since both produce `kind='folder'` groups.
     on_phase("folder_rollup", 3, TOTAL_PHASES);
     let folder_groups = super::rollup::build_folder_groups(conn, workspace_id)?;
+    let listing_groups = super::rollup::compute_listing_hashes(conn, workspace_id)?;
 
     // Rebuild the per-node duplicate annotation cache so tree browsing is fast.
     on_phase("annotating", 4, TOTAL_PHASES);
     super::rollup::rebuild_annotations(conn, workspace_id)?;
 
     on_phase("done", TOTAL_PHASES, TOTAL_PHASES);
-    Ok(group_count + folder_groups)
+    Ok(group_count + folder_groups + listing_groups)
 }
 
 /// Load a map of node_id -> node name so parent folder names can be attached.
@@ -765,14 +768,28 @@ mod tests {
             .unwrap();
         assert_eq!(file_groups, 2, "two files should each form a group");
 
-        let folder_groups: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM match_groups WHERE workspace_id = ?1 AND kind = 'folder'",
-                params![ws],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(folder_groups, 1, "the photos folder should be flagged");
+        // Two independent folder-level detectors both fire on this fixture
+        // (the two "photos" directories are byte-identical): the 80%-dup
+        // byte heuristic in `build_folder_groups`, and the structural
+        // listing-hash pass in `compute_listing_hashes`. Both firing is
+        // correct, not a regression -- they are deliberately independent
+        // mechanisms (see `rollup::compute_listing_hashes`'s doc comment).
+        let folder_signals: Vec<String> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT primary_signal FROM match_groups WHERE workspace_id = ?1 AND kind = 'folder' ORDER BY primary_signal",
+                )
+                .unwrap();
+            stmt.query_map(params![ws], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert_eq!(
+            folder_signals,
+            vec!["folder".to_string(), "listing".to_string()],
+            "the photos folder should be flagged by both the byte-overlap heuristic and the listing hash"
+        );
     }
 
     #[test]
