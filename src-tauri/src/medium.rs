@@ -55,7 +55,20 @@ pub struct MediumInfo {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MediumProfile {
+    /// Worker count for files under `large_file_threshold` -- on a spinning
+    /// disk these are seek-bound anyway, so a deeper queue lets the drive's
+    /// NCQ reorder them productively.
     pub reader_queue_depth: usize,
+    /// Worker count for files at/over `large_file_threshold`. Kept low
+    /// (usually 1) on non-SSD media because concurrent multi-GB sequential
+    /// reads from different physical locations thrash a single head far
+    /// worse than concurrent small reads do -- see `hashing::LaneConfig`.
+    pub large_lane_queue_depth: usize,
+    /// Byte size at/above which a hashing job is routed to the large lane
+    /// instead of the small one. `i64::MAX` effectively disables the split
+    /// (every job takes the small lane), which is exactly right for SSD:
+    /// there's no seek cost to isolate.
+    pub large_file_threshold: i64,
     pub sort_by_physical_order: bool,
     pub hash_min_size_default: i64,
     pub sampling_default: bool,
@@ -68,13 +81,23 @@ pub fn profile_for(kind: MediumKind) -> MediumProfile {
     match kind {
         MediumKind::Ssd => MediumProfile {
             reader_queue_depth: 32,
+            large_lane_queue_depth: 32,
+            large_file_threshold: i64::MAX,
             sort_by_physical_order: false,
             hash_min_size_default: 0,
             sampling_default: false,
         },
         MediumKind::Hdd | MediumKind::Network | MediumKind::Optical | MediumKind::Unknown => {
             MediumProfile {
+                // Unchanged from the pre-lane-split value: the win here is
+                // isolating large sequential reads onto their own shallow
+                // lane, not deepening the small lane too -- that's a
+                // separate, unmeasured bet, and doubling it would silently
+                // regress Optical (100-200ms seeks, no NCQ to reorder them),
+                // which shares this profile with Hdd/Network/Unknown.
                 reader_queue_depth: 4,
+                large_lane_queue_depth: 1,
+                large_file_threshold: 32 * 1024 * 1024,
                 sort_by_physical_order: true,
                 hash_min_size_default: 65536,
                 sampling_default: true,
@@ -474,6 +497,8 @@ mod tests {
     fn ssd_profile_matches_the_spec_table() {
         let p = profile_for(MediumKind::Ssd);
         assert_eq!(p.reader_queue_depth, 32);
+        assert_eq!(p.large_lane_queue_depth, 32);
+        assert_eq!(p.large_file_threshold, i64::MAX);
         assert!(!p.sort_by_physical_order);
         assert_eq!(p.hash_min_size_default, 0);
         assert!(!p.sampling_default);
@@ -483,6 +508,8 @@ mod tests {
     fn hdd_profile_matches_the_spec_table() {
         let p = profile_for(MediumKind::Hdd);
         assert_eq!(p.reader_queue_depth, 4);
+        assert_eq!(p.large_lane_queue_depth, 1);
+        assert_eq!(p.large_file_threshold, 32 * 1024 * 1024);
         assert!(p.sort_by_physical_order);
         assert_eq!(p.hash_min_size_default, 65536);
         assert!(p.sampling_default);

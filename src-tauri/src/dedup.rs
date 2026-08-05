@@ -1188,6 +1188,47 @@ mod tests {
         );
     }
 
+    /// Pins the core false-positive guardrail this project's async-dedup
+    /// design depends on: even under the same spec, two files whose sampled
+    /// digests genuinely differ (e.g. identical head/tail but a real
+    /// difference an interior probe caught) must never land in the same
+    /// group, at any tier -- only exact digest equality forms a hash group.
+    #[test]
+    fn distinct_sampled_digests_never_merge_into_one_group() {
+        let mut conn = setup_files(&[("a.jpg", 500_000, None, ""), ("b.jpg", 500_000, None, "")]);
+        set_hash(
+            &conn,
+            "a.jpg",
+            "",
+            "sampled",
+            "blake3/v1/th1-s1-t1",
+            &[0xBB; 32],
+        );
+        set_hash(
+            &conn,
+            "b.jpg",
+            "",
+            "sampled",
+            "blake3/v1/th1-s1-t1",
+            &[0xBB; 32],
+        );
+        // set_hash matches by name, so it just set both to the same digest;
+        // give the second one a genuinely different digest via its node id.
+        conn.execute(
+            "UPDATE nodes SET content_hash = ?1
+             WHERE type = 'file' AND id = (SELECT MAX(id) FROM nodes WHERE type = 'file')",
+            params![vec![0xCC_u8; 32]],
+        )
+        .unwrap();
+
+        let ws = 1;
+        run_with_progress(&mut conn, ws, DedupParams::default(), |_, _, _| {}).unwrap();
+        assert!(
+            group_rows(&conn, ws).is_empty(),
+            "distinct sampled digests must never be merged into a hash group, tier A or B"
+        );
+    }
+
     #[test]
     fn hashed_and_different_pair_never_falls_back_to_metadata_match() {
         // Exact name + strong mtime -- everything tier C would normally

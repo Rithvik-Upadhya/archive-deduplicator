@@ -442,7 +442,7 @@ pub async fn run_hash_scan(app: tauri::AppHandle, source_id: i64) -> CmdResult<H
             .as_deref()
             .and_then(medium::MediumKind::parse)
             .unwrap_or(medium::MediumKind::Unknown);
-        let queue_depth = medium::profile_for(medium_kind).reader_queue_depth;
+        let lanes = hashing::LaneConfig::from_profile(&medium::profile_for(medium_kind));
 
         // Registered for the duration of this call so `cancel_hash_scan` has
         // something to flip. Removed below regardless of outcome (via
@@ -458,7 +458,7 @@ pub async fn run_hash_scan(app: tauri::AppHandle, source_id: i64) -> CmdResult<H
         let result = hashing::run_hash_scan(
             &mut conn,
             source_id,
-            queue_depth,
+            lanes,
             &cancel_flag,
             |current, total| {
                 let _ = app.emit(

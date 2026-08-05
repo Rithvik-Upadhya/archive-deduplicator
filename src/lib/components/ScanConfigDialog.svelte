@@ -36,7 +36,7 @@
     // Step 1 -- hashing spec (bytes, denominated in KiB in the UI, matching
     // the dedup tuning sliders' KB convention elsewhere in this app).
     let samplingMode = $state<'full' | 'sampled'>('sampled');
-    let thresholdKb = $state(8192); // 8 MiB
+    let thresholdKb = $state(32768); // 32 MiB -- mirrors HashSpec::default_spec() in hashing.rs
     let probeKb = $state(1024); // 1 MiB
     let strideKb = $state(32768); // 32 MiB
     let specLocked = $state(false);
