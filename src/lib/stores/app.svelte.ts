@@ -179,10 +179,31 @@ class AppState {
         await this.loadWorkspace();
     }
 
-    async scanFolder(path: string, label: string) {
-        if (this.activeWorkspaceId == null) return;
-        await api.scanFolder(this.activeWorkspaceId, path, label);
+    async scanFolder(
+        path: string,
+        label: string,
+        hashMinSize?: number,
+        mediumOverride?: string,
+        filesystemOverride?: string,
+    ): Promise<Source | null> {
+        if (this.activeWorkspaceId == null) return null;
+        const source = await api.scanFolder(
+            this.activeWorkspaceId,
+            path,
+            label,
+            hashMinSize,
+            mediumOverride,
+            filesystemOverride,
+        );
         await this.setDedupStale(true);
+        await this.loadWorkspace();
+        return source;
+    }
+
+    /** Run (or resume) the content-hashing pass for one source, then reload
+     *  so per-source hash coverage stats reflect the new state. */
+    async runHashScan(sourceId: number) {
+        await api.runHashScan(sourceId);
         await this.loadWorkspace();
     }
 

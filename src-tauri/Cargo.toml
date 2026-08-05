@@ -26,10 +26,17 @@ serde_json = "1"
 walkdir = "2"
 chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.40.1", features = ["backup", "bundled"] }
+blake3 = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Storage_FileSystem",
     "Win32_Foundation",
+    "Win32_System_Ioctl",
+    "Win32_System_IO",
+    "Win32_Security",
 ] }
 

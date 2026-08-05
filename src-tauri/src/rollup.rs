@@ -153,6 +153,197 @@ pub fn build_folder_groups(conn: &mut Connection, workspace_id: i64) -> rusqlite
     Ok(count)
 }
 
+/// Truncate a `tree`-format mtime to an even 2-second boundary (FAT/exFAT's
+/// own granularity) before folding it into a structural hash. Unlike
+/// `dedup.rs::compare_mtime`'s tolerant *comparison*, this bakes a value into
+/// a hash, so only the one noise source safe to fully absorb (2s rounding)
+/// is normalized here -- a whole-hour timezone offset is deliberately left
+/// un-normalized, since folding an hour of slack into a byte-for-byte
+/// structural fingerprint would risk two genuinely different-vintage
+/// folders colliding. `None`/unparsable mtimes get a fixed sentinel so they
+/// still contribute a stable (if uninformative) value rather than being
+/// silently skipped.
+fn mtime_norm_secs(mtime: Option<&str>) -> i64 {
+    let Some(m) = mtime else {
+        return i64::MIN;
+    };
+    let Some(dt) = chrono::NaiveDateTime::parse_from_str(m, "%Y-%m-%d_%H:%M:%S").ok() else {
+        return i64::MIN + 1;
+    };
+    let secs = dt.and_utc().timestamp();
+    secs - secs.rem_euclid(2)
+}
+
+/// Confidence assigned to a listing-hash folder match: structural-only
+/// evidence (no byte content verified), stronger than a bare `dup_pct`
+/// heuristic but never "Confirmed" -- placed between tier D (55) and tier C
+/// (70) in `dedup.rs`'s metadata scale.
+const LISTING_HASH_CONFIDENCE: f64 = 60.0;
+
+/// Compute a Merkle-style structural fingerprint for every directory in the
+/// workspace, then cluster directories sharing an identical fingerprint
+/// across >= 2 distinct sources into `kind='folder', primary_signal='listing'`
+/// groups. Functionally equivalent to hashing the sorted
+/// `(rel_name, size, mtime_normalised)` tuple list over a directory's entire
+/// subtree (the design spec's own framing), but computed bottom-up in
+/// `O(total nodes)`: each directory's fingerprint folds in its immediate
+/// children only, using subdirectories' *already-computed* fingerprints
+/// rather than re-serializing every descendant at every ancestor level.
+///
+/// This catches two things the byte-overlap heuristic in
+/// `build_folder_groups` misses: directories dominated by many small
+/// (never-hashed) files, and renamed-but-otherwise-identical folders (the
+/// heuristic requires matching basenames; this doesn't care what a folder
+/// is named, only what it contains).
+pub fn compute_listing_hashes(conn: &mut Connection, workspace_id: i64) -> rusqlite::Result<usize> {
+    struct DirNode {
+        id: i64,
+        parent_id: Option<i64>,
+        name: String,
+        depth: i64,
+    }
+    let dirs: Vec<DirNode> = {
+        let mut stmt = conn.prepare(
+            "SELECT n.id, n.parent_id, n.name, n.depth FROM nodes n
+             JOIN sources s ON s.id = n.source_id
+             WHERE s.workspace_id = ?1 AND n.type = 'directory'",
+        )?;
+        stmt.query_map(params![workspace_id], |r| {
+            Ok(DirNode {
+                id: r.get(0)?,
+                parent_id: r.get(1)?,
+                name: r.get(2)?,
+                depth: r.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    let mut files_by_parent: HashMap<i64, Vec<(String, i64, Option<String>)>> = HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT n.parent_id, n.name, n.size, n.mtime FROM nodes n
+             JOIN sources s ON s.id = n.source_id
+             WHERE s.workspace_id = ?1 AND n.type = 'file' AND n.alias_of IS NULL",
+        )?;
+        let rows = stmt.query_map(params![workspace_id], |r| {
+            Ok((
+                r.get::<_, Option<i64>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (parent_id, name, size, mtime) = row?;
+            if let Some(pid) = parent_id {
+                files_by_parent
+                    .entry(pid)
+                    .or_default()
+                    .push((name, size, mtime));
+            }
+        }
+    }
+
+    let mut children_dirs: HashMap<i64, Vec<usize>> = HashMap::new();
+    for (i, d) in dirs.iter().enumerate() {
+        if let Some(pid) = d.parent_id {
+            children_dirs.entry(pid).or_default().push(i);
+        }
+    }
+
+    let mut order: Vec<usize> = (0..dirs.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(dirs[i].depth));
+
+    let mut listing_hash: Vec<[u8; 32]> = vec![[0u8; 32]; dirs.len()];
+    let mut nonempty: Vec<bool> = vec![false; dirs.len()];
+    for i in order {
+        let dir_id = dirs[i].id;
+        // (sort key, hash-input bytes) per immediate child, so the final
+        // hash is independent of database iteration order.
+        let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+        if let Some(files) = files_by_parent.get(&dir_id) {
+            for (name, size, mtime) in files {
+                let mut bytes = Vec::with_capacity(name.len() + 24);
+                bytes.extend_from_slice(b"file:");
+                bytes.extend_from_slice(name.as_bytes());
+                bytes.extend_from_slice(&size.to_le_bytes());
+                bytes.extend_from_slice(&mtime_norm_secs(mtime.as_deref()).to_le_bytes());
+                entries.push((name.clone(), bytes));
+            }
+        }
+        if let Some(child_idxs) = children_dirs.get(&dir_id) {
+            for &ci in child_idxs {
+                let mut bytes = Vec::with_capacity(dirs[ci].name.len() + 37);
+                bytes.extend_from_slice(b"dir:");
+                bytes.extend_from_slice(dirs[ci].name.as_bytes());
+                bytes.extend_from_slice(&listing_hash[ci]);
+                entries.push((dirs[ci].name.clone(), bytes));
+            }
+        }
+        nonempty[i] = !entries.is_empty();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut hasher = blake3::Hasher::new();
+        for (_, bytes) in &entries {
+            hasher.update(bytes);
+            hasher.update(b"\n");
+        }
+        listing_hash[i] = *hasher.finalize().as_bytes();
+    }
+
+    let tx = conn.transaction()?;
+    {
+        let mut stmt = tx.prepare("UPDATE nodes SET listing_hash = ?1 WHERE id = ?2")?;
+        for (i, d) in dirs.iter().enumerate() {
+            stmt.execute(params![listing_hash[i].to_vec(), d.id])?;
+        }
+    }
+
+    let source_of = load_source_of(&tx, workspace_id)?;
+    let mut by_hash: HashMap<[u8; 32], Vec<i64>> = HashMap::new();
+    for (i, d) in dirs.iter().enumerate() {
+        // An empty (or all-empty-descendant) directory hashes identically to
+        // every other empty directory in the workspace -- that tells us
+        // nothing structurally, so it must never seed a cluster.
+        if !nonempty[i] {
+            continue;
+        }
+        by_hash.entry(listing_hash[i]).or_default().push(d.id);
+    }
+
+    let mut count = 0usize;
+    for dir_ids in by_hash.into_values() {
+        if dir_ids.len() < 2 {
+            continue;
+        }
+        let distinct_sources: HashSet<i64> = dir_ids
+            .iter()
+            .filter_map(|d| source_of.get(d).copied())
+            .collect();
+        if distinct_sources.len() < 2 {
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO match_groups (workspace_id, kind, confidence, primary_signal, size)
+             VALUES (?1, 'folder', ?2, 'listing', 0)",
+            params![workspace_id, LISTING_HASH_CONFIDENCE],
+        )?;
+        let gid = tx.last_insert_rowid();
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO match_members (group_id, node_id, role) VALUES (?1, ?2, 'member')",
+            )?;
+            for did in &dir_ids {
+                stmt.execute(params![gid, did])?;
+            }
+        }
+        count += 1;
+    }
+    tx.commit()?;
+    Ok(count)
+}
+
 fn load_file_locs(conn: &Connection, workspace_id: i64) -> rusqlite::Result<Vec<FileLoc>> {
     let mut stmt = conn.prepare(
         "SELECT n.id, n.source_id, n.parent_id, n.size FROM nodes n
@@ -839,5 +1030,235 @@ mod tests {
 
         assert_eq!(in_folder_group_of(&conn, dir_a), 1);
         assert_eq!(in_folder_group_of(&conn, dir_b), 1);
+    }
+
+    fn insert_file_with_mtime(
+        conn: &Connection,
+        source_id: i64,
+        parent_id: Option<i64>,
+        name: &str,
+        size: i64,
+        mtime: Option<&str>,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, mtime, subtree_size, subtree_file_count)
+             VALUES (?1, ?2, ?3, ?3, 'file', ?4, ?5, ?4, 1)",
+            params![source_id, parent_id, name, size, mtime],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn listing_hash_of(conn: &Connection, node_id: i64) -> Vec<u8> {
+        conn.query_row(
+            "SELECT listing_hash FROM nodes WHERE id = ?1",
+            params![node_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn identical_subtrees_produce_equal_listing_hashes() {
+        let (mut conn, ws, src_a, src_b) = setup();
+        let dir_a = insert_node(&conn, src_a, None, "photos", "directory", 0);
+        let dir_b = insert_node(&conn, src_b, None, "photos", "directory", 0);
+        insert_file_with_mtime(
+            &conn,
+            src_a,
+            Some(dir_a),
+            "a.jpg",
+            100,
+            Some("2024-01-01_10:00:00"),
+        );
+        insert_file_with_mtime(
+            &conn,
+            src_b,
+            Some(dir_b),
+            "a.jpg",
+            100,
+            Some("2024-01-01_10:00:00"),
+        );
+
+        compute_listing_hashes(&mut conn, ws).unwrap();
+        assert_eq!(listing_hash_of(&conn, dir_a), listing_hash_of(&conn, dir_b));
+
+        let listing_groups: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM match_groups WHERE workspace_id = ?1 AND primary_signal = 'listing'",
+                params![ws],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(listing_groups, 1);
+    }
+
+    #[test]
+    fn renamed_folder_still_matches_by_listing_hash() {
+        // Same content, different directory name -- the case the byte-
+        // overlap heuristic in `build_folder_groups` misses (it requires a
+        // matching basename); the listing hash doesn't care what a folder
+        // is named, only what it contains.
+        let (mut conn, ws, src_a, src_b) = setup();
+        let dir_a = insert_node(&conn, src_a, None, "vacation_photos", "directory", 0);
+        let dir_b = insert_node(&conn, src_b, None, "trip_2024", "directory", 0);
+        insert_file_with_mtime(
+            &conn,
+            src_a,
+            Some(dir_a),
+            "a.jpg",
+            100,
+            Some("2024-01-01_10:00:00"),
+        );
+        insert_file_with_mtime(
+            &conn,
+            src_b,
+            Some(dir_b),
+            "a.jpg",
+            100,
+            Some("2024-01-01_10:00:00"),
+        );
+
+        compute_listing_hashes(&mut conn, ws).unwrap();
+        assert_eq!(listing_hash_of(&conn, dir_a), listing_hash_of(&conn, dir_b));
+
+        let listing_groups: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM match_groups WHERE workspace_id = ?1 AND primary_signal = 'listing'",
+                params![ws],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            listing_groups, 1,
+            "differently-named folders with identical content must still cluster"
+        );
+    }
+
+    #[test]
+    fn single_file_difference_changes_the_hash() {
+        let (mut conn, ws, src_a, src_b) = setup();
+        let dir_a = insert_node(&conn, src_a, None, "photos", "directory", 0);
+        let dir_b = insert_node(&conn, src_b, None, "photos", "directory", 0);
+        insert_file_with_mtime(
+            &conn,
+            src_a,
+            Some(dir_a),
+            "a.jpg",
+            100,
+            Some("2024-01-01_10:00:00"),
+        );
+        insert_file_with_mtime(
+            &conn,
+            src_b,
+            Some(dir_b),
+            "a.jpg",
+            101, // one byte larger
+            Some("2024-01-01_10:00:00"),
+        );
+
+        compute_listing_hashes(&mut conn, ws).unwrap();
+        assert_ne!(listing_hash_of(&conn, dir_a), listing_hash_of(&conn, dir_b));
+    }
+
+    #[test]
+    fn two_second_mtime_noise_does_not_change_listing_hash() {
+        let (mut conn, ws, src_a, src_b) = setup();
+        let dir_a = insert_node(&conn, src_a, None, "photos", "directory", 0);
+        let dir_b = insert_node(&conn, src_b, None, "photos", "directory", 0);
+        insert_file_with_mtime(
+            &conn,
+            src_a,
+            Some(dir_a),
+            "a.jpg",
+            100,
+            Some("2024-01-01_10:00:00"),
+        );
+        insert_file_with_mtime(
+            &conn,
+            src_b,
+            Some(dir_b),
+            "a.jpg",
+            100,
+            Some("2024-01-01_10:00:01"), // 1s -- within the same 2s bucket
+        );
+
+        compute_listing_hashes(&mut conn, ws).unwrap();
+        assert_eq!(
+            listing_hash_of(&conn, dir_a),
+            listing_hash_of(&conn, dir_b),
+            "FAT's 2s mtime granularity must not change the structural hash"
+        );
+    }
+
+    #[test]
+    fn whole_hour_offset_does_change_listing_hash() {
+        // Unlike `dedup.rs::compare_mtime`'s tolerant comparison, a
+        // structural hash must not absorb a whole-hour timezone shift --
+        // that would risk two genuinely different-vintage folders colliding.
+        let (mut conn, ws, src_a, src_b) = setup();
+        let dir_a = insert_node(&conn, src_a, None, "photos", "directory", 0);
+        let dir_b = insert_node(&conn, src_b, None, "photos", "directory", 0);
+        insert_file_with_mtime(
+            &conn,
+            src_a,
+            Some(dir_a),
+            "a.jpg",
+            100,
+            Some("2024-01-01_10:00:00"),
+        );
+        insert_file_with_mtime(
+            &conn,
+            src_b,
+            Some(dir_b),
+            "a.jpg",
+            100,
+            Some("2024-01-01_11:00:00"),
+        );
+
+        compute_listing_hashes(&mut conn, ws).unwrap();
+        assert_ne!(listing_hash_of(&conn, dir_a), listing_hash_of(&conn, dir_b));
+    }
+
+    #[test]
+    fn listing_hash_cluster_requires_two_distinct_sources() {
+        let (mut conn, ws, src_a, _src_b) = setup();
+        let dir1 = insert_node(&conn, src_a, None, "photos", "directory", 0);
+        let dir2 = insert_node(&conn, src_a, None, "photos_copy", "directory", 0);
+        insert_file_with_mtime(
+            &conn,
+            src_a,
+            Some(dir1),
+            "a.jpg",
+            100,
+            Some("2024-01-01_10:00:00"),
+        );
+        insert_file_with_mtime(
+            &conn,
+            src_a,
+            Some(dir2),
+            "a.jpg",
+            100,
+            Some("2024-01-01_10:00:00"),
+        );
+
+        let count = compute_listing_hashes(&mut conn, ws).unwrap();
+        assert_eq!(
+            count, 0,
+            "two identical directories within a single source must not form a listing group"
+        );
+    }
+
+    #[test]
+    fn empty_directories_never_cluster_with_each_other() {
+        let (mut conn, ws, src_a, src_b) = setup();
+        insert_node(&conn, src_a, None, "empty1", "directory", 0);
+        insert_node(&conn, src_b, None, "empty2", "directory", 0);
+
+        let count = compute_listing_hashes(&mut conn, ws).unwrap();
+        assert_eq!(
+            count, 0,
+            "two unrelated empty directories must never be treated as a structural match"
+        );
     }
 }

@@ -3,7 +3,14 @@
     import { taskTray } from '$lib/stores/tasks.svelte';
     import { open } from '@tauri-apps/plugin-dialog';
     import { listen } from '@tauri-apps/api/event';
-    import type { ScanProgress, Workspace } from '$lib/types';
+    import { hashSettingsSet } from '$lib/api';
+    import type {
+        DedupProgress,
+        HashProgress,
+        ScanConfig,
+        ScanProgress,
+        Workspace,
+    } from '$lib/types';
     import { DUP_BADGE, DUP_BAR, dupLevel, formatBytes, pct } from '$lib/util';
     import Icon from '@iconify/svelte';
     import { Button } from '$lib/components/ui/button';
@@ -15,6 +22,11 @@
     import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
     import { Separator } from '$lib/components/ui/separator';
     import { toast } from 'svelte-sonner';
+    import ScanConfigDialog from '$lib/components/ScanConfigDialog.svelte';
+
+    let scanDialogOpen = $state(false);
+    let scanPath = $state('');
+    let scanLabel = $state('');
 
     let editingId = $state<number | null>(null);
     let editValue = $state('');
@@ -103,18 +115,60 @@
     async function onScan() {
         const selected = await open({ directory: true, multiple: false });
         if (!selected || typeof selected !== 'string') return;
-        const label = selected.split('/').pop() || selected;
+        scanPath = selected;
+        scanLabel = selected.split('/').pop() || selected;
+        scanDialogOpen = true;
+    }
+
+    /** Runs after the scan-config dialog is confirmed: folder scan, then
+     *  content hashing for the new source, then a fresh dedup pass -- one
+     *  task-tray entry tracks all three phases in sequence. */
+    async function onScanConfirm(config: ScanConfig) {
+        const path = scanPath;
+        const label = scanLabel;
         const taskId = taskTray.start('scan', `Scanning “${label}”…`);
-        const unlisten = await listen<ScanProgress>('scan:progress', e => {
-            taskTray.update(taskId, { current: e.payload.current });
+        const unlistenScan = await listen<ScanProgress>('scan:progress', e => {
+            taskTray.update(taskId, { phase: 'scanning', current: e.payload.current });
+        });
+        const unlistenHash = await listen<HashProgress>('hash:progress', e => {
+            taskTray.update(taskId, {
+                phase: 'hashing',
+                current: e.payload.current,
+                total: e.payload.total,
+            });
+        });
+        const unlistenDedup = await listen<DedupProgress>('dedup:progress', e => {
+            taskTray.update(taskId, {
+                phase: e.payload.phase,
+                current: e.payload.current,
+                total: e.payload.total,
+            });
         });
         try {
-            await app.scanFolder(selected, label);
+            if (!config.specLocked) {
+                if (app.activeWorkspaceId == null) {
+                    throw new Error('No active workspace.');
+                }
+                await hashSettingsSet(app.activeWorkspaceId, config.hashSpec);
+            }
+            const source = await app.scanFolder(
+                path,
+                label,
+                config.hashMinSize,
+                config.mediumOverride,
+                config.filesystemOverride
+            );
+            if (source) {
+                await app.runHashScan(source.id);
+            }
+            await app.runDedup();
             taskTray.resolve(taskId, 'success', `Scanned “${label}”.`);
         } catch (err) {
             taskTray.resolve(taskId, 'error', String(err));
         } finally {
-            unlisten();
+            unlistenScan();
+            unlistenHash();
+            unlistenDedup();
         }
     }
 </script>
@@ -332,3 +386,9 @@
         </AlertDialog.Footer>
     </AlertDialog.Content>
 </AlertDialog.Root>
+
+<ScanConfigDialog
+    bind:open={scanDialogOpen}
+    path={scanPath}
+    label={scanLabel}
+    onConfirm={onScanConfirm} />

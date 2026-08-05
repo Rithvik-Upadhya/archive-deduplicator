@@ -16,6 +16,29 @@ struct FileRow {
     size: i64,
     mtime: Option<String>,
     parent_name: String,
+    content_hash: Option<Vec<u8>>,
+    hash_kind: Option<String>,
+    hash_spec: Option<String>,
+}
+
+/// Whether `a` and `b` are both hash-confirmed and have been *proven*
+/// different -- the one case where content evidence outright contradicts
+/// what a metadata tier would otherwise conclude. Two hashed files under
+/// different `hash_spec` values (in principle unreachable within one
+/// workspace once locking is enforced, since spec is workspace-wide, but
+/// checked here anyway) have nothing comparable and are not "confirmed
+/// different" by this definition -- they simply fall through to ordinary
+/// metadata evidence.
+fn hash_confirmed_different(a: &FileRow, b: &FileRow) -> bool {
+    match (
+        a.content_hash.as_ref(),
+        b.content_hash.as_ref(),
+        a.hash_spec.as_ref(),
+        b.hash_spec.as_ref(),
+    ) {
+        (Some(ha), Some(hb), Some(sa), Some(sb)) => sa == sb && ha != hb,
+        _ => false,
+    }
 }
 
 /// Tunable parameters supplied from the UI.
@@ -43,8 +66,17 @@ impl Default for DedupParams {
 /// A resolved match group never merges across tiers and never averages a
 /// score: every member pair within a group independently qualifies at
 /// exactly this tier (the "clique requirement" -- see `run_with_progress`).
+/// Tiers A and B are the one place transitive union-find-style grouping is
+/// actually valid (§9.3 of the design spec): exact digest equality under a
+/// shared hash spec is a true equivalence relation, unlike any metadata
+/// signal below it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tier {
+    /// Full-content BLAKE3 match under a shared hash spec. Confirmed.
+    A,
+    /// Sampled-content BLAKE3 match under a shared hash spec. Confirmed
+    /// (sampling's residual risk is informational, not a caveat -- see §9.2).
+    B,
     /// Size + exact name + exact/near (<=2s) mtime match.
     C,
     /// Size + exact name, mtime differs or is absent.
@@ -56,6 +88,8 @@ enum Tier {
 impl Tier {
     fn confidence(self) -> f64 {
         match self {
+            Tier::A => 100.0,
+            Tier::B => 99.0,
             Tier::C => 70.0,
             Tier::D => 55.0,
             Tier::E => 45.0,
@@ -63,6 +97,8 @@ impl Tier {
     }
     fn signal(self) -> &'static str {
         match self {
+            Tier::A => "hash-full",
+            Tier::B => "hash-sampled",
             Tier::C => "name+mtime",
             Tier::D => "name",
             Tier::E => "parent+mtime",
@@ -271,6 +307,21 @@ fn all_pairs_strong_mtime(files: &[FileRow], group: &[usize]) -> bool {
 ///   enumeration -- this is what stops a stray weak pair from silently
 ///   dragging two unrelated files into the same group (the same failure
 ///   union-find had).
+///
+/// Both tiers additionally honor the hash veto (§9.1: "both hashed, same
+/// spec, digests differ"): a hash-confirmed-different pair must never be
+/// softened into a metadata match. Tier E folds this into its edge
+/// condition directly. Tier C/D's exact-name grouping has no per-pair check
+/// to fold it into (name equality is transitive, which is what makes it
+/// clique-free in the first place) -- so instead, a name-group that
+/// internally contains two hash-confirmed-different members is dropped
+/// entirely rather than partially reconciled, consistent with this
+/// matcher's "when a group is internally contradictory or expensive to
+/// verify, drop rather than guess" design (the same rule `MAX_GROUP_SIZE`
+/// and the clique-budget cutoff already apply elsewhere). A hash-confirmed-
+/// *same* pair is unaffected by this and still participates normally here
+/// (redundant with the tier A/B group formed separately in
+/// `run_with_progress`, not wrong).
 fn resolve_groups_in_bucket(files: &[FileRow], idxs: &[usize]) -> Vec<(Tier, Vec<usize>)> {
     let mut out = Vec::new();
 
@@ -291,6 +342,9 @@ fn resolve_groups_in_bucket(files: &[FileRow], idxs: &[usize]) -> Vec<(Tier, Vec
         }
         for group in by_name.into_values() {
             if group.len() < 2 || group.len() > MAX_GROUP_SIZE {
+                continue;
+            }
+            if group_has_hash_conflict(files, &group) {
                 continue;
             }
             let tier = if all_pairs_strong_mtime(files, &group) {
@@ -322,7 +376,8 @@ fn resolve_groups_in_bucket(files: &[FileRow], idxs: &[usize]) -> Vec<(Tier, Vec
             let Some(cliques) = maximal_cliques(
                 &cluster,
                 |a, b| {
-                    files[a].name != files[b].name
+                    !hash_confirmed_different(&files[a], &files[b])
+                        && files[a].name != files[b].name
                         && compare_mtime(files[a].mtime.as_deref(), files[b].mtime.as_deref())
                             != MtimeMatch::None
                 },
@@ -343,6 +398,21 @@ fn resolve_groups_in_bucket(files: &[FileRow], idxs: &[usize]) -> Vec<(Tier, Vec
     }
 
     out
+}
+
+/// Whether `group` contains two members that are hash-confirmed different
+/// from each other -- see `resolve_groups_in_bucket`'s doc comment on why
+/// this drops the whole tier C/D name-group rather than trying to partially
+/// reconcile it.
+fn group_has_hash_conflict(files: &[FileRow], group: &[usize]) -> bool {
+    for i in 0..group.len() {
+        for j in (i + 1)..group.len() {
+            if hash_confirmed_different(&files[group[i]], &files[group[j]]) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Run the full dedup pass for a workspace: clears prior groups, rebuilds file
@@ -379,6 +449,45 @@ pub fn run_with_progress(
     let parent_names = load_parent_names(conn, workspace_id)?;
     let files = load_files(conn, workspace_id, &parent_names)?;
 
+    on_phase("matching", 1, TOTAL_PHASES);
+    let mut groups: Vec<(Tier, Vec<usize>)> = Vec::new();
+
+    // Tiers A/B: hash-confirmed identity is a true equivalence relation
+    // (§9.3), so this is a single O(n) grouping pass by exact
+    // (size, hash_spec, digest) -- no pairwise scoring, no clique search.
+    // A group promotes to A only if every member was *fully* hashed; any
+    // sampled member downgrades the whole group to B, since sampling is the
+    // weaker of the two forms of content evidence actually present.
+    let mut by_hash: HashMap<(i64, String, Vec<u8>), Vec<usize>> = HashMap::new();
+    for (i, f) in files.iter().enumerate() {
+        if let (Some(hash), Some(spec)) = (&f.content_hash, &f.hash_spec) {
+            by_hash
+                .entry((f.size, spec.clone(), hash.clone()))
+                .or_default()
+                .push(i);
+        }
+    }
+    for group in by_hash.into_values() {
+        if group.len() < 2 || group.len() > MAX_GROUP_SIZE {
+            continue;
+        }
+        let tier = if group
+            .iter()
+            .all(|&i| files[i].hash_kind.as_deref() == Some("full"))
+        {
+            Tier::A
+        } else {
+            Tier::B
+        };
+        groups.push((tier, group));
+    }
+
+    // Metadata tiers (C/D/E) run over ALL files -- hashed and unhashed
+    // alike, since a hashed file paired with an *unhashed* one is still
+    // eligible for ordinary metadata evidence (see `resolve_groups_in_bucket`'s
+    // doc comment for the one exclusion: two hashed-and-different files must
+    // never co-occur in a metadata group either).
+    //
     // Bucket file indices by size. Files below the tunable minimum, and
     // zero-byte files unconditionally (an absolute veto, not merely a
     // penalty: any two empty files look identical regardless of every other
@@ -390,9 +499,6 @@ pub fn run_with_progress(
         }
         by_size.entry(f.size).or_default().push(i);
     }
-
-    on_phase("matching", 1, TOTAL_PHASES);
-    let mut groups: Vec<(Tier, Vec<usize>)> = Vec::new();
     for idxs in by_size.values() {
         if idxs.len() < 2 {
             continue;
@@ -437,16 +543,19 @@ pub fn run_with_progress(
 
     tx.commit()?;
 
-    // Folder-level rollup uses the freshly written file groups.
+    // Folder-level rollup uses the freshly written file groups; the listing-
+    // hash pass is independent of file groups entirely (pure structure) but
+    // shares this phase since both produce `kind='folder'` groups.
     on_phase("folder_rollup", 3, TOTAL_PHASES);
     let folder_groups = super::rollup::build_folder_groups(conn, workspace_id)?;
+    let listing_groups = super::rollup::compute_listing_hashes(conn, workspace_id)?;
 
     // Rebuild the per-node duplicate annotation cache so tree browsing is fast.
     on_phase("annotating", 4, TOTAL_PHASES);
     super::rollup::rebuild_annotations(conn, workspace_id)?;
 
     on_phase("done", TOTAL_PHASES, TOTAL_PHASES);
-    Ok(group_count + folder_groups)
+    Ok(group_count + folder_groups + listing_groups)
 }
 
 /// Load a map of node_id -> node name so parent folder names can be attached.
@@ -479,7 +588,7 @@ fn load_files(
     parent_names: &HashMap<i64, String>,
 ) -> rusqlite::Result<Vec<FileRow>> {
     let mut stmt = conn.prepare(
-        "SELECT n.id, n.parent_id, n.name, n.size, n.mtime
+        "SELECT n.id, n.parent_id, n.name, n.size, n.mtime, n.content_hash, n.hash_kind, n.hash_spec
          FROM nodes n
          JOIN sources s ON s.id = n.source_id
          WHERE s.workspace_id = ?1 AND n.type = 'file' AND s.excluded = 0 AND n.alias_of IS NULL",
@@ -493,6 +602,9 @@ fn load_files(
             size: r.get(3)?,
             mtime: r.get(4)?,
             parent_name: String::new(),
+            content_hash: r.get(5)?,
+            hash_kind: r.get(6)?,
+            hash_spec: r.get(7)?,
         })
     })?;
     let mut files = Vec::new();
@@ -598,6 +710,34 @@ mod tests {
         conn
     }
 
+    /// Set the hash columns on the (single, since `setup_files` never
+    /// creates two same-name files under the same parent) node named `name`
+    /// under `parent_name` (empty for a top-level node).
+    fn set_hash(
+        conn: &Connection,
+        name: &str,
+        parent_name: &str,
+        hash_kind: &str,
+        hash_spec: &str,
+        digest: &[u8],
+    ) {
+        if parent_name.is_empty() {
+            conn.execute(
+                "UPDATE nodes SET content_hash = ?1, hash_kind = ?2, hash_spec = ?3
+                 WHERE name = ?4 AND parent_id IS NULL",
+                params![digest, hash_kind, hash_spec, name],
+            )
+            .unwrap();
+        } else {
+            conn.execute(
+                "UPDATE nodes SET content_hash = ?1, hash_kind = ?2, hash_spec = ?3
+                 WHERE name = ?4 AND parent_id = (SELECT id FROM nodes WHERE name = ?5)",
+                params![digest, hash_kind, hash_spec, name, parent_name],
+            )
+            .unwrap();
+        }
+    }
+
     fn group_rows(conn: &Connection, ws: i64) -> Vec<(f64, String)> {
         let mut stmt = conn
             .prepare(
@@ -628,14 +768,28 @@ mod tests {
             .unwrap();
         assert_eq!(file_groups, 2, "two files should each form a group");
 
-        let folder_groups: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM match_groups WHERE workspace_id = ?1 AND kind = 'folder'",
-                params![ws],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(folder_groups, 1, "the photos folder should be flagged");
+        // Two independent folder-level detectors both fire on this fixture
+        // (the two "photos" directories are byte-identical): the 80%-dup
+        // byte heuristic in `build_folder_groups`, and the structural
+        // listing-hash pass in `compute_listing_hashes`. Both firing is
+        // correct, not a regression -- they are deliberately independent
+        // mechanisms (see `rollup::compute_listing_hashes`'s doc comment).
+        let folder_signals: Vec<String> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT primary_signal FROM match_groups WHERE workspace_id = ?1 AND kind = 'folder' ORDER BY primary_signal",
+                )
+                .unwrap();
+            stmt.query_map(params![ws], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert_eq!(
+            folder_signals,
+            vec!["folder".to_string(), "listing".to_string()],
+            "the photos folder should be flagged by both the byte-overlap heuristic and the listing hash"
+        );
     }
 
     #[test]
@@ -872,6 +1026,128 @@ mod tests {
             )
             .unwrap();
         assert_ne!(a_group, c_group);
+    }
+
+    #[test]
+    fn full_hash_match_forms_tier_a() {
+        let mut conn = setup_files(&[
+            ("a.jpg", 500_000, None, ""),
+            ("b.jpg", 500_000, None, ""), // different name/no mtime -- pure hash evidence
+        ]);
+        set_hash(&conn, "a.jpg", "", "full", "blake3/v1/full", &[0xAA; 32]);
+        set_hash(&conn, "b.jpg", "", "full", "blake3/v1/full", &[0xAA; 32]);
+
+        let ws = 1;
+        run_with_progress(&mut conn, ws, DedupParams::default(), |_, _, _| {}).unwrap();
+        assert_eq!(
+            group_rows(&conn, ws),
+            vec![(100.0, "hash-full".to_string())]
+        );
+    }
+
+    #[test]
+    fn sampled_hash_match_forms_tier_b() {
+        let mut conn = setup_files(&[("a.jpg", 500_000, None, ""), ("b.jpg", 500_000, None, "")]);
+        set_hash(
+            &conn,
+            "a.jpg",
+            "",
+            "full",
+            "blake3/v1/th1-s1-t1",
+            &[0xBB; 32],
+        );
+        set_hash(
+            &conn,
+            "b.jpg",
+            "",
+            "sampled",
+            "blake3/v1/th1-s1-t1",
+            &[0xBB; 32],
+        );
+
+        let ws = 1;
+        run_with_progress(&mut conn, ws, DedupParams::default(), |_, _, _| {}).unwrap();
+        assert_eq!(
+            group_rows(&conn, ws),
+            vec![(99.0, "hash-sampled".to_string())],
+            "any sampled member downgrades the whole group from A to B"
+        );
+    }
+
+    #[test]
+    fn hashed_and_different_pair_never_falls_back_to_metadata_match() {
+        // Exact name + strong mtime -- everything tier C would normally
+        // reward -- but hash-confirmed different under the same spec.
+        let mut conn = setup_files(&[
+            ("a.jpg", 500_000, Some("2024-01-01_10:00:00"), ""),
+            ("a.jpg", 500_000, Some("2024-01-01_10:00:00"), ""),
+        ]);
+        set_hash(&conn, "a.jpg", "", "full", "blake3/v1/full", &[0xCC; 32]);
+        // set_hash matches by name alone, so it would hit both same-named
+        // rows; give the second one a distinct digest via its node id instead.
+        let ws = 1;
+        conn.execute(
+            "UPDATE nodes SET content_hash = ?1, hash_kind = 'full', hash_spec = 'blake3/v1/full'
+             WHERE type = 'file' AND id = (SELECT MAX(id) FROM nodes WHERE type = 'file')",
+            params![vec![0xDD_u8; 32]],
+        )
+        .unwrap();
+
+        run_with_progress(&mut conn, ws, DedupParams::default(), |_, _, _| {}).unwrap();
+        assert!(
+            group_rows(&conn, ws).is_empty(),
+            "a hash-confirmed-different pair must never form any group, hash or metadata"
+        );
+    }
+
+    #[test]
+    fn hashed_vs_unhashed_pair_still_forms_metadata_tier_on_real_evidence() {
+        // One file hashed, the other never scanned/hashed (e.g. a JSON
+        // import) -- there's no digest to compare, so ordinary name+mtime
+        // evidence is still legitimate and must not be suppressed.
+        let mut conn = setup_files(&[
+            ("a.jpg", 500_000, Some("2024-01-01_10:00:00"), ""),
+            ("a.jpg", 500_000, Some("2024-01-01_10:00:00"), ""),
+        ]);
+        set_hash(&conn, "a.jpg", "", "full", "blake3/v1/full", &[0xEE; 32]);
+        // set_hash updates every row named "a.jpg"; clear it back off the
+        // second one so only one of the pair is actually hashed.
+        conn.execute(
+            "UPDATE nodes SET content_hash = NULL, hash_kind = NULL, hash_spec = NULL
+             WHERE type = 'file' AND id = (SELECT MAX(id) FROM nodes WHERE type = 'file')",
+            [],
+        )
+        .unwrap();
+
+        let ws = 1;
+        run_with_progress(&mut conn, ws, DedupParams::default(), |_, _, _| {}).unwrap();
+        assert_eq!(
+            group_rows(&conn, ws),
+            vec![(70.0, "name+mtime".to_string())],
+            "a hashed file must still match an unhashed one on real metadata evidence"
+        );
+    }
+
+    #[test]
+    fn differing_hash_spec_does_not_collide() {
+        // Identical digest bytes but different spec strings -- must never be
+        // treated as the same content (a defensive/pathological case; spec
+        // locking should make this unreachable in practice within a
+        // workspace, but the matcher must not rely on that alone).
+        let mut conn = setup_files(&[("a.jpg", 500_000, None, ""), ("b.jpg", 500_000, None, "")]);
+        set_hash(&conn, "a.jpg", "", "full", "blake3/v1/full", &[0xFF; 32]);
+        set_hash(
+            &conn,
+            "b.jpg",
+            "",
+            "full",
+            "blake3/v1/th1-s1-t1",
+            &[0xFF; 32],
+        );
+
+        let ws = 1;
+        run_with_progress(&mut conn, ws, DedupParams::default(), |_, _, _| {}).unwrap();
+        assert!(group_rows(&conn, ws).is_empty());
     }
 
     #[test]
