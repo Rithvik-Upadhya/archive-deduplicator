@@ -137,15 +137,21 @@
         const label = scanLabel;
         const taskId = taskTray.start('scan', `Scanning “${label}”…`);
         const unlistenScan = await listen<ScanProgress>('scan:progress', e => {
-            taskTray.update(taskId, { phase: 'scanning', current: e.payload.current });
-        });
-        const unlistenDedup = await listen<DedupProgress>('dedup:progress', e => {
             taskTray.update(taskId, {
-                phase: e.payload.phase,
+                phase: 'scanning',
                 current: e.payload.current,
-                total: e.payload.total,
             });
         });
+        const unlistenDedup = await listen<DedupProgress>(
+            'dedup:progress',
+            e => {
+                taskTray.update(taskId, {
+                    phase: e.payload.phase,
+                    current: e.payload.current,
+                    total: e.payload.total,
+                });
+            }
+        );
         let unlistenHash: (() => void) | null = null;
         try {
             if (!config.specLocked) {
@@ -175,14 +181,17 @@
                         current: 0,
                         total: 0,
                     });
-                    unlistenHash = await listen<HashProgress>('hash:progress', e => {
-                        if (e.payload.source_id !== source.id) return;
-                        taskTray.update(taskId, {
-                            phase: 'hashing',
-                            current: e.payload.current,
-                            total: e.payload.total,
-                        });
-                    });
+                    unlistenHash = await listen<HashProgress>(
+                        'hash:progress',
+                        e => {
+                            if (e.payload.source_id !== source.id) return;
+                            taskTray.update(taskId, {
+                                phase: 'hashing',
+                                current: e.payload.current,
+                                total: e.payload.total,
+                            });
+                        }
+                    );
                     const report = await app.runHashScan(source.id);
                     if (report.cancelled) {
                         taskTray.resolve(
@@ -452,9 +461,7 @@
                         {#if s.hashing_enabled && s.hashing_phase === 'hashing' && !isSourceHashingActive(s.id)}
                             <div
                                 class="flex items-center justify-between gap-1 text-[0.7rem] text-muted-foreground">
-                                <span
-                                    >Hashing paused -- {s.hash_coverage_files.toLocaleString()}
-                                    hashed</span>
+                                <span>Hashing paused</span>
                                 <Button
                                     size="sm"
                                     variant="outline"
