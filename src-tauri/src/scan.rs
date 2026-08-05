@@ -386,6 +386,28 @@ mod tests {
             std::os::unix::fs::symlink("does-not-exist.txt", dir.join("dangling.txt")).unwrap();
         }
 
+        // `SeCreateSymbolicLinkPrivilege` is off by default outside
+        // Developer Mode / an elevated shell -- that's a machine setting,
+        // not a bug (see `windows_tests::reparse_points_are_not_descended`,
+        // which hits the identical `ERROR_PRIVILEGE_NOT_HELD`). Skip rather
+        // than fail so this test still exercises the real thing on machines
+        // that do have the privilege, without going red on ones that don't.
+        #[cfg(windows)]
+        {
+            if let Err(e) = std::os::windows::fs::symlink_file("real.txt", dir.join("link.txt")) {
+                if e.raw_os_error() == Some(1314) {
+                    eprintln!(
+                        "skipping symlink_target_is_recorded: {e} (enable Developer Mode or run elevated to create symlinks)"
+                    );
+                    std::fs::remove_dir_all(&dir).ok();
+                    return;
+                }
+                panic!("failed to create test symlink: {e}");
+            }
+            std::os::windows::fs::symlink_file("does-not-exist.txt", dir.join("dangling.txt"))
+                .unwrap();
+        }
+
         let flat = scan_folder(&dir, &no_medium(), |_| {}).unwrap();
 
         let link = flat.nodes.iter().find(|n| n.name == "link.txt").unwrap();

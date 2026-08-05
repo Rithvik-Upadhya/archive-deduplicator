@@ -769,10 +769,16 @@ mod tests {
         .unwrap();
         let ws = conn.last_insert_rowid();
 
+        // volume_id must parse as an i64: on the Windows fast scan path
+        // (scan.rs::scan_folder_fast) it's the only source of `nodes.dev`,
+        // so an empty string here would leave every node's `dev` NULL and
+        // break any test relying on a real (dev, inode) pair -- Unix's
+        // `inode_dev` ignores this field and always pulls a real `st_dev`
+        // from `stat()`, which is why this only ever showed up on Windows.
         let no_medium = crate::medium::MediumInfo {
             medium_kind: crate::medium::MediumKind::Unknown,
             filesystem: None,
-            volume_id: String::new(),
+            volume_id: "1".to_string(),
         };
         let flat = crate::scan::scan_folder(&dir, &no_medium, |_| {}).unwrap();
         let tx = conn.transaction().unwrap();
