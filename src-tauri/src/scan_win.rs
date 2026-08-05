@@ -17,7 +17,7 @@ use std::io;
 use std::mem::offset_of;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
-use std::ptr::null;
+use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_NO_MORE_FILES, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
 };
@@ -82,7 +82,7 @@ pub fn read_dir_ex(dir: &Path, refs_volume: bool) -> io::Result<Vec<WinEntry>> {
             null(),
             OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS,
-            0,
+            null_mut(),
         )
     };
     if handle == INVALID_HANDLE_VALUE {
