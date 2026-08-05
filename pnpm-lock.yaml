@@ -75,9 +75,6 @@ importers:
       svelte-check:
         specifier: ^4.0.0
         version: 4.7.3(picomatch@4.0.5)(svelte@5.56.6)(typescript@5.6.3)
-      svelte-sonner:
-        specifier: ^1.1.1
-        version: 1.1.1(svelte@5.56.6)
       tailwind-merge:
         specifier: ^3.6.0
         version: 3.6.0
@@ -987,11 +984,6 @@ packages:
     peerDependencies:
       svelte: ^5.7.0
 
-  runed@0.28.0:
-    resolution: {integrity: sha512-k2xx7RuO9hWcdd9f+8JoBeqWtYrm5CALfgpkg2YDB80ds/QE4w0qqu34A7fqiAwiBBSBQOid7TLxwxVC27ymWQ==}
-    peerDependencies:
-      svelte: ^5.7.0
-
   runed@0.29.2:
     resolution: {integrity: sha512-0cq6cA6sYGZwl/FvVqjx9YN+1xEBu9sDDyuWdDW1yWX7JF2wmvmVKfH+hVCZs+csW+P3ARH92MjI3H9QTagOQA==}
     peerDependencies:
@@ -1048,11 +1040,6 @@ packages:
     peerDependencies:
       svelte: ^4.0.0 || ^5.0.0-next.0
       typescript: '>=5.0.0'
-
-  svelte-sonner@1.1.1:
-    resolution: {integrity: sha512-5cd3p7wa4cq0NsqslMwdlPb7x1JglEZ/GKrLePWNr5bCxR1nagAVrY01FRFrXfUGs41miLt3C327+8XJo5BzZw==}
-    peerDependencies:
-      svelte: ^5.0.0
 
   svelte-toolbelt@0.10.6:
     resolution: {integrity: sha512-YWuX+RE+CnWYx09yseAe4ZVMM7e7GRFZM6OYWpBKOb++s+SQ8RBIMMe+Bs/CznBMc0QPLjr+vDBxTAkozXsFXQ==}
@@ -1855,11 +1842,6 @@ snapshots:
       esm-env: 1.2.2
       svelte: 5.56.6
 
-  runed@0.28.0(svelte@5.56.6):
-    dependencies:
-      esm-env: 1.2.2
-      svelte: 5.56.6
-
   runed@0.29.2(svelte@5.56.6):
     dependencies:
       esm-env: 1.2.2
@@ -1921,11 +1903,6 @@ snapshots:
       typescript: 5.6.3
     transitivePeerDependencies:
       - picomatch
-
-  svelte-sonner@1.1.1(svelte@5.56.6):
-    dependencies:
-      runed: 0.28.0(svelte@5.56.6)
-      svelte: 5.56.6
 
   svelte-toolbelt@0.10.6(@sveltejs/kit@2.69.3(@sveltejs/vite-plugin-svelte@5.1.1(svelte@5.56.6)(vite@6.4.3(jiti@2.7.0)(less@4.6.7)(lightningcss@1.32.0)))(svelte@5.56.6)(typescript@5.6.3)(vite@6.4.3(jiti@2.7.0)(less@4.6.7)(lightningcss@1.32.0)))(svelte@5.56.6):
     dependencies:
