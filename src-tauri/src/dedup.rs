@@ -1,5 +1,5 @@
-//! The duplicate-matching engine. Because we never have file contents, matching
-//! relies entirely on metadata, structured as absolute vetoes followed by
+//! The duplicate-matching engine. Matching relies entirely on hashes when
+//! available and metadata, structured as absolute vetoes followed by
 //! fixed-confidence evidence tiers (never a continuous score, never merged
 //! across tiers) -- see the module's tier/veto documentation below. Hardlink
 //! aliases (see `links.rs`) are excluded upstream by `load_files` and never
@@ -67,15 +67,14 @@ impl Default for DedupParams {
 /// score: every member pair within a group independently qualifies at
 /// exactly this tier (the "clique requirement" -- see `run_with_progress`).
 /// Tiers A and B are the one place transitive union-find-style grouping is
-/// actually valid (§9.3 of the design spec): exact digest equality under a
-/// shared hash spec is a true equivalence relation, unlike any metadata
-/// signal below it.
+/// actually valid: exact digest equality under a shared hash spec is a true
+/// equivalence relation, unlike any metadata signal below it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tier {
     /// Full-content BLAKE3 match under a shared hash spec. Confirmed.
     A,
     /// Sampled-content BLAKE3 match under a shared hash spec. Confirmed
-    /// (sampling's residual risk is informational, not a caveat -- see §9.2).
+    /// (sampling's residual risk is informational, not a caveat).
     B,
     /// Size + exact name + exact/near (<=2s) mtime match.
     C,
@@ -308,8 +307,8 @@ fn all_pairs_strong_mtime(files: &[FileRow], group: &[usize]) -> bool {
 ///   dragging two unrelated files into the same group (the same failure
 ///   union-find had).
 ///
-/// Both tiers additionally honor the hash veto (§9.1: "both hashed, same
-/// spec, digests differ"): a hash-confirmed-different pair must never be
+/// Both tiers additionally honor the hash veto (both hashed, same
+/// spec, digests differ): a hash-confirmed-different pair must never be
 /// softened into a metadata match. Tier E folds this into its edge
 /// condition directly. Tier C/D's exact-name grouping has no per-pair check
 /// to fold it into (name equality is transitive, which is what makes it
