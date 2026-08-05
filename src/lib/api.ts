@@ -7,10 +7,16 @@ import type {
     DeviceStats,
     GroupPage,
     GroupSort,
+    HashScanReportDto,
+    HashSettings,
+    HashSpecDto,
     ImportSummary,
     MatchGroup,
+    MediumInfoDto,
     NodeType,
     PathTreeNode,
+    ScanPreview,
+    ScanProgressInfo,
     Source,
     TreeNode,
     Workspace,
@@ -35,8 +41,37 @@ export const importTreeJson = (
     jsonText: string,
     label: string,
 ) => invoke<Source>('import_tree_json', { workspaceId, jsonText, label });
-export const scanFolder = (workspaceId: number, path: string, label: string) =>
-    invoke<Source>('scan_folder', { workspaceId, path, label });
+export const scanFolder = (
+    workspaceId: number,
+    path: string,
+    label: string,
+    hashMinSize?: number,
+    mediumOverride?: string,
+    filesystemOverride?: string,
+) =>
+    invoke<Source>('scan_folder', {
+        workspaceId,
+        path,
+        label,
+        hashMinSize: hashMinSize ?? null,
+        mediumOverride: mediumOverride ?? null,
+        filesystemOverride: filesystemOverride ?? null,
+    });
+
+// --- Medium detection & content hashing ---
+
+export const detectMedium = (path: string) =>
+    invoke<MediumInfoDto>('detect_medium', { path });
+export const previewScan = (path: string, hashMinSize: number) =>
+    invoke<ScanPreview>('preview_scan', { path, hashMinSize });
+export const hashSettingsGet = (workspaceId: number) =>
+    invoke<HashSettings>('hash_settings_get', { workspaceId });
+export const hashSettingsSet = (workspaceId: number, spec: HashSpecDto) =>
+    invoke<void>('hash_settings_set', { workspaceId, spec });
+export const runHashScan = (sourceId: number) =>
+    invoke<HashScanReportDto>('run_hash_scan', { sourceId });
+export const getScanProgress = (sourceId: number) =>
+    invoke<ScanProgressInfo | null>('get_scan_progress', { sourceId });
 export const sourceRenameDevice = (sourceId: number, deviceLabel: string) =>
     invoke<void>('source_rename_device', { sourceId, deviceLabel });
 export const sourceSetExcluded = (sourceId: number, excluded: boolean) =>

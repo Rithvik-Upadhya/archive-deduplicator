@@ -31,6 +31,66 @@ export interface Source {
     physical_size: number;
     /** Bytes among `total_size` that belong to non-canonical hardlink aliases. */
     alias_bytes: number;
+    /** Detected (or user-overridden) storage medium: "hdd" | "ssd" | "network"
+     *  | "optical" | "unknown". `null` for JSON imports and pre-hashing sources. */
+    medium_kind: string | null;
+    /** Detected (or user-overridden) filesystem name ("NTFS", "exFAT", "ext4", ...). */
+    filesystem: string | null;
+    /** Files smaller than this were never queued for content hashing. */
+    hash_min_size: number;
+    /** The workspace hash spec in force when this source was hashed. */
+    hash_spec: string | null;
+    hash_coverage_files: number;
+    hash_coverage_bytes: number;
+}
+
+export type MediumKind = 'hdd' | 'ssd' | 'network' | 'optical' | 'unknown';
+
+export interface MediumInfoDto {
+    medium_kind: MediumKind;
+    filesystem: string | null;
+    volume_id: string;
+}
+
+/** A cheap walk-only dry run (no DB writes) for the scan-config dialog. */
+export interface ScanPreview {
+    total_files: number;
+    total_bytes: number;
+    files_above_threshold: number;
+    bytes_above_threshold: number;
+}
+
+/** `threshold: null` means "full hash everything" -- no sampling. */
+export interface HashSpecDto {
+    threshold: number | null;
+    probe: number;
+    stride: number;
+    spec_string: string;
+}
+
+/** Returned by `hash_settings_get`. Once `locked`, the spec fields in the
+ *  scan-config dialog must be shown read-only, not editable. */
+export interface HashSettings {
+    spec: HashSpecDto;
+    locked: boolean;
+}
+
+export interface HashScanReportDto {
+    hashed: number;
+    cached: number;
+    errors: number;
+}
+
+export interface HashProgress {
+    current: number;
+    total: number;
+}
+
+/** `phase === "hashing"` means a previous `run_hash_scan` was interrupted
+ *  and should show a "Resume hashing" affordance. */
+export interface ScanProgressInfo {
+    phase: string;
+    last_cursor: number;
 }
 
 export interface TreeNode {
@@ -130,6 +190,16 @@ export interface DedupProgress {
 
 export interface ScanProgress {
     current: number;
+}
+
+/** What `ScanConfigDialog` hands back on confirm -- everything needed to
+ *  run scan -> hash -> dedup for one newly-picked folder. */
+export interface ScanConfig {
+    hashSpec: HashSpecDto;
+    specLocked: boolean;
+    hashMinSize: number;
+    mediumOverride: string;
+    filesystemOverride: string;
 }
 
 export interface ImportSummary {
