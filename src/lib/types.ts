@@ -159,15 +159,6 @@ export interface GroupPage {
 
 export type GroupSort = 'confidence' | 'size';
 
-export interface DeviceStats {
-    source_id: number;
-    device_label: string;
-    total_size: number;
-    file_count: number;
-    duplicated_size: number;
-    duplicated_pct: number;
-}
-
 export interface ConsolidationNode {
     id: number;
     consolidation_id: number;

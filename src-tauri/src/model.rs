@@ -211,17 +211,6 @@ pub struct ConsolidationNode {
     pub origin_path: Option<String>,
 }
 
-/// Per-source (device) statistics summary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceStats {
-    pub source_id: i64,
-    pub device_label: String,
-    pub total_size: i64,
-    pub file_count: i64,
-    pub duplicated_size: i64,
-    pub duplicated_pct: f64,
-}
-
 /// One node in the consolidated end-state tree, annotated with path-length
 /// guidance. Produced by `pathfix::build_tree`. The frontend renders a real
 /// nested tree from this flat-with-parent-links list (same idiom as

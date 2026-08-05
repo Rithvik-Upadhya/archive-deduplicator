@@ -4,7 +4,6 @@
 
 import * as api from '../api';
 import type {
-    DeviceStats,
     GroupSort,
     HashScanReportDto,
     ImportSummary,
@@ -47,7 +46,6 @@ class AppState {
     groupSort = $state<GroupSort>('confidence');
     groupKind = $state<'all' | 'file' | 'folder' | 'hardlink'>('all');
     groupsLoading = $state(false);
-    deviceStats = $state<DeviceStats[]>([]);
 
     /** True when sources changed after the last dedup run (nudges a re-run). */
     dedupStale = $state(false);
@@ -81,14 +79,15 @@ class AppState {
                 const ws = await api.workspaceCreate('Workspace 1');
                 this.workspaces = [ws];
             }
-            const lastId = await api.appStateGet('active_workspace');
+            const [lastId, view] = await Promise.all([
+                api.appStateGet('active_workspace'),
+                api.appStateGet('view') as Promise<ViewName | null>,
+            ]);
             const parsed = lastId ? Number(lastId) : null;
             this.activeWorkspaceId =
                 parsed && this.workspaces.some((w) => w.id === parsed)
                     ? parsed
                     : this.workspaces[0].id;
-
-            const view = (await api.appStateGet('view')) as ViewName | null;
             if (view) this.view = view;
 
             await this.loadWorkspace();
@@ -109,9 +108,10 @@ class AppState {
         this.minConfidence = minConf ? Number(minConf) : 40;
         this.dedupStale = stale === '1';
 
-        this.sources = await api.sourceList(ws);
-        this.deviceStats = await api.getDeviceStats(ws);
-        await this.refreshGroups();
+        await Promise.all([
+            api.sourceList(ws).then((sources) => (this.sources = sources)),
+            this.refreshGroups(),
+        ]);
         this.treeVersion++;
     }
 
@@ -168,7 +168,6 @@ class AppState {
                 this.activeWorkspaceId = null;
                 this.sources = [];
                 this.groups = [];
-                this.deviceStats = [];
             }
         }
     }
@@ -220,9 +219,6 @@ class AppState {
         await api.sourceRenameDevice(sourceId, label);
         this.sources = this.sources.map((s) =>
             s.id === sourceId ? { ...s, device_label: label } : s,
-        );
-        this.deviceStats = this.deviceStats.map((d) =>
-            d.source_id === sourceId ? { ...d, device_label: label } : d,
         );
     }
 

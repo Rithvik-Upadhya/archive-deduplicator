@@ -831,46 +831,6 @@ pub fn get_group_for_node(db: State<Db>, node_id: i64) -> CmdResult<Option<Match
     Ok(Some(g))
 }
 
-/// Per-device duplicate statistics.
-#[tauri::command]
-pub fn get_device_stats(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<DeviceStats>> {
-    let conn = db.lock();
-    let dup_by_src = rollup::duplicated_size_by_source(&conn, workspace_id).map_err(map_err)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, device_label, total_size, file_count FROM sources WHERE workspace_id = ?1 ORDER BY id",
-        )
-        .map_err(map_err)?;
-    let rows = stmt
-        .query_map(params![workspace_id], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)?,
-            ))
-        })
-        .map_err(map_err)?;
-    let mut out = Vec::new();
-    for row in rows {
-        let (id, label, total, count) = row.map_err(map_err)?;
-        let dup = *dup_by_src.get(&id).unwrap_or(&0);
-        out.push(DeviceStats {
-            source_id: id,
-            device_label: label,
-            total_size: total,
-            file_count: count,
-            duplicated_size: dup,
-            duplicated_pct: if total > 0 {
-                dup as f64 / total as f64 * 100.0
-            } else {
-                0.0
-            },
-        });
-    }
-    Ok(out)
-}
-
 // ---------------------------------------------------------------------------
 // Consolidation
 // ---------------------------------------------------------------------------
