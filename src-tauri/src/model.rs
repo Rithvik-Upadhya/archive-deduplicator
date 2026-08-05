@@ -68,6 +68,26 @@ pub struct Source {
     /// aliases (`(k-1) * size` per alias set).
     #[serde(default)]
     pub alias_bytes: i64,
+    /// Detected (or user-overridden) storage medium at scan time: "hdd",
+    /// "ssd", "network", "optical", "unknown". `None` for JSON imports and
+    /// any source scanned before this field existed.
+    #[serde(default)]
+    pub medium_kind: Option<String>,
+    /// Detected (or user-overridden) filesystem name ("NTFS", "exFAT", "ext4", ...).
+    /// Gates hardlink-collapse trust -- see `medium::filesystem_is_trusted`.
+    #[serde(default)]
+    pub filesystem: Option<String>,
+    /// Files smaller than this were never queued for content hashing.
+    #[serde(default)]
+    pub hash_min_size: i64,
+    /// The workspace hash spec in force when this source was hashed, copied
+    /// here so cross-source hash comparability is verifiable from the data.
+    #[serde(default)]
+    pub hash_spec: Option<String>,
+    #[serde(default)]
+    pub hash_coverage_files: i64,
+    #[serde(default)]
+    pub hash_coverage_bytes: i64,
 }
 
 /// A flattened filesystem node stored in the database.
@@ -231,4 +251,23 @@ pub struct DedupProgress {
 #[derive(Debug, Clone, Serialize)]
 pub struct ScanProgress {
     pub current: u64,
+}
+
+/// Detected storage-medium/filesystem info for a scan root, shown in the
+/// scan-configuration dialog before the user commits to scanning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediumInfoDto {
+    pub medium_kind: String,
+    pub filesystem: Option<String>,
+    pub volume_id: String,
+}
+
+/// A cheap walk-only dry run (no DB writes) used to show real numbers --
+/// "~87,300 of 337,000 files will be hashed" -- in the scan-config dialog.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScanPreview {
+    pub total_files: i64,
+    pub total_bytes: i64,
+    pub files_above_threshold: i64,
+    pub bytes_above_threshold: i64,
 }

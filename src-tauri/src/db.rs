@@ -50,7 +50,13 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             file_count INTEGER NOT NULL DEFAULT 0,
             excluded INTEGER NOT NULL DEFAULT 0,
             physical_size INTEGER NOT NULL DEFAULT 0,
-            alias_bytes INTEGER NOT NULL DEFAULT 0
+            alias_bytes INTEGER NOT NULL DEFAULT 0,
+            medium_kind TEXT,
+            filesystem TEXT,
+            hash_min_size INTEGER NOT NULL DEFAULT 65536,
+            hash_spec TEXT,
+            hash_coverage_files INTEGER NOT NULL DEFAULT 0,
+            hash_coverage_bytes INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS nodes (
@@ -68,7 +74,14 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             subtree_size INTEGER NOT NULL DEFAULT 0,
             subtree_file_count INTEGER NOT NULL DEFAULT 0,
             alias_of INTEGER REFERENCES nodes(id) ON DELETE SET NULL,
-            inode_trusted INTEGER NOT NULL DEFAULT 0
+            inode_trusted INTEGER NOT NULL DEFAULT 0,
+            inode_high INTEGER,
+            content_hash BLOB,
+            hash_kind TEXT,
+            hash_spec TEXT,
+            hash_bytes_read INTEGER,
+            hashed_at TEXT,
+            listing_hash BLOB
         );
         CREATE INDEX IF NOT EXISTS idx_nodes_source ON nodes(source_id);
         CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_id);
@@ -76,6 +89,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type);
         CREATE INDEX IF NOT EXISTS idx_nodes_alias ON nodes(alias_of) WHERE alias_of IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_nodes_inode ON nodes(source_id, dev, inode) WHERE inode IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_nodes_hash ON nodes(content_hash) WHERE content_hash IS NOT NULL;
 
         CREATE TABLE IF NOT EXISTS match_groups (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -160,6 +174,31 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             cross_dup_file_count INTEGER NOT NULL DEFAULT 0,
             in_folder_group INTEGER NOT NULL DEFAULT 0
         );
+
+        -- Survives source deletion and re-import so a re-scan of the same
+        -- medium is nearly free: a cache hit requires size, mtime, AND spec
+        -- to all match, so any edit or spec change invalidates it.
+        CREATE TABLE IF NOT EXISTS hash_cache (
+            volume_id TEXT NOT NULL,
+            file_id INTEGER NOT NULL,
+            size INTEGER NOT NULL,
+            mtime TEXT NOT NULL,
+            hash_spec TEXT NOT NULL,
+            content_hash BLOB NOT NULL,
+            hash_kind TEXT NOT NULL,
+            computed_at TEXT NOT NULL,
+            PRIMARY KEY (volume_id, file_id, size, mtime, hash_spec)
+        );
+
+        -- Resumability for a multi-hour hashing pass: `last_cursor` is the
+        -- index into the (deterministically ordered) candidate list that the
+        -- next run should resume from.
+        CREATE TABLE IF NOT EXISTS scan_progress (
+            source_id INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+            phase TEXT NOT NULL,
+            last_cursor INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );
         "#,
     )?;
     Ok(())
@@ -167,7 +206,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 
 /// Target schema version. Bump this and add an entry to `migrate`'s
 /// `alterations` list whenever a column is added to an already-shipped table.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
@@ -218,6 +257,71 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             "alias_bytes",
             "ALTER TABLE sources ADD COLUMN alias_bytes INTEGER NOT NULL DEFAULT 0",
         ),
+        (
+            "nodes",
+            "inode_high",
+            "ALTER TABLE nodes ADD COLUMN inode_high INTEGER",
+        ),
+        (
+            "nodes",
+            "content_hash",
+            "ALTER TABLE nodes ADD COLUMN content_hash BLOB",
+        ),
+        (
+            "nodes",
+            "hash_kind",
+            "ALTER TABLE nodes ADD COLUMN hash_kind TEXT",
+        ),
+        (
+            "nodes",
+            "hash_spec",
+            "ALTER TABLE nodes ADD COLUMN hash_spec TEXT",
+        ),
+        (
+            "nodes",
+            "hash_bytes_read",
+            "ALTER TABLE nodes ADD COLUMN hash_bytes_read INTEGER",
+        ),
+        (
+            "nodes",
+            "hashed_at",
+            "ALTER TABLE nodes ADD COLUMN hashed_at TEXT",
+        ),
+        (
+            "nodes",
+            "listing_hash",
+            "ALTER TABLE nodes ADD COLUMN listing_hash BLOB",
+        ),
+        (
+            "sources",
+            "medium_kind",
+            "ALTER TABLE sources ADD COLUMN medium_kind TEXT",
+        ),
+        (
+            "sources",
+            "filesystem",
+            "ALTER TABLE sources ADD COLUMN filesystem TEXT",
+        ),
+        (
+            "sources",
+            "hash_min_size",
+            "ALTER TABLE sources ADD COLUMN hash_min_size INTEGER NOT NULL DEFAULT 65536",
+        ),
+        (
+            "sources",
+            "hash_spec",
+            "ALTER TABLE sources ADD COLUMN hash_spec TEXT",
+        ),
+        (
+            "sources",
+            "hash_coverage_files",
+            "ALTER TABLE sources ADD COLUMN hash_coverage_files INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "sources",
+            "hash_coverage_bytes",
+            "ALTER TABLE sources ADD COLUMN hash_coverage_bytes INTEGER NOT NULL DEFAULT 0",
+        ),
     ];
     for (table, column, ddl) in alterations {
         if !column_exists(conn, table, column)? {
@@ -226,7 +330,18 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_nodes_alias ON nodes(alias_of) WHERE alias_of IS NOT NULL;
-         CREATE INDEX IF NOT EXISTS idx_nodes_inode ON nodes(source_id, dev, inode) WHERE inode IS NOT NULL;",
+         CREATE INDEX IF NOT EXISTS idx_nodes_inode ON nodes(source_id, dev, inode) WHERE inode IS NOT NULL;
+         CREATE INDEX IF NOT EXISTS idx_nodes_hash ON nodes(content_hash) WHERE content_hash IS NOT NULL;
+         CREATE TABLE IF NOT EXISTS hash_cache (
+             volume_id TEXT NOT NULL, file_id INTEGER NOT NULL, size INTEGER NOT NULL,
+             mtime TEXT NOT NULL, hash_spec TEXT NOT NULL, content_hash BLOB NOT NULL,
+             hash_kind TEXT NOT NULL, computed_at TEXT NOT NULL,
+             PRIMARY KEY (volume_id, file_id, size, mtime, hash_spec)
+         );
+         CREATE TABLE IF NOT EXISTS scan_progress (
+             source_id INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+             phase TEXT NOT NULL, last_cursor INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL
+         );",
     )?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
@@ -291,7 +406,8 @@ mod tests {
     }
 
     /// A stand-in for a pre-migration on-disk database: the baseline tables
-    /// `migrate` needs to alter, deliberately missing the four new columns.
+    /// `migrate` needs to alter, deliberately missing every column added
+    /// since (hardlink columns, then medium/hash/listing columns).
     const OLD_SCHEMA_DDL: &str = r#"
         CREATE TABLE workspaces (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -340,10 +456,53 @@ mod tests {
         assert!(column_exists(&conn, "nodes", "inode_trusted").unwrap());
         assert!(column_exists(&conn, "sources", "physical_size").unwrap());
         assert!(column_exists(&conn, "sources", "alias_bytes").unwrap());
+        for col in [
+            "inode_high",
+            "content_hash",
+            "hash_kind",
+            "hash_spec",
+            "hash_bytes_read",
+            "hashed_at",
+            "listing_hash",
+        ] {
+            assert!(column_exists(&conn, "nodes", col).unwrap(), "nodes.{col}");
+        }
+        for col in [
+            "medium_kind",
+            "filesystem",
+            "hash_min_size",
+            "hash_spec",
+            "hash_coverage_files",
+            "hash_coverage_bytes",
+        ] {
+            assert!(
+                column_exists(&conn, "sources", col).unwrap(),
+                "sources.{col}"
+            );
+        }
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_creates_hash_cache_and_scan_progress_tables() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(OLD_SCHEMA_DDL).unwrap();
+
+        migrate(&conn).unwrap();
+
+        for table in ["hash_cache", "scan_progress"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    rusqlite::params![table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "{table} should exist after migrate");
+        }
     }
 
     #[test]

@@ -4,6 +4,7 @@ mod db;
 mod dbio;
 mod dedup;
 mod links;
+mod medium;
 mod model;
 mod parse;
 mod pathfix;
@@ -39,6 +40,8 @@ pub fn run() {
             commands::source_list,
             commands::import_tree_json,
             commands::scan_folder,
+            commands::detect_medium,
+            commands::preview_scan,
             commands::source_rename_device,
             commands::source_set_excluded,
             commands::source_copy_to_workspace,

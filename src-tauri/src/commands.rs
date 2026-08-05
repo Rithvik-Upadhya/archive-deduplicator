@@ -4,7 +4,7 @@
 use crate::db::Db;
 use crate::dedup::DedupParams;
 use crate::model::*;
-use crate::{links, parse, pathfix, rollup, scan};
+use crate::{links, medium, parse, pathfix, rollup, scan};
 use chrono::Utc;
 use rusqlite::params;
 use std::collections::HashMap;
@@ -93,7 +93,7 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
         rollup::cross_dup_size_by_source(&conn, workspace_id).map_err(map_err)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes
+            "SELECT id, workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes
              FROM sources WHERE workspace_id = ?1 ORDER BY id",
         )
         .map_err(map_err)?;
@@ -116,6 +116,12 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
                 cross_dup_file_count: 0,
                 physical_size: r.get(11)?,
                 alias_bytes: r.get(12)?,
+                medium_kind: r.get(13)?,
+                filesystem: r.get(14)?,
+                hash_min_size: r.get(15)?,
+                hash_spec: r.get(16)?,
+                hash_coverage_files: r.get(17)?,
+                hash_coverage_bytes: r.get(18)?,
             })
         })
         .map_err(map_err)?;
@@ -186,6 +192,14 @@ pub async fn import_tree_json(
             duplicated_pct: 0.0,
             cross_dup_size: 0,
             cross_dup_file_count: 0,
+            // `tree` JSON imports carry no filesystem/medium signal at all --
+            // always "Metadata only" and never hashed.
+            medium_kind: None,
+            filesystem: None,
+            hash_min_size: 65536,
+            hash_spec: None,
+            hash_coverage_files: 0,
+            hash_coverage_bytes: 0,
             physical_size,
             alias_bytes,
         })
@@ -204,8 +218,20 @@ pub async fn scan_folder(
     workspace_id: i64,
     path: String,
     label: String,
+    hash_min_size: Option<i64>,
+    medium_override: Option<String>,
+    filesystem_override: Option<String>,
 ) -> CmdResult<Source> {
     tauri::async_runtime::spawn_blocking(move || -> CmdResult<Source> {
+        let detected = medium::detect(Path::new(&path));
+        let medium_kind = medium_override
+            .as_deref()
+            .and_then(medium::MediumKind::parse)
+            .unwrap_or(detected.medium_kind);
+        let filesystem = filesystem_override.or(detected.filesystem);
+        let hash_min_size =
+            hash_min_size.unwrap_or_else(|| medium::profile_for(medium_kind).hash_min_size_default);
+
         let flat = scan::scan_folder(Path::new(&path), |current| {
             let _ = app.emit("scan:progress", ScanProgress { current });
         })?;
@@ -215,9 +241,9 @@ pub async fn scan_folder(
         let device_label = label.clone();
         let tx = conn.transaction().map_err(map_err)?;
         tx.execute(
-            "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count)
-             VALUES (?1, 'scan', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![workspace_id, label, device_label, path, flat.root_dev, ts, flat.total_size, flat.file_count],
+            "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, medium_kind, filesystem, hash_min_size)
+             VALUES (?1, 'scan', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![workspace_id, label, device_label, path, flat.root_dev, ts, flat.total_size, flat.file_count, medium_kind.as_str(), filesystem, hash_min_size],
         )
         .map_err(map_err)?;
         let source_id = tx.last_insert_rowid();
@@ -239,11 +265,71 @@ pub async fn scan_folder(
             file_count: flat.file_count,
             excluded: false,
             duplicated_pct: 0.0,
+            medium_kind: Some(medium_kind.as_str().to_string()),
+            filesystem,
+            hash_min_size,
+            hash_spec: None,
+            hash_coverage_files: 0,
+            hash_coverage_bytes: 0,
             cross_dup_size: 0,
             cross_dup_file_count: 0,
             physical_size,
             alias_bytes,
         })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Detected storage-medium/filesystem info for `path`'s volume, shown in the
+/// scan-configuration dialog before the user commits to scanning. Never
+/// fails outright -- see `medium::detect`'s own doc comment.
+#[tauri::command]
+pub async fn detect_medium(path: String) -> CmdResult<MediumInfoDto> {
+    tauri::async_runtime::spawn_blocking(move || -> CmdResult<MediumInfoDto> {
+        let info = medium::detect(Path::new(&path));
+        Ok(MediumInfoDto {
+            medium_kind: info.medium_kind.as_str().to_string(),
+            filesystem: info.filesystem,
+            volume_id: info.volume_id,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// A walk-only dry run (no DB writes, metadata only, zero file opens) so the
+/// scan-config dialog's "~X of Y files will be hashed" estimate and time
+/// estimate are computed from real numbers rather than guessed.
+#[tauri::command]
+pub async fn preview_scan(path: String, hash_min_size: i64) -> CmdResult<ScanPreview> {
+    tauri::async_runtime::spawn_blocking(move || -> CmdResult<ScanPreview> {
+        let mut preview = ScanPreview {
+            total_files: 0,
+            total_bytes: 0,
+            files_above_threshold: 0,
+            bytes_above_threshold: 0,
+        };
+        for entry in walkdir::WalkDir::new(&path)
+            .min_depth(1)
+            .follow_links(false)
+        {
+            let Ok(entry) = entry else { continue };
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            let size = meta.len() as i64;
+            preview.total_files += 1;
+            preview.total_bytes += size;
+            if size >= hash_min_size {
+                preview.files_above_threshold += 1;
+                preview.bytes_above_threshold += size;
+            }
+        }
+        Ok(preview)
     })
     .await
     .map_err(|e| e.to_string())?
