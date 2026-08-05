@@ -87,9 +87,14 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_id);
         CREATE INDEX IF NOT EXISTS idx_nodes_size ON nodes(size);
         CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type);
-        CREATE INDEX IF NOT EXISTS idx_nodes_alias ON nodes(alias_of) WHERE alias_of IS NOT NULL;
-        CREATE INDEX IF NOT EXISTS idx_nodes_inode ON nodes(source_id, dev, inode) WHERE inode IS NOT NULL;
-        CREATE INDEX IF NOT EXISTS idx_nodes_hash ON nodes(content_hash) WHERE content_hash IS NOT NULL;
+        -- idx_nodes_alias/idx_nodes_inode/idx_nodes_hash reference columns
+        -- (alias_of / inode_trusted / content_hash) that only exist here
+        -- because this same statement just created `nodes` from scratch.
+        -- On an existing pre-migration database, `CREATE TABLE IF NOT
+        -- EXISTS` above is a no-op against the old-shaped table, so those
+        -- columns wouldn't exist yet -- creating the indexes here too would
+        -- crash *before* `migrate()` ever runs to add them. `migrate` creates
+        -- these same indexes itself, safely, after its ALTER TABLE loop.
 
         CREATE TABLE IF NOT EXISTS match_groups (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -512,5 +517,43 @@ mod tests {
 
         migrate(&conn).unwrap();
         migrate(&conn).unwrap(); // second call must not error (no double ALTER)
+    }
+
+    /// Regression test for a real startup crash: `open()` (unlike the tests
+    /// above) runs `init_schema` and `migrate` back-to-back against the
+    /// *same* on-disk, already-populated pre-migration database -- exactly
+    /// what happens on a user's machine. `init_schema`'s `CREATE TABLE IF NOT
+    /// EXISTS nodes` no-ops against the existing old-shaped table, so if
+    /// `init_schema` also tried to create an index on a column that only
+    /// `migrate` adds (as it once did for `idx_nodes_hash` on `content_hash`),
+    /// it would crash before `migrate` ever got to run.
+    #[test]
+    fn open_succeeds_against_an_existing_pre_migration_database_file() {
+        let path = std::env::temp_dir().join(format!(
+            "archive-dedup-premigration-test-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _cleanup = CleanupOnDrop(path.clone());
+
+        {
+            let seed = Connection::open(&path).unwrap();
+            seed.execute_batch(OLD_SCHEMA_DDL).unwrap();
+        }
+
+        // Must not panic/error -- this is the exact call `lib.rs`'s `setup`
+        // makes on every app launch.
+        let conn = open(&path).unwrap();
+
+        for col in ["alias_of", "inode_trusted", "content_hash", "listing_hash"] {
+            assert!(column_exists(&conn, "nodes", col).unwrap(), "nodes.{col}");
+        }
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
     }
 }
