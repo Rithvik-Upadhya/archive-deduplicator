@@ -139,24 +139,26 @@
         const path = scanPath;
         const label = scanLabel;
         const taskId = taskTray.start('scan', `Scanning “${label}”…`);
-        const unlistenScan = await listen<ScanProgress>('scan:progress', e => {
-            taskTray.update(taskId, {
-                phase: 'scanning',
-                current: e.payload.current,
-            });
-        });
-        const unlistenDedup = await listen<DedupProgress>(
-            'dedup:progress',
-            e => {
-                taskTray.update(taskId, {
-                    phase: e.payload.phase,
-                    current: e.payload.current,
-                    total: e.payload.total,
-                });
-            }
-        );
+        let unlistenScan: (() => void) | null = null;
+        let unlistenDedup: (() => void) | null = null;
         let unlistenHash: (() => void) | null = null;
         try {
+            unlistenScan = await listen<ScanProgress>('scan:progress', e => {
+                taskTray.update(taskId, {
+                    phase: 'scanning',
+                    current: e.payload.current,
+                });
+            });
+            unlistenDedup = await listen<DedupProgress>(
+                'dedup:progress',
+                e => {
+                    taskTray.update(taskId, {
+                        phase: e.payload.phase,
+                        current: e.payload.current,
+                        total: e.payload.total,
+                    });
+                }
+            );
             if (!config.specLocked) {
                 if (app.activeWorkspaceId == null) {
                     throw new Error('No active workspace.');
@@ -226,9 +228,9 @@
         } catch (err) {
             taskTray.resolve(taskId, 'error', String(err));
         } finally {
-            unlistenScan();
+            unlistenScan?.();
             unlistenHash?.();
-            unlistenDedup();
+            unlistenDedup?.();
         }
     }
 
@@ -241,15 +243,16 @@
             `Resuming hashing “${source.device_label}”…`
         );
         taskTray.update(taskId, { sourceId: source.id, phase: 'hashing' });
-        const unlistenHash = await listen<HashProgress>('hash:progress', e => {
-            if (e.payload.source_id !== source.id) return;
-            taskTray.update(taskId, {
-                phase: 'hashing',
-                current: e.payload.current,
-                total: e.payload.total,
-            });
-        });
+        let unlistenHash: (() => void) | null = null;
         try {
+            unlistenHash = await listen<HashProgress>('hash:progress', e => {
+                if (e.payload.source_id !== source.id) return;
+                taskTray.update(taskId, {
+                    phase: 'hashing',
+                    current: e.payload.current,
+                    total: e.payload.total,
+                });
+            });
             const report = await app.runHashScan(source.id);
             taskTray.resolve(
                 taskId,
@@ -261,7 +264,7 @@
         } catch (err) {
             taskTray.resolve(taskId, 'error', String(err));
         } finally {
-            unlistenHash();
+            unlistenHash?.();
         }
     }
 
