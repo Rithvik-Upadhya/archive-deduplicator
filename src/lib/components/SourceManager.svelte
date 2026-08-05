@@ -505,6 +505,9 @@
                 disabled={deleteBusy}
                 onclick={confirmDelete}
                 class="bg-destructive text-white hover:bg-destructive/90">
+                {#if deleteBusy}
+                    <Icon icon="ph:spinner-gap-fill" class="animate-spin" />
+                {/if}
                 {deleteBusy ? 'Removing…' : 'Remove'}
             </AlertDialog.Action>
         </AlertDialog.Footer>

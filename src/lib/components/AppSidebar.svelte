@@ -162,14 +162,26 @@
                             })}
                                 <Sidebar.MenuButton
                                     {...props}
+                                    disabled={switchingWorkspace}
                                     class="font-heading font-semibold tracking-tight">
                                     <Icon
-                                        icon="ph:stack-fill"
-                                        class="hidden text-brand group-data-[collapsible=icon]:block" />
+                                        icon={switchingWorkspace
+                                            ? 'ph:spinner-gap-fill'
+                                            : 'ph:stack-fill'}
+                                        class="hidden text-brand group-data-[collapsible=icon]:block {switchingWorkspace
+                                            ? 'animate-spin'
+                                            : ''}" />
+                                    {#if switchingWorkspace}
+                                        <Icon
+                                            icon="ph:spinner-gap-fill"
+                                            class="shrink-0 animate-spin text-brand group-data-[collapsible=icon]:hidden" />
+                                    {/if}
                                     <span
                                         class="truncate opacity-100 transition-opacity delay-200 duration-200 group-data-[collapsible=icon]:opacity-0 group-data-[collapsible=icon]:delay-0">
-                                        {app.activeWorkspace?.name ??
-                                            'Select Workspace'}
+                                        {switchingWorkspace
+                                            ? 'Switching workspace…'
+                                            : (app.activeWorkspace?.name ??
+                                                'Select Workspace')}
                                     </span>
                                     <Icon
                                         icon="ph:caret-up-down-bold"
@@ -386,6 +398,9 @@
                 disabled={deleteBusy}
                 onclick={confirmDelete}
                 class="bg-destructive text-white hover:bg-destructive/90">
+                {#if deleteBusy}
+                    <Icon icon="ph:spinner-gap-fill" class="animate-spin" />
+                {/if}
                 {deleteBusy ? 'Deleting…' : 'Delete'}
             </AlertDialog.Action>
         </AlertDialog.Footer>
