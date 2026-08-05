@@ -548,11 +548,35 @@ pub fn source_copy_to_workspace(
     Ok(())
 }
 
+/// Delete every match_group left with fewer than 2 members -- a "duplicate"
+/// that no longer has anything to be a duplicate of. Not scoped to any one
+/// workspace/source: cheap globally via `idx_members_group`, and correct
+/// to run after *any* deletion that could have cascaded away members
+/// (currently just source deletion, but the check is unconditionally safe).
+fn sweep_orphaned_match_groups(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM match_groups
+         WHERE (SELECT COUNT(*) FROM match_members mm WHERE mm.group_id = match_groups.id) < 2",
+        [],
+    )?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn source_delete(db: State<Db>, source_id: i64) -> CmdResult<()> {
-    let conn = db.lock();
-    conn.execute("DELETE FROM sources WHERE id = ?1", params![source_id])
+    let mut conn = db.lock();
+    let tx = conn.transaction().map_err(map_err)?;
+    tx.execute("DELETE FROM sources WHERE id = ?1", params![source_id])
         .map_err(map_err)?;
+    // Cascading deletes just removed this source's nodes, and with them
+    // every match_members row that pointed at one (nodes -> match_members is
+    // ON DELETE CASCADE), which is what can produce an orphaned group here.
+    // Doing this now rather than waiting for the next dedup rerun (which
+    // does the same cleanup, but only for kind='hardlink', and only at the
+    // start of a pass) means the UI never shows a broken group in the
+    // meantime.
+    sweep_orphaned_match_groups(&tx).map_err(map_err)?;
+    tx.commit().map_err(map_err)?;
     Ok(())
 }
 
@@ -1183,5 +1207,107 @@ mod tests {
 
         let (_, hashing_enabled) = fetch_medium_and_hashing_enabled(&conn, source_id).unwrap();
         assert!(hashing_enabled);
+    }
+
+    #[test]
+    fn sweep_orphaned_match_groups_drops_groups_left_with_fewer_than_two_members() {
+        let (conn, ws) = seeded_conn();
+        conn.execute(
+            "INSERT INTO sources (workspace_id, kind, label, device_label, imported_at, total_size, file_count)
+             VALUES (?1, 'scan', 'disc-a', 'disc-a', 't', 0, 0)",
+            params![ws],
+        )
+        .unwrap();
+        let source_a = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO sources (workspace_id, kind, label, device_label, imported_at, total_size, file_count)
+             VALUES (?1, 'scan', 'disc-b', 'disc-b', 't', 0, 0)",
+            params![ws],
+        )
+        .unwrap();
+        let source_b = conn.last_insert_rowid();
+
+        let insert_node = |source_id: i64| -> i64 {
+            conn.execute(
+                "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size)
+                 VALUES (?1, NULL, 'a.txt', 'a.txt', 'file', 10)",
+                params![source_id],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        let node_a1 = insert_node(source_a);
+        let node_a2 = insert_node(source_a);
+        let node_b = insert_node(source_b);
+
+        // A cross-source duplicate group spanning source_a and source_b --
+        // orphaned once source_b (and node_b) is deleted.
+        conn.execute(
+            "INSERT INTO match_groups (workspace_id, kind, confidence, primary_signal, size)
+             VALUES (?1, 'file', 55, 'name', 10)",
+            params![ws],
+        )
+        .unwrap();
+        let cross_source_group = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO match_members (group_id, node_id, role) VALUES (?1, ?2, 'member')",
+            params![cross_source_group, node_a1],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO match_members (group_id, node_id, role) VALUES (?1, ?2, 'member')",
+            params![cross_source_group, node_b],
+        )
+        .unwrap();
+
+        // An internal duplicate group entirely within source_a -- unaffected
+        // by source_b's deletion, must survive the sweep.
+        conn.execute(
+            "INSERT INTO match_groups (workspace_id, kind, confidence, primary_signal, size)
+             VALUES (?1, 'file', 55, 'name', 10)",
+            params![ws],
+        )
+        .unwrap();
+        let internal_group = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO match_members (group_id, node_id, role) VALUES (?1, ?2, 'member')",
+            params![internal_group, node_a1],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO match_members (group_id, node_id, role) VALUES (?1, ?2, 'member')",
+            params![internal_group, node_a2],
+        )
+        .unwrap();
+
+        // Deleting source_b cascades away node_b and its match_members row,
+        // leaving `cross_source_group` with just node_a1 -- exactly the
+        // state `source_delete` produces in production.
+        conn.execute("DELETE FROM sources WHERE id = ?1", params![source_b])
+            .unwrap();
+
+        let member_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM match_members WHERE group_id = ?1",
+                params![cross_source_group],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(member_count, 1, "cascade should have removed node_b's row");
+
+        sweep_orphaned_match_groups(&conn).unwrap();
+
+        let remaining_group_ids: Vec<i64> = conn
+            .prepare("SELECT id FROM match_groups ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            remaining_group_ids,
+            vec![internal_group],
+            "the orphaned cross-source group must be swept away, the unaffected internal group must survive"
+        );
     }
 }
