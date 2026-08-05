@@ -9,6 +9,7 @@
         HashProgress,
         ScanConfig,
         ScanProgress,
+        Source,
         Workspace,
     } from '$lib/types';
     import { DUP_BADGE, DUP_BAR, dupLevel, formatBytes, pct } from '$lib/util';
@@ -122,20 +123,16 @@
 
     /** Runs after the scan-config dialog is confirmed: folder scan, then
      *  content hashing for the new source, then a fresh dedup pass -- one
-     *  task-tray entry tracks all three phases in sequence. */
+     *  task-tray entry tracks all three phases in sequence. If the user
+     *  cancels the hashing phase, the dedup pass is skipped -- they asked to
+     *  stop, not to dedupe against a still-partial hash set -- and the task
+     *  resolves as "paused" instead. */
     async function onScanConfirm(config: ScanConfig) {
         const path = scanPath;
         const label = scanLabel;
         const taskId = taskTray.start('scan', `Scanning “${label}”…`);
         const unlistenScan = await listen<ScanProgress>('scan:progress', e => {
             taskTray.update(taskId, { phase: 'scanning', current: e.payload.current });
-        });
-        const unlistenHash = await listen<HashProgress>('hash:progress', e => {
-            taskTray.update(taskId, {
-                phase: 'hashing',
-                current: e.payload.current,
-                total: e.payload.total,
-            });
         });
         const unlistenDedup = await listen<DedupProgress>('dedup:progress', e => {
             taskTray.update(taskId, {
@@ -144,6 +141,7 @@
                 total: e.payload.total,
             });
         });
+        let unlistenHash: (() => void) | null = null;
         try {
             if (!config.specLocked) {
                 if (app.activeWorkspaceId == null) {
@@ -159,8 +157,32 @@
                 config.mediumOverride,
                 config.filesystemOverride
             );
-            if (source && config.hashingEnabled) {
-                await app.runHashScan(source.id);
+            if (source) {
+                taskTray.update(taskId, { sourceId: source.id });
+                if (config.hashingEnabled) {
+                    // Set before the first `hash:progress` event (which only
+                    // arrives once the first batch commits) so the Cancel
+                    // button is available for the *entire* hashing phase,
+                    // not just from the second batch onward.
+                    taskTray.update(taskId, { phase: 'hashing', current: 0, total: 0 });
+                    unlistenHash = await listen<HashProgress>('hash:progress', e => {
+                        if (e.payload.source_id !== source.id) return;
+                        taskTray.update(taskId, {
+                            phase: 'hashing',
+                            current: e.payload.current,
+                            total: e.payload.total,
+                        });
+                    });
+                    const report = await app.runHashScan(source.id);
+                    if (report.cancelled) {
+                        taskTray.resolve(
+                            taskId,
+                            'success',
+                            `Scanned “${label}”. Hashing paused -- resume anytime.`
+                        );
+                        return;
+                    }
+                }
             }
             await app.runDedup();
             taskTray.resolve(taskId, 'success', `Scanned “${label}”.`);
@@ -168,9 +190,54 @@
             taskTray.resolve(taskId, 'error', String(err));
         } finally {
             unlistenScan();
-            unlistenHash();
+            unlistenHash?.();
             unlistenDedup();
         }
+    }
+
+    /** Resumes a previously paused/interrupted hash pass for an existing
+     *  source, driven by the "Resume" row on its card. Mirrors the hashing
+     *  slice of `onScanConfirm` without the scan/dedup phases around it. */
+    async function onResumeHashing(source: Source) {
+        const taskId = taskTray.start(
+            'scan',
+            `Resuming hashing “${source.device_label}”…`
+        );
+        taskTray.update(taskId, { sourceId: source.id, phase: 'hashing' });
+        const unlistenHash = await listen<HashProgress>('hash:progress', e => {
+            if (e.payload.source_id !== source.id) return;
+            taskTray.update(taskId, {
+                phase: 'hashing',
+                current: e.payload.current,
+                total: e.payload.total,
+            });
+        });
+        try {
+            const report = await app.runHashScan(source.id);
+            taskTray.resolve(
+                taskId,
+                'success',
+                report.cancelled
+                    ? `Hashing paused for “${source.device_label}”.`
+                    : `Hashing complete for “${source.device_label}”.`
+            );
+        } catch (err) {
+            taskTray.resolve(taskId, 'error', String(err));
+        } finally {
+            unlistenHash();
+        }
+    }
+
+    /** Suppresses a redundant "Resume" row while a live task-tray entry is
+     *  already showing progress (and a Cancel button) for this exact source. */
+    function isSourceHashingActive(sourceId: number): boolean {
+        return taskTray.tasks.some(
+            t =>
+                t.kind === 'scan' &&
+                t.status === 'running' &&
+                t.sourceId === sourceId &&
+                t.phase === 'hashing'
+        );
     }
 </script>
 
@@ -357,6 +424,22 @@
                                 </Badge>
                             {/if}
                         </div>
+                        {#if s.hashing_enabled && s.hashing_phase === 'hashing' && !isSourceHashingActive(s.id)}
+                            <div
+                                class="flex items-center justify-between gap-1 text-[0.7rem] text-muted-foreground">
+                                <span
+                                    >Hashing paused -- {s.hash_coverage_files.toLocaleString()}
+                                    hashed</span>
+                                <Button
+                                    size="sm"
+                                    variant="outline"
+                                    class="h-5 px-1.5 text-[0.65rem]"
+                                    disabled={taskTray.hasActive('scan')}
+                                    onclick={() => onResumeHashing(s)}>
+                                    Resume
+                                </Button>
+                            </div>
+                        {/if}
                     </li>
                 {/each}
             </ul>

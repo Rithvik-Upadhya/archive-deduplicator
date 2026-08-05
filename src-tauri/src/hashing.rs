@@ -7,9 +7,12 @@
 
 use crate::medium;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 fn now() -> String {
     chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
@@ -521,7 +524,19 @@ pub struct HashScanReport {
     pub hashed: usize,
     pub cached: usize,
     pub errors: Vec<(i64, String)>,
+    /// True if this call stopped early because its cancel flag was set,
+    /// rather than because every candidate was processed.
+    pub cancelled: bool,
 }
+
+/// Per-source cooperative cancellation flags for an in-progress
+/// `run_hash_scan` call, managed as Tauri state. A source only has an entry
+/// while a hash pass for it is actually running (`commands.rs::run_hash_scan`
+/// inserts one before calling `run_hash_scan` and removes it after), so
+/// `cancel_hash_scan` finding no entry for a source just means nothing is
+/// currently hashing it -- a harmless no-op, not an error.
+#[derive(Default)]
+pub struct HashCancelFlags(pub Mutex<HashMap<i64, Arc<AtomicBool>>>);
 
 const HASH_BATCH_SIZE: usize = 2000;
 
@@ -551,6 +566,7 @@ pub fn run_hash_scan(
     conn: &mut Connection,
     source_id: i64,
     queue_depth: usize,
+    cancel: &AtomicBool,
     mut on_progress: impl FnMut(u64, u64),
 ) -> rusqlite::Result<HashScanReport> {
     let (workspace_id, orig_root_path, hash_min_size, medium_kind_str, source_volume_id): (
@@ -600,8 +616,13 @@ pub fn run_hash_scan(
     let total = candidates.len() as u64;
     let mut hashed = 0usize;
     let mut errors = Vec::new();
+    let mut cancelled = false;
 
     while cursor < candidates.len() {
+        if cancel.load(Ordering::Relaxed) {
+            cancelled = true;
+            break;
+        }
         let end = (cursor + HASH_BATCH_SIZE).min(candidates.len());
         let batch = &candidates[cursor..end];
         let jobs: Vec<HashJob> = batch
@@ -669,11 +690,13 @@ pub fn run_hash_scan(
     }
 
     let tx = conn.transaction()?;
-    tx.execute(
-        "INSERT INTO scan_progress (source_id, phase, last_cursor, updated_at) VALUES (?1, 'done', ?2, ?3)
-         ON CONFLICT(source_id) DO UPDATE SET phase = 'done', last_cursor = excluded.last_cursor, updated_at = excluded.updated_at",
-        params![source_id, already_hashed + hashed as i64, now()],
-    )?;
+    if !cancelled {
+        tx.execute(
+            "INSERT INTO scan_progress (source_id, phase, last_cursor, updated_at) VALUES (?1, 'done', ?2, ?3)
+             ON CONFLICT(source_id) DO UPDATE SET phase = 'done', last_cursor = excluded.last_cursor, updated_at = excluded.updated_at",
+            params![source_id, already_hashed + hashed as i64, now()],
+        )?;
+    }
     if hashed > 0 || cached > 0 {
         lock_and_record_spec(&tx, workspace_id, &spec)?;
     }
@@ -683,6 +706,7 @@ pub fn run_hash_scan(
         hashed,
         cached,
         errors,
+        cancelled,
     })
 }
 
@@ -699,6 +723,26 @@ pub fn get_scan_progress(
         |r| Ok((r.get(0)?, r.get(1)?)),
     )
     .optional()
+}
+
+/// `scan_progress.phase` for every source in `workspace_id` that has one --
+/// `source_list` merges this in so the source-list UI can offer a "Resume
+/// hashing" affordance for any source whose phase is `"hashing"` (paused or
+/// interrupted) without a per-source round trip. Mirrors
+/// `rollup::duplicated_size_by_source`'s map-then-merge shape.
+pub fn hash_phase_by_source(
+    conn: &Connection,
+    workspace_id: i64,
+) -> rusqlite::Result<HashMap<i64, String>> {
+    let mut stmt = conn.prepare(
+        "SELECT sp.source_id, sp.phase FROM scan_progress sp
+         JOIN sources s ON s.id = sp.source_id
+         WHERE s.workspace_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![workspace_id], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+    })?;
+    rows.collect()
 }
 
 #[cfg(test)]
@@ -740,8 +784,8 @@ mod tests {
             assert_eq!(buf, content, "sequential={sequential}");
         }
 
-        let (digest, _, _) = hash_file(&path, content.len() as i64, &HashSpec::default_spec())
-            .unwrap();
+        let (digest, _, _) =
+            hash_file(&path, content.len() as i64, &HashSpec::default_spec()).unwrap();
         let expected = blake3::Hasher::new()
             .update(HashSpec::default_spec().spec_string().as_bytes())
             .update(&(content.len() as i64).to_le_bytes())
@@ -1058,7 +1102,8 @@ mod tests {
         let (_, locked_before) = get_hash_settings(&conn, ws).unwrap();
         assert!(!locked_before);
 
-        let report = run_hash_scan(&mut conn, source_id, 4, |_, _| {}).unwrap();
+        let report =
+            run_hash_scan(&mut conn, source_id, 4, &AtomicBool::new(false), |_, _| {}).unwrap();
         assert_eq!(report.hashed, 2);
         assert_eq!(report.cached, 0);
         assert!(report.errors.is_empty());
@@ -1111,7 +1156,8 @@ mod tests {
         .unwrap();
         let source_id = conn.last_insert_rowid();
 
-        let report = run_hash_scan(&mut conn, source_id, 4, |_, _| {}).unwrap();
+        let report =
+            run_hash_scan(&mut conn, source_id, 4, &AtomicBool::new(false), |_, _| {}).unwrap();
         assert_eq!(report.hashed, 0);
         assert_eq!(report.cached, 0);
     }
@@ -1140,7 +1186,8 @@ mod tests {
         // the wrong digest, making this a strong test of "zero content reads".
         std::fs::remove_file(dir.join("a.bin")).unwrap();
 
-        let report = run_hash_scan(&mut conn, source_id, 4, |_, _| {}).unwrap();
+        let report =
+            run_hash_scan(&mut conn, source_id, 4, &AtomicBool::new(false), |_, _| {}).unwrap();
         assert_eq!(report.hashed, 0, "no real hashing should have happened");
         assert_eq!(report.cached, 1);
         assert!(report.errors.is_empty());
@@ -1163,10 +1210,12 @@ mod tests {
             vec![("a.bin", b"aaa"), ("b.bin", b"bbb"), ("c.bin", b"ccc")];
         let (mut conn, _ws, source_id, dir) = setup_scan_source(&files);
 
-        let first = run_hash_scan(&mut conn, source_id, 4, |_, _| {}).unwrap();
+        let first =
+            run_hash_scan(&mut conn, source_id, 4, &AtomicBool::new(false), |_, _| {}).unwrap();
         assert_eq!(first.hashed, 3);
 
-        let second = run_hash_scan(&mut conn, source_id, 4, |_, _| {}).unwrap();
+        let second =
+            run_hash_scan(&mut conn, source_id, 4, &AtomicBool::new(false), |_, _| {}).unwrap();
         assert_eq!(
             second.hashed, 0,
             "nothing is left to hash once every candidate has a digest"
@@ -1188,7 +1237,8 @@ mod tests {
             vec![("a.bin", b"aaa"), ("b.bin", b"bbb"), ("c.bin", b"ccc")];
         let (mut conn, _ws, source_id, dir) = setup_scan_source(&files);
 
-        let first = run_hash_scan(&mut conn, source_id, 4, |_, _| {}).unwrap();
+        let first =
+            run_hash_scan(&mut conn, source_id, 4, &AtomicBool::new(false), |_, _| {}).unwrap();
         assert_eq!(first.hashed, 3);
 
         let b_id: i64 = conn
@@ -1216,7 +1266,8 @@ mod tests {
         // re-hash (already covered separately by `cache_hit_skips_content_read_entirely`).
         conn.execute("DELETE FROM hash_cache", []).unwrap();
 
-        let resumed = run_hash_scan(&mut conn, source_id, 4, |_, _| {}).unwrap();
+        let resumed =
+            run_hash_scan(&mut conn, source_id, 4, &AtomicBool::new(false), |_, _| {}).unwrap();
         assert_eq!(
             resumed.hashed, 1,
             "only the one file with a cleared digest should be re-hashed"
@@ -1244,6 +1295,76 @@ mod tests {
             new_content_hash.is_some(),
             "the cleared file must have a real digest again after the resumed call"
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cancelling_mid_run_stops_before_finishing_and_stays_resumable() {
+        // Enough files to span two HASH_BATCH_SIZE-sized batches, so the
+        // cancel flag (flipped from inside the first batch's on_progress
+        // callback, simulating a user clicking Cancel while it's running)
+        // has a second loop iteration in which to actually be observed.
+        let names: Vec<String> = (0..(HASH_BATCH_SIZE + 5))
+            .map(|i| format!("f{i:05}.bin"))
+            .collect();
+        let contents: Vec<[u8; 4]> = (0..(HASH_BATCH_SIZE + 5))
+            .map(|i| (i as u32).to_le_bytes())
+            .collect();
+        let files: Vec<(&str, &[u8])> = names
+            .iter()
+            .zip(contents.iter())
+            .map(|(n, c)| (n.as_str(), c.as_slice()))
+            .collect();
+        let (mut conn, _ws, source_id, dir) = setup_scan_source(&files);
+
+        let cancel = AtomicBool::new(false);
+        let mut batches_seen = 0u32;
+        let first = run_hash_scan(&mut conn, source_id, 4, &cancel, |_current, _total| {
+            batches_seen += 1;
+            if batches_seen == 1 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        })
+        .unwrap();
+
+        assert!(
+            first.cancelled,
+            "the run must report cancellation once the flag was observed"
+        );
+        assert_eq!(
+            first.hashed, HASH_BATCH_SIZE,
+            "only the already-committed first batch should be hashed before stopping"
+        );
+
+        let phase: String = conn
+            .query_row(
+                "SELECT phase FROM scan_progress WHERE source_id = ?1",
+                params![source_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            phase, "hashing",
+            "a cancelled run must leave scan_progress at 'hashing', never 'done'"
+        );
+
+        let resumed =
+            run_hash_scan(&mut conn, source_id, 4, &AtomicBool::new(false), |_, _| {}).unwrap();
+        assert_eq!(
+            resumed.hashed, 5,
+            "resuming must hash exactly what the cancelled run left behind"
+        );
+        assert!(!resumed.cancelled);
+
+        let phase_after: String = conn
+            .query_row(
+                "SELECT phase FROM scan_progress WHERE source_id = ?1",
+                params![source_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(phase_after, "done");
 
         std::fs::remove_dir_all(&dir).ok();
     }
