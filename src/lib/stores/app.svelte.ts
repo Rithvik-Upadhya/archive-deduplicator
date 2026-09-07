@@ -234,6 +234,11 @@ class AppState {
             s.id === sourceId ? { ...s, excluded } : s,
         );
         await this.setDedupStale(true);
+        // get_groups now hides any group without >=2 members on live sources,
+        // so re-query the pane immediately -- the excluded source's groups
+        // (including hardlink groups a re-run would not clear) drop out at
+        // once. The dup-% badges still wait for the nudged re-run.
+        await this.refreshGroups();
     }
 
     async copySourceToWorkspace(sourceId: number, targetWorkspaceId: number) {

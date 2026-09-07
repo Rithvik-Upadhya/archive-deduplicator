@@ -840,6 +840,32 @@ pub fn get_groups(
     limit: i64,
 ) -> CmdResult<GroupPage> {
     let conn = db.lock();
+    group_page(
+        &conn,
+        workspace_id,
+        min_confidence,
+        min_size,
+        kind,
+        sort,
+        offset,
+        limit,
+    )
+    .map_err(map_err)
+}
+
+/// Query one page of match groups. Split out from the `get_groups` command so it
+/// can be unit-tested without a Tauri `State<Db>`.
+#[allow(clippy::too_many_arguments)]
+fn group_page(
+    conn: &rusqlite::Connection,
+    workspace_id: i64,
+    min_confidence: f64,
+    min_size: i64,
+    kind: Option<String>,
+    sort: Option<String>,
+    offset: i64,
+    limit: i64,
+) -> rusqlite::Result<GroupPage> {
     let kind_filter = kind.unwrap_or_default();
     let order = match sort.as_deref() {
         Some("size") => "size DESC, confidence DESC",
@@ -847,24 +873,46 @@ pub fn get_groups(
     };
     let limit = if limit <= 0 { 100 } else { limit.min(500) };
 
-    let total: i64 = conn
-        .query_row(
+    // A group is only a real duplicate set while at least two of its members
+    // still sit on a live (non-excluded) source. Deleted sources drop out for
+    // free -- their `match_members` rows are already cascade-removed -- but an
+    // excluded source keeps all its nodes, so folder groups that were rebuilt
+    // before the exclusion, and the `kind='hardlink'` groups `links.rs` writes
+    // at import and never rebuilds, would otherwise linger here until (or even
+    // past) the next dedup run. Only pay for the correlated count when the
+    // workspace actually has an excluded source.
+    let has_excluded: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sources WHERE workspace_id = ?1 AND excluded = 1)",
+        params![workspace_id],
+        |r| r.get(0),
+    )?;
+    let live_member_guard = if has_excluded {
+        "AND (SELECT COUNT(*) FROM match_members mm
+              JOIN nodes n ON n.id = mm.node_id
+              JOIN sources s ON s.id = n.source_id
+              WHERE mm.group_id = match_groups.id AND s.excluded = 0) >= 2"
+    } else {
+        ""
+    };
+
+    let total: i64 = conn.query_row(
+        &format!(
             "SELECT COUNT(*) FROM match_groups
-             WHERE workspace_id = ?1 AND confidence >= ?2 AND size >= ?3
-               AND (?4 = '' OR kind = ?4)",
-            params![workspace_id, min_confidence, min_size, kind_filter],
-            |r| r.get(0),
-        )
-        .map_err(map_err)?;
+                 WHERE workspace_id = ?1 AND confidence >= ?2 AND size >= ?3
+                   AND (?4 = '' OR kind = ?4) {live_member_guard}"
+        ),
+        params![workspace_id, min_confidence, min_size, kind_filter],
+        |r| r.get(0),
+    )?;
 
     let sql = format!(
         "SELECT id, workspace_id, kind, confidence, primary_signal, size
          FROM match_groups
          WHERE workspace_id = ?1 AND confidence >= ?2 AND size >= ?3
-           AND (?4 = '' OR kind = ?4)
+           AND (?4 = '' OR kind = ?4) {live_member_guard}
          ORDER BY {order} LIMIT ?5 OFFSET ?6"
     );
-    let mut stmt = conn.prepare(&sql).map_err(map_err)?;
+    let mut stmt = conn.prepare(&sql)?;
     let mut groups = stmt
         .query_map(
             params![
@@ -886,10 +934,8 @@ pub fn get_groups(
                     members: Vec::new(),
                 })
             },
-        )
-        .map_err(map_err)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(map_err)?;
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
 
     // Batch-load members for this page of groups.
     if !groups.is_empty() {
@@ -899,10 +945,10 @@ pub fn get_groups(
              FROM match_members mm
              JOIN nodes n ON n.id = mm.node_id
              JOIN sources s ON s.id = n.source_id
-             WHERE mm.group_id IN ({})",
+             WHERE mm.group_id IN ({}) AND s.excluded = 0",
             ids.join(",")
         );
-        let mut mstmt = conn.prepare(&sql).map_err(map_err)?;
+        let mut mstmt = conn.prepare(&sql)?;
         let rows = mstmt
             .query_map([], |r| {
                 Ok((
@@ -918,10 +964,8 @@ pub fn get_groups(
                         mtime: r.get(8)?,
                     },
                 ))
-            })
-            .map_err(map_err)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(map_err)?;
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut by_group: HashMap<i64, Vec<MatchMember>> = HashMap::new();
         for (gid, m) in rows {
             by_group.entry(gid).or_default().push(m);
@@ -942,7 +986,12 @@ pub fn get_group_for_node(db: State<Db>, node_id: i64) -> CmdResult<Option<Match
     let group = optional_row(conn.query_row(
         "SELECT mg.id, mg.workspace_id, mg.kind, mg.confidence, mg.primary_signal, mg.size
              FROM match_members mm JOIN match_groups mg ON mg.id = mm.group_id
-             WHERE mm.node_id = ?1 ORDER BY mg.confidence DESC LIMIT 1",
+             WHERE mm.node_id = ?1
+               AND (SELECT COUNT(*) FROM match_members mm2
+                    JOIN nodes n ON n.id = mm2.node_id
+                    JOIN sources s ON s.id = n.source_id
+                    WHERE mm2.group_id = mg.id AND s.excluded = 0) >= 2
+             ORDER BY mg.confidence DESC LIMIT 1",
         params![node_id],
         |r| {
             Ok(MatchGroup {
@@ -963,7 +1012,7 @@ pub fn get_group_for_node(db: State<Db>, node_id: i64) -> CmdResult<Option<Match
              FROM match_members mm
              JOIN nodes n ON n.id = mm.node_id
              JOIN sources s ON s.id = n.source_id
-             WHERE mm.group_id = ?1",
+             WHERE mm.group_id = ?1 AND s.excluded = 0",
         )
         .map_err(map_err)?;
     g.members = mstmt
@@ -1462,7 +1511,10 @@ mod tests {
 
         let buckets = size_buckets_for_source(&conn, source_id).unwrap();
         assert_eq!(
-            buckets.iter().map(|b| b.bucket.as_str()).collect::<Vec<_>>(),
+            buckets
+                .iter()
+                .map(|b| b.bucket.as_str())
+                .collect::<Vec<_>>(),
             vec!["01. <1K", "02. 1K-4K"]
         );
         let small = &buckets[0];
@@ -1504,7 +1556,10 @@ mod tests {
 
         let buckets_a = size_buckets_for_source(&conn, source_a).unwrap();
         let total_a: i64 = buckets_a.iter().map(|b| b.files).sum();
-        assert_eq!(total_a, 1, "source_a's bucket table must not include source_b's files");
+        assert_eq!(
+            total_a, 1,
+            "source_a's bucket table must not include source_b's files"
+        );
     }
 
     #[test]
@@ -1569,6 +1624,107 @@ mod tests {
             get_hash_min_size(source_b),
             65536,
             "updating source_a must not touch source_b's default hash_min_size"
+        );
+    }
+
+    fn insert_node_returning(conn: &Connection, source_id: i64, name: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size)
+             VALUES (?1, NULL, ?2, ?2, 'file', 10)",
+            params![source_id, name],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn insert_group(conn: &Connection, ws: i64, kind: &str, members: &[i64]) -> i64 {
+        conn.execute(
+            "INSERT INTO match_groups (workspace_id, kind, confidence, primary_signal, size)
+             VALUES (?1, ?2, 100, 'test', 10)",
+            params![ws, kind],
+        )
+        .unwrap();
+        let gid = conn.last_insert_rowid();
+        for nid in members {
+            conn.execute(
+                "INSERT INTO match_members (group_id, node_id, role) VALUES (?1, ?2, 'member')",
+                params![gid, nid],
+            )
+            .unwrap();
+        }
+        gid
+    }
+
+    fn set_excluded(conn: &Connection, source_id: i64, excluded: bool) {
+        conn.execute(
+            "UPDATE sources SET excluded = ?1 WHERE id = ?2",
+            params![excluded as i64, source_id],
+        )
+        .unwrap();
+    }
+
+    fn page_all(conn: &Connection, ws: i64) -> GroupPage {
+        group_page(conn, ws, 0.0, 0, None, None, 0, 100).unwrap()
+    }
+
+    #[test]
+    fn get_groups_drops_a_group_once_it_lacks_two_live_members() {
+        let (conn, ws) = seeded_conn();
+        let src_x = insert_source(&conn, ws);
+        let src_y = insert_source(&conn, ws);
+        let src_z = insert_source(&conn, ws);
+
+        // A hardlink group entirely on src_x (the shape links.rs writes and a
+        // dedup re-run never rebuilds) ...
+        let x1 = insert_node_returning(&conn, src_x, "x1");
+        let x2 = insert_node_returning(&conn, src_x, "x2");
+        let hardlink_group = insert_group(&conn, ws, "hardlink", &[x1, x2]);
+        // ... and an unrelated cross-source file group on src_y + src_z.
+        let y1 = insert_node_returning(&conn, src_y, "shared");
+        let z1 = insert_node_returning(&conn, src_z, "shared");
+        let file_group = insert_group(&conn, ws, "file", &[y1, z1]);
+
+        // Nothing excluded: both groups visible.
+        let page = page_all(&conn, ws);
+        assert_eq!(page.total, 2);
+        let mut ids: Vec<i64> = page.groups.iter().map(|g| g.id).collect();
+        ids.sort();
+        assert_eq!(ids, vec![hardlink_group, file_group]);
+
+        // Excluding src_x leaves the hardlink group with 0 live members -- it
+        // must disappear from the pane (count included), the file group stays.
+        set_excluded(&conn, src_x, true);
+        let page = page_all(&conn, ws);
+        assert_eq!(page.total, 1);
+        assert_eq!(page.groups.len(), 1);
+        assert_eq!(page.groups[0].id, file_group);
+        assert_eq!(page.groups[0].members.len(), 2);
+
+        // Re-including src_x brings the hardlink group back untouched.
+        set_excluded(&conn, src_x, false);
+        assert_eq!(page_all(&conn, ws).total, 2);
+    }
+
+    #[test]
+    fn get_groups_keeps_a_mixed_group_but_hides_its_excluded_member() {
+        let (conn, ws) = seeded_conn();
+        let src_x = insert_source(&conn, ws);
+        let src_y = insert_source(&conn, ws);
+        let src_z = insert_source(&conn, ws);
+        let x1 = insert_node_returning(&conn, src_x, "shared");
+        let y1 = insert_node_returning(&conn, src_y, "shared");
+        let z1 = insert_node_returning(&conn, src_z, "shared");
+        let group = insert_group(&conn, ws, "file", &[x1, y1, z1]);
+
+        set_excluded(&conn, src_x, true);
+        let page = page_all(&conn, ws);
+        assert_eq!(page.total, 1, "2 live members still make a real group");
+        assert_eq!(page.groups[0].id, group);
+        let member_nodes: Vec<i64> = page.groups[0].members.iter().map(|m| m.node_id).collect();
+        assert_eq!(member_nodes.len(), 2);
+        assert!(
+            !member_nodes.contains(&x1),
+            "excluded-source member is hidden"
         );
     }
 }

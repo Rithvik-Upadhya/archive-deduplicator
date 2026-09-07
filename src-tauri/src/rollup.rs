@@ -224,7 +224,7 @@ pub fn compute_listing_hashes(conn: &mut Connection, workspace_id: i64) -> rusql
         let mut stmt = conn.prepare(
             "SELECT n.id, n.parent_id, n.name, n.depth FROM nodes n
              JOIN sources s ON s.id = n.source_id
-             WHERE s.workspace_id = ?1 AND n.type = 'directory'",
+             WHERE s.workspace_id = ?1 AND n.type = 'directory' AND s.excluded = 0",
         )?;
         stmt.query_map(params![workspace_id], |r| {
             Ok(DirNode {
@@ -242,7 +242,7 @@ pub fn compute_listing_hashes(conn: &mut Connection, workspace_id: i64) -> rusql
         let mut stmt = conn.prepare(
             "SELECT n.parent_id, n.name, n.size, n.mtime FROM nodes n
              JOIN sources s ON s.id = n.source_id
-             WHERE s.workspace_id = ?1 AND n.type = 'file' AND n.alias_of IS NULL",
+             WHERE s.workspace_id = ?1 AND n.type = 'file' AND n.alias_of IS NULL AND s.excluded = 0",
         )?;
         let rows = stmt.query_map(params![workspace_id], |r| {
             Ok((
@@ -274,7 +274,7 @@ pub fn compute_listing_hashes(conn: &mut Connection, workspace_id: i64) -> rusql
         let mut stmt = conn.prepare(
             "SELECT n.parent_id, n.name, n.link_target FROM nodes n
              JOIN sources s ON s.id = n.source_id
-             WHERE s.workspace_id = ?1 AND n.type = 'link'",
+             WHERE s.workspace_id = ?1 AND n.type = 'link' AND s.excluded = 0",
         )?;
         let rows = stmt.query_map(params![workspace_id], |r| {
             Ok((
@@ -449,10 +449,13 @@ pub(crate) fn load_file_locs(
     conn: &Connection,
     workspace_id: i64,
 ) -> rusqlite::Result<Vec<FileLoc>> {
+    // `s.excluded = 0` mirrors `dedup.rs::load_files`: an excluded source is out
+    // of the matcher entirely, so its files must not feed folder rollups or the
+    // `dup_annot` cache either.
     let mut stmt = conn.prepare(
         "SELECT n.id, n.source_id, n.parent_id, n.size FROM nodes n
          JOIN sources s ON s.id = n.source_id
-         WHERE s.workspace_id = ?1 AND n.type = 'file' AND n.alias_of IS NULL",
+         WHERE s.workspace_id = ?1 AND n.type = 'file' AND n.alias_of IS NULL AND s.excluded = 0",
     )?;
     let rows = stmt.query_map(params![workspace_id], |r| {
         Ok(FileLoc {
@@ -479,7 +482,7 @@ fn load_leaf_locs(conn: &Connection, workspace_id: i64) -> rusqlite::Result<Vec<
     let mut stmt = conn.prepare(
         "SELECT n.id, n.parent_id, n.type FROM nodes n
          JOIN sources s ON s.id = n.source_id
-         WHERE s.workspace_id = ?1 AND n.type IN ('file', 'link') AND n.alias_of IS NULL",
+         WHERE s.workspace_id = ?1 AND n.type IN ('file', 'link') AND n.alias_of IS NULL AND s.excluded = 0",
     )?;
     let rows = stmt.query_map(params![workspace_id], |r| {
         Ok(LeafLoc {
@@ -498,7 +501,7 @@ pub(crate) fn load_parent_of(
     let mut stmt = conn.prepare(
         "SELECT n.id, n.parent_id FROM nodes n
          JOIN sources s ON s.id = n.source_id
-         WHERE s.workspace_id = ?1 AND n.type = 'directory'",
+         WHERE s.workspace_id = ?1 AND n.type = 'directory' AND s.excluded = 0",
     )?;
     let rows = stmt.query_map(params![workspace_id], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
@@ -515,7 +518,7 @@ fn load_source_of(conn: &Connection, workspace_id: i64) -> rusqlite::Result<Hash
     let mut stmt = conn.prepare(
         "SELECT n.id, n.source_id FROM nodes n
          JOIN sources s ON s.id = n.source_id
-         WHERE s.workspace_id = ?1 AND n.type = 'directory'",
+         WHERE s.workspace_id = ?1 AND n.type = 'directory' AND s.excluded = 0",
     )?;
     let rows = stmt.query_map(params![workspace_id], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
@@ -532,7 +535,7 @@ fn load_dir_names(conn: &Connection, workspace_id: i64) -> rusqlite::Result<Hash
     let mut stmt = conn.prepare(
         "SELECT n.id, n.name FROM nodes n
          JOIN sources s ON s.id = n.source_id
-         WHERE s.workspace_id = ?1 AND n.type = 'directory'",
+         WHERE s.workspace_id = ?1 AND n.type = 'directory' AND s.excluded = 0",
     )?;
     let rows = stmt.query_map(params![workspace_id], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
@@ -817,7 +820,7 @@ pub(crate) fn rebuild_annotations_with(
         let mut stmt = conn.prepare(
             "SELECT n.id, n.subtree_size FROM nodes n
              JOIN sources s ON s.id = n.source_id
-             WHERE s.workspace_id = ?1 AND n.type = 'directory'",
+             WHERE s.workspace_id = ?1 AND n.type = 'directory' AND s.excluded = 0",
         )?;
         let rows = stmt.query_map(params![workspace_id], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
@@ -1458,6 +1461,68 @@ mod tests {
             HashSet::from([photos_a, photos_b]),
             "the group must be on the top-level `photos` dirs, not the nested `2024` dirs"
         );
+    }
+
+    #[test]
+    fn excluded_source_is_left_out_of_listing_hash_clustering() {
+        // Two structurally identical directories, one on an excluded source:
+        // the "needs >= 2 distinct sources" gate must not be satisfied by the
+        // hidden source, so no listing group is emitted and the hidden dir
+        // gets no listing_hash written.
+        let (mut conn, ws, src_a, src_b) = setup();
+        let dir_a = insert_node(&conn, src_a, None, "photos", "directory", 0);
+        let dir_b = insert_node(&conn, src_b, None, "photos", "directory", 0);
+        insert_file_with_mtime(
+            &conn,
+            src_a,
+            Some(dir_a),
+            "a.jpg",
+            100,
+            Some("2024-01-01_10:00:00"),
+        );
+        insert_file_with_mtime(
+            &conn,
+            src_b,
+            Some(dir_b),
+            "a.jpg",
+            100,
+            Some("2024-01-01_10:00:00"),
+        );
+        conn.execute(
+            "UPDATE sources SET excluded = 1 WHERE id = ?1",
+            params![src_a],
+        )
+        .unwrap();
+
+        let count = compute_listing_hashes(&mut conn, ws).unwrap();
+        assert_eq!(
+            count, 0,
+            "the excluded source must not count toward the 2-source gate"
+        );
+
+        let groups: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM match_members mm
+                 JOIN match_groups mg ON mg.id = mm.group_id
+                 JOIN nodes n ON n.id = mm.node_id
+                 WHERE mg.workspace_id = ?1 AND n.source_id = ?2",
+                params![ws, src_a],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            groups, 0,
+            "no folder group may reference an excluded source's node"
+        );
+
+        let hash_a: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT listing_hash FROM nodes WHERE id = ?1",
+                params![dir_a],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(hash_a.is_none(), "excluded dir keeps its NULL listing_hash");
     }
 
     #[test]

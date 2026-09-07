@@ -113,8 +113,7 @@ fn read_dir_ex_inner(h: HANDLE, refs_volume: bool) -> io::Result<Vec<WinEntry>> 
 
     let mut class = restart_class;
     loop {
-        let ok =
-            unsafe { GetFileInformationByHandleEx(h, class, ptr as *mut c_void, cap as u32) };
+        let ok = unsafe { GetFileInformationByHandleEx(h, class, ptr as *mut c_void, cap as u32) };
         if ok == 0 {
             let err = unsafe { GetLastError() };
             if err == ERROR_NO_MORE_FILES {
@@ -270,7 +269,11 @@ mod tests {
         }
 
         let entries = read_dir_ex(&dir, false).unwrap();
-        assert_eq!(entries.len(), 500, "every entry across all buffer pages must be returned");
+        assert_eq!(
+            entries.len(),
+            500,
+            "every entry across all buffer pages must be returned"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }

@@ -1029,6 +1029,86 @@ mod tests {
     }
 
     #[test]
+    fn excluded_source_is_left_out_of_folder_rollup() {
+        // Regression: `excluded_source_is_left_out_of_matching` above never
+        // exercises the folder rollup because `parse_tree_json` skips the root
+        // dir, leaving its fixture with no directory nodes at all. Here each
+        // source has a real `photos/` subdirectory, so both the byte-overlap
+        // and listing-hash folder detectors would fire -- unless the excluded
+        // source is filtered out of the rollup's node scans.
+        let mut conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (name, created_at, updated_at) VALUES ('w', 't', 't')",
+            [],
+        )
+        .unwrap();
+        let ws = conn.last_insert_rowid();
+
+        let tree = r#"[{"type":"directory","name":"/vol","dev":10,"contents":[
+            {"type":"directory","name":"photos","dev":10,"contents":[
+                {"type":"file","name":"p.jpg","inode":2,"dev":10,"size":500000,"time":"2024-01-01_10:00:00"}
+            ]}
+        ]}]"#;
+
+        let mut source_id = |label: &str, dev: i64| -> i64 {
+            let flat =
+                parse::parse_tree_json(&tree.replace("\"dev\":10", &format!("\"dev\":{dev}")))
+                    .unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute(
+                "INSERT INTO sources (workspace_id, kind, label, device_label, imported_at, total_size, file_count)
+                 VALUES (?1, 'json', ?2, ?2, 't', ?3, ?4)",
+                params![ws, label, flat.total_size, flat.file_count],
+            )
+            .unwrap();
+            let sid = tx.last_insert_rowid();
+            parse::insert_nodes(&tx, sid, &flat).unwrap();
+            tx.commit().unwrap();
+            sid
+        };
+        let src_a = source_id("disc-a", 10);
+        let _src_b = source_id("disc-b", 20);
+
+        conn.execute(
+            "UPDATE sources SET excluded = 1 WHERE id = ?1",
+            params![src_a],
+        )
+        .unwrap();
+
+        run_with_progress(&mut conn, ws, DedupParams::default(), |_, _, _| {}).unwrap();
+
+        let folder_members_touching_a: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM match_members mm
+                 JOIN match_groups mg ON mg.id = mm.group_id
+                 JOIN nodes n ON n.id = mm.node_id
+                 WHERE mg.workspace_id = ?1 AND mg.kind = 'folder' AND n.source_id = ?2",
+                params![ws, src_a],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            folder_members_touching_a, 0,
+            "no folder group (byte-overlap or listing) may include the excluded source"
+        );
+
+        let annot_rows_for_a: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dup_annot d
+                 JOIN nodes n ON n.id = d.node_id
+                 WHERE n.source_id = ?1",
+                params![src_a],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            annot_rows_for_a, 0,
+            "the excluded source's nodes must carry no dup_annot rows after a re-run"
+        );
+    }
+
+    #[test]
     fn veto_extension_mismatch_blocks_an_otherwise_strong_match() {
         // Same size, same stem, same mtime -- everything the old scored
         // model would have rewarded -- but different extensions.

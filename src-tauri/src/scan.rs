@@ -414,7 +414,11 @@ mod tests {
         assert_eq!(link.node_type, "link");
         assert_eq!(link.link_target.as_deref(), Some("real.txt"));
 
-        let dangling = flat.nodes.iter().find(|n| n.name == "dangling.txt").unwrap();
+        let dangling = flat
+            .nodes
+            .iter()
+            .find(|n| n.name == "dangling.txt")
+            .unwrap();
         assert_eq!(
             dangling.link_target.as_deref(),
             Some("does-not-exist.txt"),
@@ -457,12 +461,26 @@ mod windows_tests {
         let mut fast_keys: Vec<(String, String, i64, Option<String>)> = fast
             .nodes
             .iter()
-            .map(|n| (n.rel_path.clone(), n.node_type.clone(), n.size, n.mtime.clone()))
+            .map(|n| {
+                (
+                    n.rel_path.clone(),
+                    n.node_type.clone(),
+                    n.size,
+                    n.mtime.clone(),
+                )
+            })
             .collect();
         let mut walk_keys: Vec<(String, String, i64, Option<String>)> = walk
             .nodes
             .iter()
-            .map(|n| (n.rel_path.clone(), n.node_type.clone(), n.size, n.mtime.clone()))
+            .map(|n| {
+                (
+                    n.rel_path.clone(),
+                    n.node_type.clone(),
+                    n.size,
+                    n.mtime.clone(),
+                )
+            })
             .collect();
         fast_keys.sort();
         walk_keys.sort();
