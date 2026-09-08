@@ -493,8 +493,10 @@ pub(crate) fn load_file_locs(
 
 /// A file or symlink used for directory-level leaf-count rollups. Distinct
 /// from `FileLoc`, which is byte-weighted and file-only -- this counts every
-/// leaf (files *and* symlinks) so a directory containing a symlink is never
-/// mistaken for "fully duplicated" just because all its *files* are.
+/// leaf (files *and* symlinks), so a directory counts as fully duplicated only
+/// when its symlinks are accounted for too, not merely all its *files*. Since
+/// symlinks are matchable (`dedup.rs`'s `Tier::S`), that is now a real
+/// question rather than a guaranteed "no".
 struct LeafLoc {
     node_id: i64,
     parent_id: Option<i64>,
@@ -773,6 +775,21 @@ pub(crate) fn rebuild_annotations_with(
         }
     }
 
+    // Symlinks are matched now (`dedup.rs` groups them on `(name, target)` at
+    // `Tier::S`), so they reach the rollups below. They behave like aliases in
+    // the one way that matters here: each is a *name* the user has to deal
+    // with, but holds no content bytes of its own -- `subtree_size` excludes
+    // them, so anything subtracted from `subtree_size` must exclude them too.
+    let symlinks: Vec<(i64, Option<i64>)> = {
+        let mut stmt = conn.prepare(
+            "SELECT n.id, n.parent_id FROM nodes n
+             JOIN sources s ON s.id = n.source_id
+             WHERE s.workspace_id = ?1 AND n.type = 'link' AND s.excluded = 0",
+        )?;
+        let rows = stmt.query_map(params![workspace_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
     // Roll duplicated bytes up the ancestor chain.
     let mut dir_dup: HashMap<i64, i64> = HashMap::new();
     for f in files {
@@ -798,14 +815,16 @@ pub(crate) fn rebuild_annotations_with(
     }
 
     // Directory-level cross_dup is a leaf-*count* rollup (not byte-weighted
-    // like dup_pct above): a directory is only fully cross-dup when every
-    // name in its subtree -- file, symlink or hardlink alias -- is a cross_dup
-    // file. Symlinks are never in cross_dup_files (dedup matching only loads
-    // type='file' rows), so a directory holding even one symlink can never
-    // read as fully cross-dup, keeping it visible under the filter. Aliases,
-    // by contrast, now inherit their canonical's flag, so a directory holding
-    // only hidden canonicals and their aliases correctly reads as fully
-    // cross-dup and disappears whole.
+    // like dup_pct above): a directory is only fully cross-dup when every name
+    // in its subtree -- file, symlink or hardlink alias alike -- is hidden.
+    //
+    // All three can be hidden now, which was not always true. Symlinks used to
+    // be absent from `cross_dup_files` entirely (the matcher loaded only
+    // `type='file'` rows), so a directory holding even one stayed visible under
+    // the filter no matter what -- presented as exclusive-to-this-device on the
+    // strength of a node the matcher had never examined. Aliases inherit their
+    // canonical's flag for the same reason. A directory whose every name is
+    // accounted for now correctly disappears whole.
     let leaves = load_leaf_locs(conn, workspace_id)?;
     let mut dir_leaf_total: HashMap<i64, i64> = HashMap::new();
     let mut dir_leaf_cross: HashMap<i64, i64> = HashMap::new();
@@ -813,7 +832,9 @@ pub(crate) fn rebuild_annotations_with(
         let mut cur = leaf.parent_id;
         while let Some(dir) = cur {
             *dir_leaf_total.entry(dir).or_insert(0) += 1;
-            if leaf.is_file && cross_dup_files.contains(&leaf.node_id) {
+            // No `leaf.is_file` restriction: a symlink duplicated on another
+            // source is just as hidden by the funnel as a file is.
+            if cross_dup_files.contains(&leaf.node_id) {
                 *dir_leaf_cross.entry(dir).or_insert(0) += 1;
             }
             cur = parent_of.get(&dir).copied().flatten();
@@ -866,6 +887,18 @@ pub(crate) fn rebuild_annotations_with(
     // bytes that were never in the total. Do not "fix" this into symmetry.
     for (alias_id, _, parent_id) in &aliases {
         if !cross_dup_files.contains(alias_id) {
+            continue;
+        }
+        let mut cur = *parent_id;
+        while let Some(dir) = cur {
+            *dir_cross_count.entry(dir).or_insert(0) += 1;
+            cur = parent_of.get(&dir).copied().flatten();
+        }
+    }
+    // Symlinks, for the same reason and with the same asymmetry: a hidden
+    // symlink is one fewer name to deal with, and zero fewer bytes.
+    for (node_id, parent_id) in &symlinks {
+        if !cross_dup_files.contains(node_id) {
             continue;
         }
         let mut cur = *parent_id;
@@ -1169,7 +1202,12 @@ mod tests {
     }
 
     #[test]
-    fn symlink_keeps_directory_visible_and_is_never_annotated() {
+    fn unmatched_symlink_keeps_its_directory_visible() {
+        // Every *file* here is duplicated elsewhere, but the symlink is not
+        // matched, so the directory still holds something exclusive and must
+        // stay visible under the funnel. This used to hold trivially --
+        // symlinks could never be matched at all -- and now holds for the
+        // right reason: this particular symlink has no partner.
         let (mut conn, ws, src_a, src_b) = setup();
         let dir = insert_node(&conn, src_a, None, "photos", "directory", 0);
         let dup = insert_node(&conn, src_a, Some(dir), "shared.jpg", "file", 100);
@@ -1180,7 +1218,37 @@ mod tests {
         rebuild_annotations(&mut conn, ws).unwrap();
 
         assert_eq!(annot(&conn, dir).unwrap().2, 0, "symlink keeps dir visible");
-        assert!(annot(&conn, link).is_none(), "symlinks are never annotated");
+        assert!(
+            annot(&conn, link).is_none(),
+            "an unmatched symlink gets no annotation"
+        );
+    }
+
+    #[test]
+    fn cross_dup_symlink_bumps_the_count_but_not_the_size() {
+        // A matched symlink is a name the funnel hides, so it must decrement
+        // the visible count -- but it holds no content bytes of its own and is
+        // absent from `subtree_size`, so adding its `size` (the target-path
+        // length) to `cross_dup_size` would subtract bytes that were never in
+        // the total. Same asymmetry as a hardlink alias.
+        let (mut conn, ws, src_a, src_b) = setup();
+        let dir = insert_node(&conn, src_a, None, "photos", "directory", 0);
+        let dup = insert_node(&conn, src_a, Some(dir), "shared.jpg", "file", 100);
+        let other = insert_node(&conn, src_b, None, "shared.jpg", "file", 100);
+        insert_file_group(&conn, ws, &[dup, other]);
+        let link = insert_node(&conn, src_a, Some(dir), "link.jpg", "link", 40);
+        let link_b = insert_node(&conn, src_b, None, "link.jpg", "link", 40);
+        insert_file_group(&conn, ws, &[link, link_b]);
+
+        rebuild_annotations(&mut conn, ws).unwrap();
+
+        let (_, _, cross_dup, cross_size, cross_count) = annot(&conn, dir).unwrap();
+        assert_eq!(cross_count, 2, "the file and the symlink are both hidden");
+        assert_eq!(cross_size, 100, "only the file contributed bytes");
+        assert_eq!(
+            cross_dup, 1,
+            "every leaf is accounted for, so the directory disappears whole"
+        );
     }
 
     #[test]

@@ -19,6 +19,18 @@ struct FileRow {
     content_hash: Option<Vec<u8>>,
     hash_kind: Option<String>,
     hash_spec: Option<String>,
+    /// `nodes.type` -- `"file"` or `"link"`. Symlinks are matched on their
+    /// target rather than by any metadata tier, so the two never mix.
+    node_type: String,
+    /// `nodes.link_target`, present only for symlinks. This *is* a symlink's
+    /// content, so it plays the role a digest plays for a regular file.
+    link_target: Option<String>,
+}
+
+impl FileRow {
+    fn is_symlink(&self) -> bool {
+        self.node_type == "link"
+    }
 }
 
 /// Whether `a` and `b` are both hash-confirmed and have been *proven*
@@ -82,6 +94,11 @@ enum Tier {
     D,
     /// Size + same parent-folder name + some mtime support, names differ.
     E,
+    /// Two symlinks with the same name pointing at the same target. A
+    /// symlink's target *is* its content, so a match here is as confirmed as
+    /// a full-content hash -- there is nothing left about the node that could
+    /// differ. Scored alongside `A` for that reason, not as a metadata tier.
+    S,
 }
 
 impl Tier {
@@ -92,6 +109,7 @@ impl Tier {
             Tier::C => 70.0,
             Tier::D => 55.0,
             Tier::E => 45.0,
+            Tier::S => 100.0,
         }
     }
     fn signal(self) -> &'static str {
@@ -101,6 +119,7 @@ impl Tier {
             Tier::C => "name+mtime",
             Tier::D => "name",
             Tier::E => "parent+mtime",
+            Tier::S => "symlink-target",
         }
     }
 }
@@ -376,9 +395,22 @@ fn resolve_groups_in_bucket(
         }
 
         // Tier E: same parent-folder name, names differ, some mtime support.
+        //
+        // Zero-byte files are deliberately kept out. Tiers C/D above still
+        // take them -- "same name, empty on both sources" is real evidence --
+        // but tier E's claim is "the names differ, yet these are the same
+        // file", and for two empty files that is coincidence rather than
+        // evidence: there is no content to agree. This is what survives of
+        // the old blanket zero-byte veto.
+        //
+        // It also keeps the worst possible input away from the clique search.
+        // Every empty file in the workspace shares one size bucket and one
+        // extension sub-bucket, and empty files created by the same process
+        // tend to share both a parent-folder name and an mtime -- a dense
+        // graph of exactly the shape `MAX_CLIQUE_CANDIDATES` exists to bound.
         let mut by_parent: HashMap<String, Vec<usize>> = HashMap::new();
         for &i in &sub {
-            if files[i].parent_name.is_empty() {
+            if files[i].parent_name.is_empty() || files[i].size == 0 {
                 continue;
             }
             by_parent
@@ -467,19 +499,27 @@ fn group_is_hash_redundant(hash_group_of: &[Option<usize>], group: &[usize]) -> 
 ///
 /// The extension veto is applied by sub-bucketing on it (see
 /// `resolve_groups_in_bucket`) and scoped to the metadata tiers (C-E) only --
-/// tiers A and B rest on content evidence, which supersedes every metadata
-/// veto except the structural exclusions (alias, symlink) applied upstream in
-/// `load_files` (§9.1 of the design spec: "Vetoes apply to the metadata tiers
-/// (C-E). Tiers A and B rest on content evidence, which supersedes every
-/// metadata veto except the structural exclusions (alias, symlink) applied
-/// upstream in load_files."). Identical bytes are identical bytes: the
-/// extension veto exists to stop metadata coincidence (same size, same stem,
-/// different container), and that reasoning has no force once content is
-/// verified -- a `clip.mov` / `clip.mp4` pair with the same digest is a true
-/// duplicate the user should see. A file's own veto conditions -- being a
-/// hardlink alias or a symlink -- never apply here at all, because
-/// `load_files` excludes both from the candidate pool entirely (aliases via
-/// `alias_of IS NULL`, symlinks via `type = 'file'`). A file may legitimately
+/// tiers A, B and S rest on content evidence, which supersedes every metadata
+/// veto. Identical bytes are identical bytes: the extension veto exists to stop
+/// metadata coincidence (same size, same stem, different container), and that
+/// reasoning has no force once content is verified -- a `clip.mov` /
+/// `clip.mp4` pair with the same digest is a true duplicate the user should
+/// see.
+///
+/// Of the structural exclusions `load_files` used to apply, only the hardlink
+/// alias one remains (`alias_of IS NULL`); the symlink exclusion is gone.
+/// Excluding symlinks meant they could never join a group, never be
+/// `cross_dup`, and so were reported as exclusive to their device no matter
+/// how many sources held the identical link -- the exclusive-to-this-device
+/// filter asserting something untrue about every symlink in the workspace. A
+/// symlink now carries its own veto instead of being vetoed wholesale: it is
+/// grouped on `(name, link_target)` at `Tier::S`, so a differing target simply
+/// fails to match. The same reasoning retired the blanket zero-byte veto --
+/// see the size bucketing below and tier E's candidate filter. Both categories
+/// are now gated only by `min_size_bytes`, which is the user's own
+/// processing-time budget rather than a rule the matcher imposes on them.
+///
+/// A file may legitimately
 /// end up in more than one persisted group across tiers (e.g. a tier-D match
 /// on exact name with one partner, and a separate tier-E match on parent
 /// folder with a different partner) -- this reflects two independent pieces
@@ -520,6 +560,38 @@ pub fn run_with_progress(
     // A group promotes to A only if every member was *fully* hashed; any
     // sampled member downgrades the whole group to B, since sampling is the
     // weaker of the two forms of content evidence actually present.
+    //
+    // Symlinks are grouped here too, and for the same structural reason: a
+    // symlink's whole content is its target, so `(name, target)` equality is
+    // an equivalence relation exactly as digest equality is. Expressing the
+    // target veto as the grouping *key* (rather than a separate check) mirrors
+    // how the extension veto is expressed by sub-bucketing, and it makes the
+    // type veto structural for free -- a symlink never reaches the metadata
+    // size-buckets below, so it can never be grouped with a same-sized regular
+    // file, and two same-named symlinks pointing at different targets simply
+    // land under different keys.
+    let mut by_symlink: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    for (i, f) in files.iter().enumerate() {
+        // Symlinks obey `min_size_bytes` like everything else: the threshold is
+        // the user's processing-time budget, and exempting a category from it
+        // would spend time they asked not to spend. A symlink's `size` is its
+        // target-path length, so at the default 64 KiB none participate.
+        if !f.is_symlink() || f.size < params.min_size_bytes {
+            continue;
+        }
+        if let Some(target) = &f.link_target {
+            by_symlink
+                .entry((f.name.clone(), target.clone()))
+                .or_default()
+                .push(i);
+        }
+    }
+    for group in by_symlink.into_values() {
+        if group.len() >= 2 {
+            groups.push((Tier::S, group));
+        }
+    }
+
     let mut by_hash: HashMap<(i64, String, Vec<u8>), Vec<usize>> = HashMap::new();
     for (i, f) in files.iter().enumerate() {
         if let (Some(hash), Some(spec)) = (&f.content_hash, &f.hash_spec) {
@@ -579,13 +651,20 @@ pub fn run_with_progress(
     // files must never co-occur in a metadata group, and a group whose
     // members all sit in one hash group is dropped as redundant.
     //
-    // Bucket file indices by size. Files below the tunable minimum, and
-    // zero-byte files unconditionally (an absolute veto, not merely a
-    // penalty: any two empty files look identical regardless of every other
-    // signal), are excluded entirely.
+    // Bucket file indices by size. `min_size_bytes` is the only gate: it is a
+    // processing-time budget the user sets, knowingly trading completeness for
+    // speed, so a duplicate missed because of it is their decision. A category
+    // excluded by a hardcoded rule instead is one the user never chose and
+    // cannot see -- which is what made the exclusive-to-this-device filter
+    // assert that every symlink and every empty file was unique.
+    //
+    // Zero-byte files are therefore admitted (at `min_size_bytes = 0`, since
+    // nothing else can clear a positive threshold), but only as far as tiers
+    // C/D -- see the tier E candidate filter in `resolve_groups_in_bucket`.
+    // Symlinks are excluded here because they were already grouped above.
     let mut by_size: HashMap<i64, Vec<usize>> = HashMap::new();
     for (i, f) in files.iter().enumerate() {
-        if f.size < params.min_size_bytes || f.size == 0 {
+        if f.size < params.min_size_bytes || f.is_symlink() {
             continue;
         }
         by_size.entry(f.size).or_default().push(i);
@@ -713,10 +792,12 @@ fn load_files(
     parent_names: &HashMap<i64, String>,
 ) -> rusqlite::Result<Vec<FileRow>> {
     let mut stmt = conn.prepare(
-        "SELECT n.id, n.parent_id, n.name, n.size, n.mtime, n.content_hash, n.hash_kind, n.hash_spec
+        "SELECT n.id, n.parent_id, n.name, n.size, n.mtime, n.content_hash, n.hash_kind, n.hash_spec,
+                n.type, n.link_target
          FROM nodes n
          JOIN sources s ON s.id = n.source_id
-         WHERE s.workspace_id = ?1 AND n.type = 'file' AND s.excluded = 0 AND n.alias_of IS NULL",
+         WHERE s.workspace_id = ?1 AND n.type IN ('file', 'link')
+           AND s.excluded = 0 AND n.alias_of IS NULL",
     )?;
     let rows = stmt.query_map(params![workspace_id], |r| {
         let parent_id: Option<i64> = r.get(1)?;
@@ -730,6 +811,8 @@ fn load_files(
             content_hash: r.get(5)?,
             hash_kind: r.get(6)?,
             hash_spec: r.get(7)?,
+            node_type: r.get(8)?,
+            link_target: r.get(9)?,
         })
     })?;
     let mut files = Vec::new();
@@ -1116,6 +1199,196 @@ mod tests {
         assert_eq!(
             annot_rows_for_a, 0,
             "the excluded source's nodes must carry no dup_annot rows after a re-run"
+        );
+    }
+
+    /// Two sources, each holding the rows given as
+    /// `(name, type, size, link_target, mtime)`, all under a directory named
+    /// `holder` so `parent_name` is non-empty and tier E is actually
+    /// reachable. Needed because `setup_files` builds one source of plain
+    /// files, while symlink matching and the zero-byte rules are both about
+    /// cross-source pairs of non-plain nodes.
+    fn setup_typed(rows: &[(&str, &str, i64, Option<&str>, Option<&str>)]) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (name, created_at, updated_at) VALUES ('w', 't', 't')",
+            [],
+        )
+        .unwrap();
+        let ws = conn.last_insert_rowid();
+        for label in ["a", "b"] {
+            conn.execute(
+                "INSERT INTO sources (workspace_id, kind, label, device_label, imported_at, total_size, file_count)
+                 VALUES (?1, 'json', ?2, ?2, 't', 0, 0)",
+                params![ws, label],
+            )
+            .unwrap();
+            let source_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size)
+                 VALUES (?1, NULL, 'holder', 'holder', 'directory', 0)",
+                params![source_id],
+            )
+            .unwrap();
+            let dir_id = conn.last_insert_rowid();
+            for (name, node_type, size, target, mtime) in rows {
+                conn.execute(
+                    "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, link_target, mtime)
+                     VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7)",
+                    params![source_id, dir_id, name, node_type, size, target, mtime],
+                )
+                .unwrap();
+            }
+        }
+        conn
+    }
+
+    fn params_min_size(min_size_bytes: i64) -> DedupParams {
+        DedupParams {
+            min_size_bytes,
+            ..DedupParams::default()
+        }
+    }
+
+    /// Every persisted file-group, as a set of the `nodes.type` values of its
+    /// members -- so a test can assert that no group ever mixes a symlink with
+    /// a regular file.
+    fn group_member_types(conn: &Connection, ws: i64) -> Vec<Vec<String>> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT mm.group_id, n.type FROM match_members mm
+                 JOIN match_groups mg ON mg.id = mm.group_id
+                 JOIN nodes n ON n.id = mm.node_id
+                 WHERE mg.workspace_id = ?1 AND mg.kind = 'file'
+                 ORDER BY mm.group_id",
+            )
+            .unwrap();
+        let rows: Vec<(i64, String)> = stmt
+            .query_map(params![ws], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let mut by_group: HashMap<i64, Vec<String>> = HashMap::new();
+        for (gid, t) in rows {
+            by_group.entry(gid).or_default().push(t);
+        }
+        by_group.into_values().collect()
+    }
+
+    #[test]
+    fn symlinks_matching_on_name_and_target_are_fully_confident() {
+        // A symlink's target is its entire content, so a name+target match
+        // leaves nothing about the node that could still differ -- the same
+        // standing as a full-content hash, not a metadata guess.
+        let mut conn = setup_typed(&[("svelte", "link", 40, Some(".pnpm/svelte@5/x"), None)]);
+        run_with_progress(&mut conn, 1, params_min_size(0), |_, _, _| {}).unwrap();
+        assert_eq!(group_rows(&conn, 1), vec![(100.0, "symlink-target".into())]);
+    }
+
+    #[test]
+    fn symlinks_with_the_same_name_but_different_targets_do_not_match() {
+        // The shape a pnpm store actually produces: two links both named
+        // `svelte`, one per source, pointing at different packages. The two
+        // targets are the same *length*, so a size bucket would have put them
+        // together -- only comparing the target itself separates them.
+        let a = ".pnpm/svelte@5.56/node_modules/sv";
+        let b = ".pnpm/iconify@5.2/node_modules/sv";
+        assert_eq!(a.len(), b.len(), "fixture must share a size bucket");
+
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (name, created_at, updated_at) VALUES ('w', 't', 't')",
+            [],
+        )
+        .unwrap();
+        let ws = conn.last_insert_rowid();
+        for (label, target) in [("a", a), ("b", b)] {
+            conn.execute(
+                "INSERT INTO sources (workspace_id, kind, label, device_label, imported_at, total_size, file_count)
+                 VALUES (?1, 'json', ?2, ?2, 't', 0, 0)",
+                params![ws, label],
+            )
+            .unwrap();
+            let sid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, link_target)
+                 VALUES (?1, NULL, 'svelte', 'svelte', 'link', ?2, ?3)",
+                params![sid, target.len() as i64, target],
+            )
+            .unwrap();
+        }
+        let mut conn = conn;
+        run_with_progress(&mut conn, ws, params_min_size(0), |_, _, _| {}).unwrap();
+        assert!(
+            group_rows(&conn, ws).is_empty(),
+            "a differing target is a veto -- these are not the same link"
+        );
+    }
+
+    #[test]
+    fn a_symlink_never_groups_with_a_same_size_file() {
+        // The type veto is structural rather than a check: symlinks are
+        // grouped before the size buckets and never enter them, so a
+        // same-named same-sized file cannot be pulled in by a metadata tier.
+        // The two plain files here *do* legitimately match each other -- what
+        // must never happen is a group holding one of each.
+        let mut conn = setup_typed(&[
+            ("dup", "link", 64, Some("somewhere/else"), None),
+            ("dup", "file", 64, None, None),
+        ]);
+        run_with_progress(&mut conn, 1, params_min_size(0), |_, _, _| {}).unwrap();
+        for members in group_member_types(&conn, 1) {
+            let links = members.iter().filter(|t| *t == "link").count();
+            assert!(
+                links == 0 || links == members.len(),
+                "a group mixed symlinks and files: {members:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_byte_files_match_on_exact_name_once_the_threshold_allows_them() {
+        let rows: &[(&str, &str, i64, Option<&str>, Option<&str>)] =
+            &[("stderr", "file", 0, None, Some("2024-01-01_10:00:00"))];
+        let mut conn = setup_typed(rows);
+        run_with_progress(&mut conn, 1, params_min_size(0), |_, _, _| {}).unwrap();
+        assert_eq!(
+            group_rows(&conn, 1),
+            vec![(70.0, "name+mtime".into())],
+            "same name, empty on both sources, mtimes agree"
+        );
+
+        // At any positive threshold they drop out again -- excluded by the
+        // user's own processing-time budget rather than by a rule the matcher
+        // imposes on them. That distinction is the whole point of the change.
+        let mut conn = setup_typed(rows);
+        run_with_progress(&mut conn, 1, DedupParams::default(), |_, _, _| {}).unwrap();
+        assert!(group_rows(&conn, 1).is_empty());
+    }
+
+    #[test]
+    fn zero_byte_files_with_differing_names_never_reach_tier_e() {
+        // Tier E's claim is "the names differ, yet these are the same file".
+        // Two empty files have no content to agree on, so a shared parent
+        // folder and a shared mtime are coincidence. This is what survives of
+        // the old blanket zero-byte veto. Both files sit under `holder`, so
+        // tier E is genuinely reachable and really is being declined.
+        let mut conn = setup_typed(&[
+            ("stderr", "file", 0, None, Some("2024-01-01_10:00:00")),
+            ("output", "file", 0, None, Some("2024-01-01_10:00:00")),
+        ]);
+        run_with_progress(&mut conn, 1, params_min_size(0), |_, _, _| {}).unwrap();
+        let signals: Vec<String> = group_rows(&conn, 1).into_iter().map(|(_, s)| s).collect();
+        assert!(
+            !signals.iter().any(|s| s == "parent+mtime"),
+            "empty files must not form a tier-E group: {signals:?}"
+        );
+        assert_eq!(
+            signals.iter().filter(|s| *s == "name+mtime").count(),
+            2,
+            "but each name still matches itself across the two sources"
         );
     }
 

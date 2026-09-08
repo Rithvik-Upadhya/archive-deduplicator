@@ -512,10 +512,17 @@ fn load_hashable_nodes(
     source_id: i64,
     hash_min_size: i64,
 ) -> rusqlite::Result<Vec<CandidateNode>> {
+    // `size > 0` is load-bearing, not a micro-optimisation. `hash_min_size` is
+    // user-settable and can be 0, and every empty file hashes to BLAKE3's
+    // empty-input digest -- so without this, one workspace-wide tier-A group
+    // would swallow every zero-byte file at confidence 100, overriding
+    // `dedup.rs`'s deliberate rule that empty files match on exact name (tiers
+    // C/D) and never on weaker evidence. There is also nothing to read: the
+    // digest of no bytes carries no information about the file.
     let mut stmt = conn.prepare(
         "SELECT id, rel_path, size, dev, inode, mtime FROM nodes
          WHERE source_id = ?1 AND type = 'file' AND alias_of IS NULL
-           AND size >= ?2 AND content_hash IS NULL
+           AND size >= ?2 AND size > 0 AND content_hash IS NULL
          ORDER BY id",
     )?;
     stmt.query_map(params![source_id, hash_min_size], |r| {
@@ -699,9 +706,12 @@ pub fn run_hash_scan(
     // source before this call, so a resumed run's reported progress
     // continues rather than restarting from zero.
     let already_hashed: i64 = conn.query_row(
+        // `size > 0` mirrors `load_hashable_nodes`: the baseline must count the
+        // same population the candidate list draws from, or a resumed run's
+        // progress is measured against a different denominator.
         "SELECT COUNT(*) FROM nodes
          WHERE source_id = ?1 AND type = 'file' AND alias_of IS NULL
-           AND size >= ?2 AND content_hash IS NOT NULL",
+           AND size >= ?2 AND size > 0 AND content_hash IS NOT NULL",
         params![source_id, hash_min_size],
         |r| r.get(0),
     )?;
@@ -936,6 +946,50 @@ mod tests {
         tx.commit().unwrap();
 
         (conn, ws, source_id, dir)
+    }
+
+    #[test]
+    fn zero_byte_files_are_never_queued_even_at_hash_min_size_zero() {
+        // `setup_scan_source` sets `hash_min_size = 0`, which is the hazard:
+        // without the `size > 0` guard every empty file would hash to
+        // BLAKE3's empty-input digest, so all of them would land in one
+        // workspace-wide tier-A group at confidence 100 -- silently
+        // overriding `dedup.rs`'s rule that empty files match on exact name
+        // (tiers C/D) and never on weaker or stronger evidence than that.
+        let (mut conn, _ws, source_id, dir) =
+            setup_scan_source(&[("empty.bin", b""), ("a.bin", b"hello world")]);
+
+        run_hash_scan(
+            &mut conn,
+            source_id,
+            LaneConfig::flat(4),
+            &AtomicBool::new(false),
+            |_, _| {},
+        )
+        .unwrap();
+
+        let empty_hash: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT content_hash FROM nodes WHERE source_id = ?1 AND name = 'empty.bin'",
+                params![source_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            empty_hash.is_none(),
+            "an empty file carries no content to hash"
+        );
+
+        let real_hash: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT content_hash FROM nodes WHERE source_id = ?1 AND name = 'a.bin'",
+                params![source_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(real_hash.is_some(), "but a real file is still hashed");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn sampled_spec() -> HashSpec {
