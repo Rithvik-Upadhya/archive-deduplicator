@@ -32,22 +32,37 @@ pub fn materialize_subtree(
     consolidation_id: i64,
     parent_id: Option<i64>,
     source_node_id: i64,
+    filter_cross_dup: bool,
 ) -> rusqlite::Result<Vec<ConsolidationNode>> {
     // 1. Fetch the whole subtree (root + every descendant) from `nodes` in one
     //    recursive query. Unlike pathfix.rs::load_source_subtrees (which starts
     //    from `parent_id = ?1` and only fetches children), the base case here
     //    is `id = ?1` so the root's own row comes back too.
+    //
+    //    When `filter_cross_dup` is set (the source's "exclusive to this
+    //    device" funnel is on for this drag), descendants whose only
+    //    duplicates live on another device (`dup_annot.cross_dup = 1`) are
+    //    dropped in the recursive step, so the materialized subtree carries
+    //    only what the user could see. The filter is applied per-row rather
+    //    than "skip the subtree if its root is cross_dup": a directory is only
+    //    ever marked `cross_dup` when *every* leaf beneath it is (see
+    //    rollup.rs), so a surviving directory always still has a non-cross
+    //    leaf and can never be stranded empty. The dragged root itself is
+    //    always kept (the user could only drag a visible row).
     let snodes: Vec<SNode> = {
         let mut stmt = conn.prepare(
             "WITH RECURSIVE sub(id) AS (
                  SELECT ?1
                  UNION ALL
-                 SELECT n.id FROM nodes n JOIN sub ON n.parent_id = sub.id
+                 SELECT n.id FROM nodes n
+                   JOIN sub ON n.parent_id = sub.id
+                   LEFT JOIN dup_annot d ON d.node_id = n.id
+                 WHERE ?2 = 0 OR COALESCE(d.cross_dup, 0) = 0
              )
              SELECT n.id, n.parent_id, n.name, n.type, n.size, n.rel_path
              FROM nodes n WHERE n.id IN (SELECT id FROM sub)",
         )?;
-        stmt.query_map(params![source_node_id], |r| {
+        stmt.query_map(params![source_node_id, filter_cross_dup], |r| {
             Ok(SNode {
                 id: r.get(0)?,
                 parent_id: r.get(1)?,
@@ -230,7 +245,7 @@ mod tests {
         let (mut conn, _ws, source_id, consolidation_id) = setup(NESTED_TREE);
         let root_id = node_id(&conn, source_id, "photos");
 
-        let out = materialize_subtree(&mut conn, consolidation_id, None, root_id).unwrap();
+        let out = materialize_subtree(&mut conn, consolidation_id, None, root_id, false).unwrap();
 
         // photos, 2024, a.jpg, b.jpg = 4 nodes total.
         assert_eq!(out.len(), 4);
@@ -271,7 +286,7 @@ mod tests {
         let (mut conn, _ws, source_id, consolidation_id) = setup(json);
         let root_id = node_id(&conn, source_id, "stuff");
 
-        let out = materialize_subtree(&mut conn, consolidation_id, None, root_id).unwrap();
+        let out = materialize_subtree(&mut conn, consolidation_id, None, root_id, false).unwrap();
 
         let link_src_id = node_id(&conn, source_id, "stuff/shortcut");
         let link_row = out
@@ -292,12 +307,68 @@ mod tests {
         .unwrap();
         let root_id = node_id(&conn, source_id, "photos");
 
-        let out = materialize_subtree(&mut conn, consolidation_id, None, root_id).unwrap();
+        let out = materialize_subtree(&mut conn, consolidation_id, None, root_id, false).unwrap();
 
         let root_row = out
             .iter()
             .find(|n| n.source_node_id == Some(root_id))
             .unwrap();
         assert_eq!(root_row.sort_order, 2);
+    }
+
+    /// Mark `rel_path`'s node as a cross-device duplicate in `dup_annot`, the
+    /// same flag the "exclusive to this device" funnel filters on. All
+    /// `dup_annot` columns have defaults, so setting just `cross_dup` is valid.
+    fn mark_cross_dup(conn: &Connection, source_id: i64, rel_path: &str) {
+        let id = node_id(conn, source_id, rel_path);
+        conn.execute(
+            "INSERT INTO dup_annot (node_id, cross_dup) VALUES (?1, 1)",
+            params![id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn materialize_skips_cross_dup_descendants_when_filtering() {
+        let (mut conn, _ws, source_id, consolidation_id) = setup(NESTED_TREE);
+        mark_cross_dup(&conn, source_id, "photos/2024/b.jpg");
+        let root_id = node_id(&conn, source_id, "photos");
+
+        let filtered =
+            materialize_subtree(&mut conn, consolidation_id, None, root_id, true).unwrap();
+
+        let b_src_id = node_id(&conn, source_id, "photos/2024/b.jpg");
+        assert!(
+            filtered.iter().all(|n| n.source_node_id != Some(b_src_id)),
+            "cross_dup file must not be materialized when filtering"
+        );
+        // photos, 2024, a.jpg survive.
+        assert_eq!(filtered.len(), 3);
+
+        // Without the filter the whole subtree still comes across.
+        let unfiltered =
+            materialize_subtree(&mut conn, consolidation_id, None, root_id, false).unwrap();
+        assert_eq!(unfiltered.len(), 4);
+    }
+
+    #[test]
+    fn materialize_prunes_a_fully_cross_dup_subdir_when_filtering() {
+        let (mut conn, _ws, source_id, consolidation_id) = setup(NESTED_TREE);
+        // Every leaf under photos/2024 is cross_dup, so the funnel hides the
+        // whole "2024" dir and the drag must drop it entirely. rollup.rs
+        // annotates the directory row itself in that case (cross_dup when
+        // *every* leaf beneath it is), so mark it here too -- the query keys
+        // off each row's own annotation, not a recomputed rollup.
+        mark_cross_dup(&conn, source_id, "photos/2024/a.jpg");
+        mark_cross_dup(&conn, source_id, "photos/2024/b.jpg");
+        mark_cross_dup(&conn, source_id, "photos/2024");
+        let root_id = node_id(&conn, source_id, "photos");
+
+        let filtered =
+            materialize_subtree(&mut conn, consolidation_id, None, root_id, true).unwrap();
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].source_node_id, Some(root_id));
+        assert_eq!(filtered[0].name, "photos");
     }
 }

@@ -10,7 +10,14 @@
     import { Badge } from '$lib/components/ui/badge';
     import { Button } from '$lib/components/ui/button';
 
-    type DragMeta = { name: string; type: NodeType };
+    type DragMeta = {
+        name: string;
+        type: NodeType;
+        source_id: number;
+        /** Whether this node's only duplicates live on another device --
+         *  lets the consolidation drop handler honour each source's funnel. */
+        cross_dup: boolean;
+    };
 
     interface Props {
         node: TreeNode;
@@ -117,8 +124,20 @@
         const items = ids.map(id => {
             const meta = selection.getMeta(id);
             return id === node.id
-                ? { node_id: id, name: node.name, type: node.type }
-                : { node_id: id, name: meta?.name ?? '', type: meta?.type ?? 'file' };
+                ? {
+                      node_id: id,
+                      name: node.name,
+                      type: node.type,
+                      source_id: node.source_id,
+                      cross_dup: node.cross_dup,
+                  }
+                : {
+                      node_id: id,
+                      name: meta?.name ?? '',
+                      type: meta?.type ?? 'file',
+                      source_id: meta?.source_id ?? node.source_id,
+                      cross_dup: meta?.cross_dup ?? false,
+                  };
         });
         e.dataTransfer.setData('application/x-dedup-node', JSON.stringify({ items }));
         e.dataTransfer.effectAllowed = 'copy';
@@ -135,7 +154,16 @@
         aria-selected={selection?.isSelected(node.id) ?? false}
         aria-expanded={isDir ? expanded : undefined}
         tabindex="0"
-        use:selectable={{ selection, id: node.id, meta: { name: node.name, type: node.type } }}
+        use:selectable={{
+            selection,
+            id: node.id,
+            meta: {
+                name: node.name,
+                type: node.type,
+                source_id: node.source_id,
+                cross_dup: node.cross_dup,
+            },
+        }}
         ondragstart={draggable ? onDragStart : undefined}
         onclick={onRowActivate}
         onkeydown={e => e.key === 'Enter' && onRowActivate(e)}>

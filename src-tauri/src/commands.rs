@@ -1161,16 +1161,26 @@ pub fn consolidation_add_node(
 /// Drag-drop a source *directory* wholesale: materializes its entire subtree
 /// as real `consolidation_nodes` rows (root + every descendant), so every
 /// file/folder inside becomes individually movable/renamable/deletable.
+/// With `filter_cross_dup`, descendants hidden by the source's "exclusive to
+/// this device" funnel (`dup_annot.cross_dup`) are left out, matching what the
+/// user saw when they dragged.
 #[tauri::command]
 pub fn consolidation_add_source_subtree(
     db: State<Db>,
     consolidation_id: i64,
     parent_id: Option<i64>,
     source_node_id: i64,
+    filter_cross_dup: bool,
 ) -> CmdResult<Vec<ConsolidationNode>> {
     let mut conn = db.lock();
-    crate::consolidate::materialize_subtree(&mut conn, consolidation_id, parent_id, source_node_id)
-        .map_err(map_err)
+    crate::consolidate::materialize_subtree(
+        &mut conn,
+        consolidation_id,
+        parent_id,
+        source_node_id,
+        filter_cross_dup,
+    )
+    .map_err(map_err)
 }
 
 #[tauri::command]

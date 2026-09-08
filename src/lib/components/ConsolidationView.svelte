@@ -2,6 +2,7 @@
     import * as api from '$lib/api';
     import { app } from '$lib/stores/app.svelte';
     import type { ConsolidationNode, NodeType } from '$lib/types';
+    import { deviceFilterOn } from '$lib/stores/treeExpansion.svelte';
     import { TreeSelection } from '$lib/stores/selection.svelte';
     import DeviceTree from './DeviceTree.svelte';
     import ConsolidationNodeItem from './ConsolidationNodeItem.svelte';
@@ -24,6 +25,8 @@
     const sourceSelection = new TreeSelection<{
         name: string;
         type: NodeType;
+        source_id: number;
+        cross_dup: boolean;
     }>();
     const consSelection = new TreeSelection();
 
@@ -121,19 +124,35 @@
         if (!raw || consolidationId == null || app.activeWorkspaceId == null)
             return;
         const { items } = JSON.parse(raw) as {
-            items: { node_id: number; name: string; type: NodeType }[];
+            items: {
+                node_id: number;
+                name: string;
+                type: NodeType;
+                source_id: number;
+                cross_dup: boolean;
+            }[];
         };
         // Sequential, not Promise.all: each call mutates the same
         // consolidation tree and appends to `nodes`, so keeping them
         // ordered avoids interleaved/racy array updates.
         let allOk = true;
         for (const item of items) {
+            // Honour each source's "exclusive to this device" funnel, keyed
+            // on the item's own source (a multi-select can span devices with
+            // different funnel states).
+            const filtered = deviceFilterOn.has(item.source_id);
+            // A hidden file that slipped into the payload (e.g. selected
+            // before the funnel was toggled on) -- skip it. Hidden files
+            // inside a dragged directory are dropped by the backend instead.
+            if (item.type !== 'directory' && filtered && item.cross_dup)
+                continue;
             try {
                 if (item.type === 'directory') {
                     const created = await api.consolidationAddSourceSubtree({
                         consolidationId,
                         parentId,
                         sourceNodeId: item.node_id,
+                        filterCrossDup: filtered,
                     });
                     nodes = [...nodes, ...created];
                 } else {
