@@ -126,6 +126,7 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
                 duplicated_pct: 0.0,
                 cross_dup_size: 0,
                 cross_dup_file_count: 0,
+                cross_dup_alias_bytes: 0,
                 physical_size: r.get(11)?,
                 alias_bytes: r.get(12)?,
                 medium_kind: r.get(13)?,
@@ -166,9 +167,10 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
         } else {
             0.0
         };
-        let (cross_size, cross_count) = cross_dup_by_src.get(&s.id).copied().unwrap_or((0, 0));
-        s.cross_dup_size = cross_size;
-        s.cross_dup_file_count = cross_count;
+        let cross = cross_dup_by_src.get(&s.id).copied().unwrap_or_default();
+        s.cross_dup_size = cross.size;
+        s.cross_dup_file_count = cross.file_count;
+        s.cross_dup_alias_bytes = cross.alias_bytes;
         s.hashing_phase = hash_phase_by_src.get(&s.id).cloned();
     }
     Ok(sources)
@@ -236,6 +238,7 @@ pub async fn import_tree_json(
             hashing_phase: None,
             physical_size,
             alias_bytes,
+            cross_dup_alias_bytes: 0,
         })
     })
     .await
@@ -315,6 +318,7 @@ pub async fn scan_folder(
             hashing_phase: None,
             cross_dup_size: 0,
             cross_dup_file_count: 0,
+            cross_dup_alias_bytes: 0,
             physical_size,
             alias_bytes,
         })
@@ -739,7 +743,8 @@ pub fn get_tree(
                 COALESCE(d.has_dup, 0), COALESCE(d.dup_pct, 0), COALESCE(d.cross_dup, 0),
                 COALESCE(d.cross_dup_size, 0), COALESCE(d.cross_dup_file_count, 0), COALESCE(d.in_folder_group, 0),
                 n.alias_of,
-                (n.alias_of IS NOT NULL OR EXISTS (SELECT 1 FROM nodes a WHERE a.alias_of = n.id))
+                (n.alias_of IS NOT NULL OR EXISTS (SELECT 1 FROM nodes a WHERE a.alias_of = n.id)),
+                COALESCE(d.skipped, 0), COALESCE(d.skipped_count, 0)
          FROM nodes n LEFT JOIN dup_annot d ON d.node_id = n.id
          WHERE n.source_id = ?1 AND n.parent_id = ?2 ORDER BY n.type = 'file', n.name"
     } else {
@@ -747,7 +752,8 @@ pub fn get_tree(
                 COALESCE(d.has_dup, 0), COALESCE(d.dup_pct, 0), COALESCE(d.cross_dup, 0),
                 COALESCE(d.cross_dup_size, 0), COALESCE(d.cross_dup_file_count, 0), COALESCE(d.in_folder_group, 0),
                 n.alias_of,
-                (n.alias_of IS NOT NULL OR EXISTS (SELECT 1 FROM nodes a WHERE a.alias_of = n.id))
+                (n.alias_of IS NOT NULL OR EXISTS (SELECT 1 FROM nodes a WHERE a.alias_of = n.id)),
+                COALESCE(d.skipped, 0), COALESCE(d.skipped_count, 0)
          FROM nodes n LEFT JOIN dup_annot d ON d.node_id = n.id
          WHERE n.source_id = ?1 AND n.parent_id IS NULL ORDER BY n.type = 'file', n.name"
     };
@@ -776,6 +782,8 @@ pub fn get_tree(
             in_folder_group: r.get::<_, i64>(18)? != 0,
             alias_of: r.get(19)?,
             is_hardlink: r.get::<_, i64>(20)? != 0,
+            skipped: r.get::<_, i64>(21)? != 0,
+            skipped_count: r.get(22)?,
         })
     };
 

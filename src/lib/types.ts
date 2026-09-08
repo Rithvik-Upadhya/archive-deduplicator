@@ -30,8 +30,15 @@ export interface Source {
      *  elsewhere. The base is `physical_size`, not `total_size`: hardlink
      *  aliases never enter the matcher, so they can never be in the numerator. */
     duplicated_pct: number;
+    /** Canonical-file bytes the funnel hides. Subtract from `physical_size`. */
     cross_dup_size: number;
+    /** *Names* the funnel hides -- canonical files, hardlink aliases and
+     *  symlinks alike. Subtract from `file_count`, which counts names too. */
     cross_dup_file_count: number;
+    /** Hidden bytes belonging to hardlink aliases. Not part of `cross_dup_size`
+     *  (alias bytes were never in `physical_size`) -- it lets the header's
+     *  "N hardlinked" annotation shrink to what is still on screen. */
+    cross_dup_alias_bytes: number;
     /** `total_size` minus bytes double-counted by hardlink alias sets --
      *  what the UI should display as the device's real disk usage. */
     physical_size: number;
@@ -148,6 +155,12 @@ export interface TreeNode {
      *  an alias or the canonical target of one or more aliases. Takes
      *  precedence over `has_duplicate` in the tree UI's badge. */
     is_hardlink: boolean;
+    /** A safety cap in the matcher declined to judge this node. Distinct from
+     *  "no duplicate found" -- no verdict was reached, so the tree must not
+     *  present it as exclusive to this device. */
+    skipped: boolean;
+    /** Directories only: how many nodes in this subtree are `skipped`. */
+    skipped_count: number;
 }
 
 export interface MatchMember {

@@ -188,6 +188,19 @@
                 class="ms-auto shrink-0 font-heading text-xs tabular-nums whitespace-nowrap text-muted-foreground">
                 {visibleFileCount} files · {formatBytes(visibleSize)}
             </span>
+            <!-- `--warn` carries the "uncertain" data semantic (see app.css):
+                 these nodes are neither confirmed duplicates nor confirmed
+                 unique, which is exactly what that token is for. -->
+            {#if node.skipped_count > 0}
+                <span
+                    class="shrink-0 inline-flex items-center gap-0.5 font-heading text-[0.65rem] tabular-nums whitespace-nowrap text-warn"
+                    title="{node.skipped_count} item{node.skipped_count === 1
+                        ? ''
+                        : 's'} here could not be compared: a safety limit in the matcher stopped it judging an unusually large group of same-named, same-sized files. They are neither confirmed duplicates nor confirmed unique.">
+                    <Icon icon="ph:warning-circle-fill" />
+                    {node.skipped_count} skipped
+                </span>
+            {/if}
             {#if !filterCrossDevice && node.dup_pct > 0}
                 <Badge
                     variant="outline"
@@ -203,6 +216,15 @@
                 class="ms-auto shrink-0 font-heading text-xs tabular-nums whitespace-nowrap text-muted-foreground">
                 {formatBytes(node.size)}
             </span>
+            <!-- Icon only, no label: a filename needs the width more than this
+                 does, and the tooltip carries the meaning. -->
+            {#if node.skipped}
+                <span
+                    class="shrink-0 text-warn"
+                    title="Skipped: a safety limit stopped the matcher judging this file, so it is neither a confirmed duplicate nor confirmed unique.">
+                    <Icon icon="ph:warning-circle-fill" />
+                </span>
+            {/if}
             {#if node.is_hardlink}
                 <Badge
                     variant="outline"

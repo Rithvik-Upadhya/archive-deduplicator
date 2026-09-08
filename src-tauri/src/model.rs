@@ -60,13 +60,20 @@ pub struct Source {
     /// and so can never appear in the numerator.
     #[serde(default)]
     pub duplicated_pct: f64,
-    /// Bytes among `total_size` that are cross-device duplicates -- what the
-    /// "exclusive to this device" filter hides. Subtract from `total_size` /
-    /// `file_count` to get the filtered totals.
+    /// Canonical-file bytes the "exclusive to this device" filter hides.
+    /// Subtract from `physical_size` for the filtered size.
     #[serde(default)]
     pub cross_dup_size: i64,
+    /// *Names* the filter hides -- canonical files, hardlink aliases and
+    /// symlinks alike. Subtract from `file_count`, which counts names too.
     #[serde(default)]
     pub cross_dup_file_count: i64,
+    /// Hidden bytes belonging to hardlink aliases. Not part of `cross_dup_size`
+    /// (alias bytes were never in `physical_size`); this lets the device
+    /// header's "N hardlinked" annotation shrink to the visible set instead of
+    /// always describing the whole device.
+    #[serde(default)]
+    pub cross_dup_alias_bytes: i64,
     /// `total_size` minus bytes double-counted by hardlink alias sets. This
     /// is what the UI should display as the device's real disk usage.
     #[serde(default)]
@@ -162,6 +169,17 @@ pub struct Node {
     /// precedence over the normal "dup" badge for these nodes.
     #[serde(default)]
     pub is_hardlink: bool,
+    /// A safety cap in `dedup.rs` declined to judge this node -- an oversized
+    /// same-name cohort, a clique graph too dense to enumerate, an internally
+    /// contradictory group. Distinct from "no duplicate found": the matcher
+    /// never reached a verdict, so the tree must not present it as exclusive
+    /// to its device.
+    #[serde(default)]
+    pub skipped: bool,
+    /// Directories only: how many nodes in this subtree are `skipped`, so a
+    /// folder can report it without the user expanding down to the files.
+    #[serde(default)]
+    pub skipped_count: i64,
 }
 
 /// A group of nodes that are likely duplicates of one another.

@@ -198,7 +198,16 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             cross_dup INTEGER NOT NULL DEFAULT 0,
             cross_dup_size INTEGER NOT NULL DEFAULT 0,
             cross_dup_file_count INTEGER NOT NULL DEFAULT 0,
-            in_folder_group INTEGER NOT NULL DEFAULT 0
+            in_folder_group INTEGER NOT NULL DEFAULT 0,
+            -- A safety cap in dedup.rs declined to judge this node (an
+            -- oversized name cohort, an un-enumerable clique graph, an
+            -- internally contradictory group). Distinct from "no duplicate
+            -- found": the matcher never reached a verdict, so the UI must not
+            -- present it as exclusive to its device. 0/1 on files;
+            -- `skipped_count` is the subtree rollup for directories, mirroring
+            -- cross_dup / cross_dup_file_count.
+            skipped INTEGER NOT NULL DEFAULT 0,
+            skipped_count INTEGER NOT NULL DEFAULT 0
         );
 
         -- Survives source deletion and re-import so a re-scan of the same
@@ -234,7 +243,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 
 /// Target schema version. Bump this and add an entry to `migrate`'s
 /// `alterations` list whenever a column is added to an already-shipped table.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
@@ -364,6 +373,19 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             "sources",
             "hashing_enabled",
             "ALTER TABLE sources ADD COLUMN hashing_enabled INTEGER NOT NULL DEFAULT 1",
+        ),
+        // v10. No backfill entry below, unlike v9's recompute: `dup_annot` is
+        // rebuilt wholesale by the next dedup run, so the DEFAULT 0 these get
+        // is exactly right until then.
+        (
+            "dup_annot",
+            "skipped",
+            "ALTER TABLE dup_annot ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "dup_annot",
+            "skipped_count",
+            "ALTER TABLE dup_annot ADD COLUMN skipped_count INTEGER NOT NULL DEFAULT 0",
         ),
     ];
     for (table, column, ddl) in alterations {

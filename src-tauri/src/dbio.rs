@@ -345,13 +345,13 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
             // --- dup_annot (per-node duplicate annotation cache) ---
             {
                 let mut stmt = tx.prepare(
-                    "SELECT n.id, d.has_dup, d.dup_pct, d.cross_dup, d.cross_dup_size, d.cross_dup_file_count, d.in_folder_group
+                    "SELECT n.id, d.has_dup, d.dup_pct, d.cross_dup, d.cross_dup_size, d.cross_dup_file_count, d.in_folder_group, d.skipped, d.skipped_count
                      FROM ext.dup_annot d
                      JOIN ext.nodes n ON n.id = d.node_id
                      JOIN ext.sources s ON s.id = n.source_id
                      WHERE s.workspace_id = ?1",
                 )?;
-                let rows: Vec<(i64, i64, f64, i64, i64, i64, i64)> = stmt
+                let rows: Vec<(i64, i64, f64, i64, i64, i64, i64, i64, i64)> = stmt
                     .query_map(params![old_ws_id], |r| {
                         Ok((
                             r.get(0)?,
@@ -361,6 +361,8 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                             r.get(4)?,
                             r.get(5)?,
                             r.get(6)?,
+                            r.get(7)?,
+                            r.get(8)?,
                         ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -372,13 +374,15 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                     cross_dup_size,
                     cross_dup_file_count,
                     in_folder_group,
+                    skipped,
+                    skipped_count,
                 ) in rows
                 {
                     if let Some(&new_node_id) = node_id_map.get(&old_node_id) {
                         tx.execute(
-                            "INSERT OR IGNORE INTO dup_annot (node_id, has_dup, dup_pct, cross_dup, cross_dup_size, cross_dup_file_count, in_folder_group)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                            params![new_node_id, has_dup, dup_pct, cross_dup, cross_dup_size, cross_dup_file_count, in_folder_group],
+                            "INSERT OR IGNORE INTO dup_annot (node_id, has_dup, dup_pct, cross_dup, cross_dup_size, cross_dup_file_count, in_folder_group, skipped, skipped_count)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                            params![new_node_id, has_dup, dup_pct, cross_dup, cross_dup_size, cross_dup_file_count, in_folder_group, skipped, skipped_count],
                         )?;
                     }
                 }

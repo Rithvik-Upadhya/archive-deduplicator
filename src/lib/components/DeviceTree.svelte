@@ -68,6 +68,16 @@
             ? source.physical_size - source.cross_dup_size
             : source.physical_size
     );
+    // The hardlink annotation has to describe the same set as the two numbers
+    // beside it. Unfiltered that is the whole device; with the funnel on it is
+    // only the aliases still on screen -- often none at all, since an alias is
+    // hidden whenever its canonical is, and then the annotation disappears
+    // rather than claiming GBs of hardlinks among nothing.
+    const visibleAliasBytes = $derived(
+        filterCrossDevice
+            ? source.alias_bytes - source.cross_dup_alias_bytes
+            : source.alias_bytes
+    );
 
     async function load() {
         rootsError = false;
@@ -204,21 +214,19 @@
         class="shrink-0 px-2 pt-2 pb-1 ps-7 border-b-1 font-heading text-xs tabular-nums text-muted-foreground">
         {visibleFileCount} files · {formatBytes(visibleSize)}
         {#if source.kind === 'scan'}· scanned{/if}
-        {#if source.alias_bytes > 0}
+        {#if visibleAliasBytes > 0}
             <!-- No minus sign: the size to the left is already `physical_size`,
                  so these bytes have been deducted from it, not from what the
                  reader is looking at. A leading `-` read as a second
                  subtraction still to apply. -->
             <span
                 class="text-muted-foreground/70"
-                title="This device holds {formatBytes(
-                    source.total_size
-                )} of files by name, but {formatBytes(
-                    source.alias_bytes
-                )} of that is hardlink aliases -- the same physical bytes under more than one name. The {formatBytes(
+                title="Of the {visibleFileCount} files shown, {formatBytes(
+                    visibleAliasBytes
+                )} is hardlink aliases -- the same physical bytes under more than one name. The {formatBytes(
                     visibleSize
                 )} shown already counts those bytes once.">
-                ({formatBytes(source.alias_bytes)} hardlinked, counted once)
+                ({formatBytes(visibleAliasBytes)} hardlinked, counted once)
             </span>
         {/if}
     </div>

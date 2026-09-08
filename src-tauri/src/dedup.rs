@@ -6,7 +6,7 @@
 //! become matcher candidates at all.
 
 use rusqlite::{Connection, params};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// A file node loaded for matching.
 struct FileRow {
@@ -358,6 +358,7 @@ fn resolve_groups_in_bucket(
     files: &[FileRow],
     hash_group_of: &[Option<usize>],
     idxs: &[usize],
+    skipped: &mut HashSet<usize>,
 ) -> Vec<(Tier, Vec<usize>)> {
     let mut out = Vec::new();
 
@@ -367,7 +368,16 @@ fn resolve_groups_in_bucket(
     }
 
     for sub in by_ext.into_values() {
-        if sub.len() < 2 || sub.len() > BUCKET_SAFETY_CAP {
+        // `< 2` and `>` cap are recorded differently on purpose. Having no
+        // partner is a *finding* -- the file really is unique here. Blowing a
+        // cap is a declined judgement, and reporting that as uniqueness is
+        // what made 2,618 cargo build artifacts look exclusive to their
+        // device. Only the caps mark `skipped`.
+        if sub.len() < 2 {
+            continue;
+        }
+        if sub.len() > BUCKET_SAFETY_CAP {
+            skipped.extend(sub.iter().copied());
             continue;
         }
 
@@ -377,10 +387,15 @@ fn resolve_groups_in_bucket(
             by_name.entry(files[i].name.as_str()).or_default().push(i);
         }
         for group in by_name.into_values() {
-            if group.len() < 2 || group.len() > MAX_GROUP_SIZE {
+            if group.len() < 2 {
+                continue;
+            }
+            if group.len() > MAX_GROUP_SIZE {
+                skipped.extend(group.iter().copied());
                 continue;
             }
             if group_has_hash_conflict(files, &group) {
+                skipped.extend(group.iter().copied());
                 continue;
             }
             if group_is_hash_redundant(hash_group_of, &group) {
@@ -422,7 +437,11 @@ fn resolve_groups_in_bucket(
             // See `MAX_CLIQUE_CANDIDATES`: this is deliberately much tighter
             // than `BUCKET_SAFETY_CAP` above, since clique enumeration's
             // cost is combinatorial, not quadratic.
-            if cluster.len() < 2 || cluster.len() > MAX_CLIQUE_CANDIDATES {
+            if cluster.len() < 2 {
+                continue;
+            }
+            if cluster.len() > MAX_CLIQUE_CANDIDATES {
+                skipped.extend(cluster.iter().copied());
                 continue;
             }
             let Some(cliques) = maximal_cliques(
@@ -438,10 +457,12 @@ fn resolve_groups_in_bucket(
                 // Work budget exhausted: this cluster's edge graph is too
                 // dense to safely enumerate. Drop it, same as an oversized
                 // group -- not a false positive, just a missed one.
+                skipped.extend(cluster.iter().copied());
                 continue;
             };
             for clique in cliques {
                 if clique.len() > MAX_GROUP_SIZE {
+                    skipped.extend(clique.iter().copied());
                     continue;
                 }
                 // Applied to the emitted clique rather than to the edge
@@ -669,12 +690,30 @@ pub fn run_with_progress(
         }
         by_size.entry(f.size).or_default().push(i);
     }
+    let mut skipped_idxs: HashSet<usize> = HashSet::new();
     for idxs in by_size.values() {
         if idxs.len() < 2 {
             continue;
         }
-        groups.extend(resolve_groups_in_bucket(&files, &hash_group_of, idxs));
+        groups.extend(resolve_groups_in_bucket(
+            &files,
+            &hash_group_of,
+            idxs,
+            &mut skipped_idxs,
+        ));
     }
+
+    // A file can be declined by one cap and still matched by another route --
+    // dropped from an oversized exact-name group, say, but caught by a tier-E
+    // clique. Only the ones no group took are genuinely undetermined, so the
+    // marker means "the matcher looked and would not say", never "the matcher
+    // both matched it and gave up on it".
+    for (_, members) in &groups {
+        for i in members {
+            skipped_idxs.remove(i);
+        }
+    }
+    let skipped_nodes: HashSet<i64> = skipped_idxs.iter().map(|&i| files[i].id).collect();
 
     on_phase("grouping", 2, TOTAL_PHASES);
     let tx = conn.transaction()?;
@@ -756,6 +795,7 @@ pub fn run_with_progress(
         &rollup_files,
         &rollup_parent_of,
         &rollup_cross_source,
+        &skipped_nodes,
     )?;
 
     on_phase("done", TOTAL_PHASES, TOTAL_PHASES);
@@ -1823,6 +1863,58 @@ mod tests {
             "a {}-member name-group must be dropped, not persisted",
             MAX_GROUP_SIZE + 1
         );
+
+        // Dropped, but not silently: every member is marked `skipped`, because
+        // the matcher declined to judge them rather than finding them unique.
+        // Reporting the cap's output as uniqueness is what made 2,618 cargo
+        // build artifacts look exclusive to their device.
+        let skipped: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dup_annot WHERE skipped = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(skipped as usize, MAX_GROUP_SIZE + 1);
+    }
+
+    #[test]
+    fn a_group_within_the_cap_is_matched_and_not_marked_skipped() {
+        // The complement of the test above, and the one that keeps the marker
+        // meaningful: a cohort the matcher *can* judge must never carry it.
+        let mut conn = setup_files(&[
+            ("clone.bin", 42_000, Some("2024-01-01_10:00:00"), ""),
+            ("clone.bin", 42_000, Some("2024-01-01_10:00:00"), ""),
+        ]);
+        run_with_progress(&mut conn, 1, DedupParams::default(), |_, _, _| {}).unwrap();
+
+        assert_eq!(group_rows(&conn, 1).len(), 1, "these two do match");
+        let skipped: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dup_annot WHERE skipped = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn a_file_with_no_partner_is_not_marked_skipped() {
+        // "No partner found" is a finding -- the file really is unique. Only a
+        // cap that declined to judge marks `skipped`; conflating the two would
+        // badge every genuinely unique file and make the marker worthless.
+        let mut conn = setup_files(&[("alone.bin", 42_000, Some("2024-01-01_10:00:00"), "")]);
+        run_with_progress(&mut conn, 1, DedupParams::default(), |_, _, _| {}).unwrap();
+
+        let skipped: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dup_annot WHERE skipped = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(skipped, 0);
     }
 
     #[test]
