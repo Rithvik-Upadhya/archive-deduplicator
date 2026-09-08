@@ -11,7 +11,12 @@ use std::collections::HashMap;
 struct MiniNode {
     id: i64,
     parent_id: Option<i64>,
+    /// `type == "file"` -- gates the *byte* contribution. A symlink holds no
+    /// content bytes of its own, so it is a leaf without being a file here.
     is_file: bool,
+    /// `type` is `file` or `link` -- gates the *name* contribution. Both are
+    /// things the user finds when listing the directory by hand.
+    is_leaf: bool,
     size: i64,
     alias_of: Option<i64>,
     depth: i64,
@@ -21,23 +26,16 @@ struct MiniNode {
 /// any trusted alias sets (setting `alias_of`, writing a `kind='hardlink'`
 /// match group per set), recompute `subtree_size`/`subtree_file_count`
 /// excluding aliases from ancestor totals, and refresh `sources.alias_bytes`/
-/// `physical_size`. Returns the new `(physical_size, alias_bytes,
-/// physical_file_count)` so the caller can populate the `Source` it returns to
-/// the frontend without a second round-trip query.
-///
-/// `physical_file_count` is the canonical (non-alias) file count. It is
-/// returned rather than stored because `sources.file_count` deliberately keeps
-/// its alias-inclusive import value -- the user still has that many names on
-/// disk -- while anything that pairs a count with `physical_size` needs the
-/// alias-free one. `rollup::physical_file_count_by_source` recomputes it for
-/// sources loaded later.
+/// `physical_size`. Returns the new `(physical_size, alias_bytes)` so the
+/// caller can populate the `Source` it returns to the frontend without a
+/// second round-trip query.
 ///
 /// Must run inside the same transaction as the `insert_nodes` call that just
 /// created `source_id`, before commit.
 pub fn collapse_hardlinks_and_recompute(
     tx: &Transaction,
     source_id: i64,
-) -> rusqlite::Result<(i64, i64, i64)> {
+) -> rusqlite::Result<(i64, i64)> {
     let (kind, filesystem): (String, Option<String>) = tx.query_row(
         "SELECT kind, filesystem FROM sources WHERE id = ?1",
         params![source_id],
@@ -71,13 +69,7 @@ pub fn collapse_hardlinks_and_recompute(
         params![source_id],
         |r| r.get(0),
     )?;
-    let physical_file_count: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM nodes
-         WHERE source_id = ?1 AND type = 'file' AND alias_of IS NULL",
-        params![source_id],
-        |r| r.get(0),
-    )?;
-    Ok((physical_size, alias_bytes, physical_file_count))
+    Ok((physical_size, alias_bytes))
 }
 
 /// Find alias sets (files sharing `(dev, inode)` within this source) and
@@ -166,7 +158,10 @@ fn collapse(tx: &Transaction, source_id: i64) -> rusqlite::Result<()> {
 /// `rollup()`, but reads from the `nodes` table directly: `insert_nodes`
 /// already wrote these totals before `alias_of` existed (computed in-memory,
 /// over `FlatNode`s with no concept of aliasing), so they need redoing here.
-fn recompute_subtree_totals(tx: &Transaction, source_id: i64) -> rusqlite::Result<()> {
+pub(crate) fn recompute_subtree_totals(
+    tx: &Transaction,
+    source_id: i64,
+) -> rusqlite::Result<()> {
     let nodes: Vec<MiniNode> = {
         let mut stmt = tx.prepare(
             "SELECT id, parent_id, type, size, alias_of, depth FROM nodes WHERE source_id = ?1",
@@ -177,6 +172,7 @@ fn recompute_subtree_totals(tx: &Transaction, source_id: i64) -> rusqlite::Resul
                 id: r.get(0)?,
                 parent_id: r.get(1)?,
                 is_file: node_type == "file",
+                is_leaf: node_type == "file" || node_type == "link",
                 size: r.get(3)?,
                 alias_of: r.get(4)?,
                 depth: r.get(5)?,
@@ -195,17 +191,27 @@ fn recompute_subtree_totals(tx: &Transaction, source_id: i64) -> rusqlite::Resul
     for i in order {
         if nodes[i].is_file {
             subtree_size[i] += nodes[i].size;
+        }
+        if nodes[i].is_leaf {
             subtree_count[i] += 1;
         }
-        // Aliases still contribute to their OWN row (above) so the file
-        // browser shows correct info for that individual node; they're just
-        // excluded from being double-counted into any ancestor directory.
-        if nodes[i].alias_of.is_none()
-            && let Some(pid) = nodes[i].parent_id
+        // An alias propagates its *count* but not its *bytes*.
+        //
+        // Count, because a count counts names: the user browsing this
+        // directory sees the alias sitting there, and must not find more files
+        // by hand than the app reported.
+        //
+        // Bytes, never: an alias is a second name for bytes the canonical
+        // already contributed, so adding them would inflate every ancestor and
+        // make `subtree_size` stop meaning "what this subtree occupies" --
+        // deleting k-1 aliases frees nothing.
+        if let Some(pid) = nodes[i].parent_id
             && let Some(&pi) = pos_by_id.get(&pid)
         {
             let (sz, cnt) = (subtree_size[i], subtree_count[i]);
-            subtree_size[pi] += sz;
+            if nodes[i].alias_of.is_none() {
+                subtree_size[pi] += sz;
+            }
             subtree_count[pi] += cnt;
         }
     }
@@ -289,6 +295,34 @@ mod tests {
     ]}]"#;
 
     #[test]
+    fn alias_counts_propagate_to_ancestors_but_alias_bytes_do_not() {
+        // The names/bytes split. `photos` holds three names -- a.jpg, b.jpg
+        // (a hardlink alias of a.jpg) and unique.jpg -- but only two files'
+        // worth of bytes, since the alias shares a.jpg's.
+        let (mut conn, _ws, source_id) = setup("scan", HARDLINK_TREE);
+        let tx = conn.transaction().unwrap();
+        collapse_hardlinks_and_recompute(&tx, source_id).unwrap();
+        tx.commit().unwrap();
+
+        let photos = node_id(&conn, source_id, "photos");
+        let (count, size): (i64, i64) = conn
+            .query_row(
+                "SELECT subtree_file_count, subtree_size FROM nodes WHERE id = ?1",
+                params![photos],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 3,
+            "every name counts -- the user sees three files in photos/"
+        );
+        assert_eq!(
+            size, 1050,
+            "the alias adds no bytes: 1000 (a.jpg, shared with b.jpg) + 50"
+        );
+    }
+
+    #[test]
     fn collapse_selects_lowest_rel_path_as_canonical() {
         // `kind` must be "scan" on a trusted filesystem (e.g. ext4, the
         // `setup` default) to exercise the real trust decision, not a JSON
@@ -335,7 +369,7 @@ mod tests {
             .unwrap();
 
         let tx = conn.transaction().unwrap();
-        let (physical_size, alias_bytes, _physical_file_count) =
+        let (physical_size, alias_bytes) =
             collapse_hardlinks_and_recompute(&tx, source_id).unwrap();
         tx.commit().unwrap();
 
@@ -406,7 +440,7 @@ mod tests {
         let (mut conn, _ws, source_id) =
             setup_with_filesystem("scan", Some("exFAT"), HARDLINK_TREE);
         let tx = conn.transaction().unwrap();
-        let (physical_size, alias_bytes, _physical_file_count) =
+        let (physical_size, alias_bytes) =
             collapse_hardlinks_and_recompute(&tx, source_id).unwrap();
         tx.commit().unwrap();
 
@@ -482,7 +516,7 @@ mod tests {
             .unwrap();
 
         let tx = conn.transaction().unwrap();
-        let (physical_size, alias_bytes, _physical_file_count) =
+        let (physical_size, alias_bytes) =
             collapse_hardlinks_and_recompute(&tx, source_id).unwrap();
         tx.commit().unwrap();
 

@@ -102,8 +102,6 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
     let dup_by_src = rollup::duplicated_size_by_source(&conn, workspace_id).map_err(map_err)?;
     let cross_dup_by_src =
         rollup::cross_dup_size_by_source(&conn, workspace_id).map_err(map_err)?;
-    let phys_files_by_src =
-        rollup::physical_file_count_by_source(&conn, workspace_id).map_err(map_err)?;
     let hash_phase_by_src = hashing::hash_phase_by_source(&conn, workspace_id).map_err(map_err)?;
     let mut stmt = conn
         .prepare(
@@ -129,7 +127,6 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
                 cross_dup_size: 0,
                 cross_dup_file_count: 0,
                 physical_size: r.get(11)?,
-                physical_file_count: 0,
                 alias_bytes: r.get(12)?,
                 medium_kind: r.get(13)?,
                 filesystem: r.get(14)?,
@@ -169,10 +166,6 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
         } else {
             0.0
         };
-        s.physical_file_count = phys_files_by_src
-            .get(&s.id)
-            .copied()
-            .unwrap_or(s.file_count);
         let (cross_size, cross_count) = cross_dup_by_src.get(&s.id).copied().unwrap_or((0, 0));
         s.cross_dup_size = cross_size;
         s.cross_dup_file_count = cross_count;
@@ -212,7 +205,7 @@ pub async fn import_tree_json(
         .map_err(map_err)?;
         let source_id = tx.last_insert_rowid();
         parse::insert_nodes(&tx, source_id, &flat).map_err(map_err)?;
-        let (physical_size, alias_bytes, physical_file_count) =
+        let (physical_size, alias_bytes) =
             links::collapse_hardlinks_and_recompute(&tx, source_id).map_err(map_err)?;
         tx.commit().map_err(map_err)?;
 
@@ -243,7 +236,6 @@ pub async fn import_tree_json(
             hashing_phase: None,
             physical_size,
             alias_bytes,
-            physical_file_count,
         })
     })
     .await
@@ -296,7 +288,7 @@ pub async fn scan_folder(
         .map_err(map_err)?;
         let source_id = tx.last_insert_rowid();
         parse::insert_nodes(&tx, source_id, &flat).map_err(map_err)?;
-        let (physical_size, alias_bytes, physical_file_count) =
+        let (physical_size, alias_bytes) =
             links::collapse_hardlinks_and_recompute(&tx, source_id).map_err(map_err)?;
         tx.commit().map_err(map_err)?;
 
@@ -325,7 +317,6 @@ pub async fn scan_folder(
             cross_dup_file_count: 0,
             physical_size,
             alias_bytes,
-            physical_file_count,
         })
     })
     .await
@@ -1094,7 +1085,8 @@ pub fn consolidation_get(
     let mut stmt = conn
         .prepare(
             "SELECT cn.id, cn.consolidation_id, cn.parent_id, cn.name, cn.type,
-                    cn.source_node_id, cn.sort_order, n.size, s.device_label, n.rel_path
+                    cn.source_node_id, cn.sort_order, n.size, s.device_label, n.rel_path,
+                    n.alias_of IS NOT NULL
              FROM consolidation_nodes cn
              LEFT JOIN nodes n ON n.id = cn.source_node_id
              LEFT JOIN sources s ON s.id = n.source_id
@@ -1120,6 +1112,7 @@ pub fn consolidation_get(
                 },
                 origin_device: r.get(8)?,
                 origin_path: r.get(9)?,
+                is_alias: r.get::<_, Option<bool>>(10)?.unwrap_or(false),
             })
         })
         .map_err(map_err)?
@@ -1155,7 +1148,8 @@ pub fn consolidation_add_node(
     let id = conn.last_insert_rowid();
     conn.query_row(
         "SELECT cn.id, cn.consolidation_id, cn.parent_id, cn.name, cn.type,
-                cn.source_node_id, cn.sort_order, n.size, s.device_label, n.rel_path
+                cn.source_node_id, cn.sort_order, n.size, s.device_label, n.rel_path,
+                    n.alias_of IS NOT NULL
          FROM consolidation_nodes cn
          LEFT JOIN nodes n ON n.id = cn.source_node_id
          LEFT JOIN sources s ON s.id = n.source_id
@@ -1178,6 +1172,7 @@ pub fn consolidation_add_node(
                 },
                 origin_device: r.get(8)?,
                 origin_path: r.get(9)?,
+                is_alias: r.get::<_, Option<bool>>(10)?.unwrap_or(false),
             })
         },
     )

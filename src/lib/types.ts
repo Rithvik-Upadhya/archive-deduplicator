@@ -21,6 +21,9 @@ export interface Source {
     dev_id: number | null;
     imported_at: string;
     total_size: number;
+    /** Every *name* on this device: canonical files, hardlink aliases and
+     *  symlinks alike, so it matches what manual inspection of the source
+     *  would show. */
     file_count: number;
     excluded: boolean;
     /** Percentage (0-100) of this device's *physical* bytes duplicated
@@ -32,10 +35,6 @@ export interface Source {
     /** `total_size` minus bytes double-counted by hardlink alias sets --
      *  what the UI should display as the device's real disk usage. */
     physical_size: number;
-    /** Canonical (non-alias) file count -- the counterpart to `physical_size`.
-     *  `file_count` stays alias-inclusive (every name on disk); pair this with
-     *  `physical_size` and `cross_dup_file_count`, which are alias-free too. */
-    physical_file_count: number;
     /** Bytes among `total_size` that belong to non-canonical hardlink aliases. */
     alias_bytes: number;
     /** Detected (or user-overridden) storage medium: "hdd" | "ssd" | "network"
@@ -190,6 +189,10 @@ export interface ConsolidationNode {
     size: number | null;
     origin_device: string | null;
     origin_path: string | null;
+    /** Whether the origin node is a hardlink alias. Still counts as a file --
+     *  it is a name someone has to recreate -- but its bytes belong to the
+     *  canonical, so size rollups must skip them. */
+    is_alias: boolean;
 }
 
 export interface PathTreeNode {

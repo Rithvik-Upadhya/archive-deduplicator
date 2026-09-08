@@ -99,8 +99,14 @@ fn walk(node: &TreeNode, parent_index: Option<usize>, parent_path: &str, flat: &
         link_target: None,
     });
 
+    // A count counts *names*: a symlink is something the user finds when listing
+    // the directory, and something they must recreate at a destination, so it
+    // counts. Its bytes do not -- a symlink holds no content of its own, so
+    // `total_size`/`subtree_size` stay files-only.
     if node.node_type == "file" {
         flat.total_size += size;
+    }
+    if node.node_type == "file" || node.node_type == "link" {
         flat.file_count += 1;
     }
 
@@ -116,14 +122,21 @@ fn walk(node: &TreeNode, parent_index: Option<usize>, parent_path: &str, flat: &
 /// each node's totals to its parent produces correct aggregates in one pass.
 fn rollup(flat: &mut Flattened) {
     for i in (0..flat.nodes.len()).rev() {
-        let (own_size, own_is_file, parent) = {
+        let (own_size, own_is_file, own_is_leaf, parent) = {
             let n = &flat.nodes[i];
-            (n.size, n.node_type == "file", n.parent_index)
+            (
+                n.size,
+                n.node_type == "file",
+                n.node_type == "file" || n.node_type == "link",
+                n.parent_index,
+            )
         };
         {
             let n = &mut flat.nodes[i];
             if own_is_file {
                 n.subtree_size += own_size;
+            }
+            if own_is_leaf {
                 n.subtree_file_count += 1;
             }
         }

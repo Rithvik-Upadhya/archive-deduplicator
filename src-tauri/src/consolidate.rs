@@ -14,6 +14,7 @@ struct SNode {
     node_type: String,
     size: i64,
     rel_path: String,
+    is_alias: bool,
 }
 
 /// Mirrors the normalization already applied to single-file drags: only
@@ -59,7 +60,8 @@ pub fn materialize_subtree(
                    LEFT JOIN dup_annot d ON d.node_id = n.id
                  WHERE ?2 = 0 OR COALESCE(d.cross_dup, 0) = 0
              )
-             SELECT n.id, n.parent_id, n.name, n.type, n.size, n.rel_path
+             SELECT n.id, n.parent_id, n.name, n.type, n.size, n.rel_path,
+                    n.alias_of IS NOT NULL
              FROM nodes n WHERE n.id IN (SELECT id FROM sub)",
         )?;
         stmt.query_map(params![source_node_id, filter_cross_dup], |r| {
@@ -70,6 +72,7 @@ pub fn materialize_subtree(
                 node_type: r.get(3)?,
                 size: r.get(4)?,
                 rel_path: r.get(5)?,
+                is_alias: r.get(6)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?
@@ -143,6 +146,7 @@ pub fn materialize_subtree(
             size: (root.node_type != "directory").then_some(root.size),
             origin_device: Some(device_label.clone()),
             origin_path: Some(root.rel_path.clone()),
+            is_alias: root.is_alias,
         });
 
         let mut stack = vec![root.id];
@@ -173,6 +177,7 @@ pub fn materialize_subtree(
                     size: (k.node_type != "directory").then_some(k.size),
                     origin_device: Some(device_label.clone()),
                     origin_path: Some(k.rel_path.clone()),
+                    is_alias: k.is_alias,
                 });
                 stack.push(k.id);
             }
@@ -326,6 +331,65 @@ mod tests {
             params![id],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn materialize_skips_an_alias_whose_canonical_is_cross_dup() {
+        // The user-visible bug: dragging a filtered directory carried across a
+        // second *name* for content whose canonical the same filter had just
+        // hidden. `rebuild_annotations` now gives an alias its canonical's
+        // `cross_dup`, so the existing filter here drops it -- this test pins
+        // that the drag honours the annotation once it exists, and that a
+        // dragged alias is still flagged `is_alias` so its bytes are not
+        // double-counted in the pane's rollup.
+        let (mut conn, _ws, source_id, consolidation_id) = setup(NESTED_TREE);
+        let canonical = node_id(&conn, source_id, "photos/2024/b.jpg");
+        conn.execute(
+            "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, alias_of)
+             SELECT source_id, parent_id, 'b_alias.jpg', 'photos/2024/b_alias.jpg', 'file',
+                    size, ?1
+             FROM nodes WHERE id = ?1",
+            params![canonical],
+        )
+        .unwrap();
+        let alias: i64 = conn
+            .query_row(
+                "SELECT id FROM nodes WHERE rel_path = 'photos/2024/b_alias.jpg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        // Unfiltered, both names come across, and the alias is marked.
+        let root_id = node_id(&conn, source_id, "photos");
+        let all =
+            materialize_subtree(&mut conn, consolidation_id, None, root_id, false).unwrap();
+        let alias_row = all
+            .iter()
+            .find(|n| n.source_node_id == Some(alias))
+            .expect("alias materializes when unfiltered -- it is a real name");
+        assert!(alias_row.is_alias, "flagged so size rollups skip its bytes");
+        assert!(
+            !all.iter()
+                .find(|n| n.source_node_id == Some(canonical))
+                .unwrap()
+                .is_alias
+        );
+
+        // Now hide the canonical, as rebuild_annotations does for both.
+        mark_cross_dup(&conn, source_id, "photos/2024/b.jpg");
+        conn.execute(
+            "INSERT INTO dup_annot (node_id, cross_dup) VALUES (?1, 1)",
+            params![alias],
+        )
+        .unwrap();
+        let filtered =
+            materialize_subtree(&mut conn, consolidation_id, None, root_id, true).unwrap();
+        assert!(
+            filtered.iter().all(|n| n.source_node_id != Some(alias)),
+            "an alias of a hidden canonical must not be dragged across"
+        );
+        assert!(filtered.iter().all(|n| n.source_node_id != Some(canonical)));
     }
 
     #[test]

@@ -79,9 +79,16 @@
 
         const stats = new Map<number, { size: number; fileCount: number }>();
         const byId = new Map(nodes.map(n => [n.id, n]));
+        // Counts count names, sizes count bytes actually held -- the same
+        // split the source tree uses. A hardlink alias is a real name someone
+        // must recreate, so it counts; its bytes are the canonical's and were
+        // already added, so adding them again would inflate every ancestor
+        // (node_modules read 7.6 MB where the content occupies 1.9 MB).
+        // Symlinks arrive here as type 'file' via normalize_type and have no
+        // content bytes of their own, so `size` is null and contributes 0.
         for (const n of nodes) {
             if (n.type !== 'file') continue;
-            const size = n.size ?? 0;
+            const size = n.is_alias ? 0 : (n.size ?? 0);
             let pid = n.parent_id;
             while (pid != null) {
                 const cur = stats.get(pid) ?? { size: 0, fileCount: 0 };

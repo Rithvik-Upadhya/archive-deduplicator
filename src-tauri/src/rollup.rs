@@ -619,36 +619,6 @@ pub fn duplicated_size_by_source(
     Ok(result)
 }
 
-/// Canonical (non-alias) file count per source -- the counterpart to
-/// `sources.physical_size`, which `links.rs` refreshes while leaving
-/// `sources.file_count` at its alias-inclusive import value. Computed at read
-/// time rather than stored so no migration is needed; `source_list` pairs it
-/// with `physical_size` so a device header quotes one consistent base.
-///
-/// Deliberately *not* filtered on `s.excluded`, unlike `load_file_locs`: this
-/// describes the device itself rather than the matcher's candidate pool, so
-/// like the stored `physical_size` it stays truthful while a source is hidden.
-pub fn physical_file_count_by_source(
-    conn: &Connection,
-    workspace_id: i64,
-) -> rusqlite::Result<HashMap<i64, i64>> {
-    let mut stmt = conn.prepare(
-        "SELECT n.source_id, COUNT(*) FROM nodes n
-         JOIN sources s ON s.id = n.source_id
-         WHERE s.workspace_id = ?1 AND n.type = 'file' AND n.alias_of IS NULL
-         GROUP BY n.source_id",
-    )?;
-    let rows = stmt.query_map(params![workspace_id], |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
-    })?;
-    let mut map = HashMap::new();
-    for row in rows {
-        let (src, n) = row?;
-        map.insert(src, n);
-    }
-    Ok(map)
-}
-
 /// Cross-device duplicate bytes and file count per source. Unlike
 /// `duplicated_size_by_source` (which pools cross-source and internal-only
 /// duplication together for the "% dup" badges), this counts only bytes/files
@@ -750,6 +720,34 @@ pub(crate) fn rebuild_annotations_with(
         }
     }
 
+    // Hardlink aliases are absent from `files` (`load_file_locs` filters
+    // `alias_of IS NULL`) and so never reach the matcher, which means without
+    // this they get no `dup_annot` row at all -- and every consumer that reads
+    // `COALESCE(cross_dup, 0)` then treats them as exclusive-to-this-device.
+    // That is how a filtered drag used to carry across a second *name* for
+    // content whose canonical the very same filter had just hidden.
+    //
+    // An alias is another name for exactly the canonical's bytes, so it
+    // inherits the canonical's duplicate state wholesale. Note what it does
+    // *not* inherit: bytes. An alias is a name with zero marginal size, so it
+    // is added to every count below and to no byte total.
+    let aliases: Vec<(i64, i64, Option<i64>)> = {
+        let mut stmt = conn.prepare(
+            "SELECT n.id, n.alias_of, n.parent_id FROM nodes n
+             JOIN sources s ON s.id = n.source_id
+             WHERE s.workspace_id = ?1 AND n.alias_of IS NOT NULL AND s.excluded = 0",
+        )?;
+        let rows = stmt.query_map(params![workspace_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (alias_id, canonical_id, _) in &aliases {
+        if dup_files.contains(canonical_id) {
+            dup_files.insert(*alias_id);
+        }
+    }
+
     // Roll duplicated bytes up the ancestor chain.
     let mut dir_dup: HashMap<i64, i64> = HashMap::new();
     for f in files {
@@ -788,7 +786,7 @@ pub(crate) fn rebuild_annotations_with(
             group_sources.entry(*gid).or_default().insert(f.source_id);
         }
     }
-    let cross_dup_files: HashSet<i64> = files
+    let mut cross_dup_files: HashSet<i64> = files
         .iter()
         .filter(|f| {
             file_group
@@ -799,13 +797,21 @@ pub(crate) fn rebuild_annotations_with(
         })
         .map(|f| f.node_id)
         .collect();
+    for (alias_id, canonical_id, _) in &aliases {
+        if cross_dup_files.contains(canonical_id) {
+            cross_dup_files.insert(*alias_id);
+        }
+    }
 
     // Directory-level cross_dup is a leaf-*count* rollup (not byte-weighted
     // like dup_pct above): a directory is only fully cross-dup when every
-    // leaf (file or symlink) in its subtree is a cross_dup file. Symlinks
-    // are never in cross_dup_files (dedup matching only loads type='file'
-    // rows), so a directory holding even one symlink can never read as
-    // fully cross-dup, keeping it visible under the filter.
+    // name in its subtree -- file, symlink or hardlink alias -- is a cross_dup
+    // file. Symlinks are never in cross_dup_files (dedup matching only loads
+    // type='file' rows), so a directory holding even one symlink can never
+    // read as fully cross-dup, keeping it visible under the filter. Aliases,
+    // by contrast, now inherit their canonical's flag, so a directory holding
+    // only hidden canonicals and their aliases correctly reads as fully
+    // cross-dup and disappears whole.
     let leaves = load_leaf_locs(conn, workspace_id)?;
     let mut dir_leaf_total: HashMap<i64, i64> = HashMap::new();
     let mut dir_leaf_cross: HashMap<i64, i64> = HashMap::new();
@@ -814,6 +820,20 @@ pub(crate) fn rebuild_annotations_with(
         while let Some(dir) = cur {
             *dir_leaf_total.entry(dir).or_insert(0) += 1;
             if leaf.is_file && cross_dup_files.contains(&leaf.node_id) {
+                *dir_leaf_cross.entry(dir).or_insert(0) += 1;
+            }
+            cur = parent_of.get(&dir).copied().flatten();
+        }
+    }
+    // `load_leaf_locs` filters aliases out, but a directory is only fully
+    // hidden when every *name* under it is, so they are rolled up here on both
+    // sides of the ratio -- otherwise a directory holding nothing but aliases
+    // of cross-dup canonicals would read as having no leaves at all.
+    for (alias_id, _, parent_id) in &aliases {
+        let mut cur = *parent_id;
+        while let Some(dir) = cur {
+            *dir_leaf_total.entry(dir).or_insert(0) += 1;
+            if cross_dup_files.contains(alias_id) {
                 *dir_leaf_cross.entry(dir).or_insert(0) += 1;
             }
             cur = parent_of.get(&dir).copied().flatten();
@@ -839,6 +859,23 @@ pub(crate) fn rebuild_annotations_with(
         let mut cur = f.parent_id;
         while let Some(dir) = cur {
             *dir_cross_size.entry(dir).or_insert(0) += f.size;
+            *dir_cross_count.entry(dir).or_insert(0) += 1;
+            cur = parent_of.get(&dir).copied().flatten();
+        }
+    }
+    // Aliases bump the *count* and not the size. This asymmetry is the whole
+    // model, not an oversight: a count counts names, and hiding an alias
+    // removes a name the user would otherwise have to deal with; a size counts
+    // bytes actually held, and an alias holds none of its own. Concretely,
+    // `subtree_size` excludes alias bytes as well, so adding them to
+    // `cross_dup_size` would make `subtree_size - cross_dup_size` subtract
+    // bytes that were never in the total. Do not "fix" this into symmetry.
+    for (alias_id, _, parent_id) in &aliases {
+        if !cross_dup_files.contains(alias_id) {
+            continue;
+        }
+        let mut cur = *parent_id;
+        while let Some(dir) = cur {
             *dir_cross_count.entry(dir).or_insert(0) += 1;
             cur = parent_of.get(&dir).copied().flatten();
         }
@@ -1260,41 +1297,73 @@ mod tests {
         );
     }
 
-    #[test]
-    fn physical_file_count_excludes_aliases_but_not_hidden_sources() {
-        let (conn, ws, src_a, src_b) = setup();
-        let a = insert_node(&conn, src_a, None, "real.jpg", "file", 100);
+    /// Insert a hardlink alias of `canonical` -- a second name for the same
+    /// bytes, which `load_file_locs` filters out and the matcher never sees.
+    fn insert_alias(
+        conn: &Connection,
+        source_id: i64,
+        parent_id: Option<i64>,
+        name: &str,
+        size: i64,
+        canonical: i64,
+    ) -> i64 {
         conn.execute(
             "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, alias_of)
-             VALUES (?1, NULL, 'alias.jpg', 'alias.jpg', 'file', 100, ?2)",
-            params![src_a, a],
+             VALUES (?1, ?2, ?3, ?3, 'file', ?4, ?5)",
+            params![source_id, parent_id, name, size, canonical],
         )
         .unwrap();
-        // Directories never count, only files.
-        insert_node(&conn, src_a, None, "photos", "directory", 0);
-        insert_node(&conn, src_b, None, "other.jpg", "file", 50);
+        conn.last_insert_rowid()
+    }
 
-        let counts = physical_file_count_by_source(&conn, ws).unwrap();
-        assert_eq!(
-            counts.get(&src_a),
-            Some(&1),
-            "the alias is not a file of its own"
-        );
-        assert_eq!(counts.get(&src_b), Some(&1));
+    #[test]
+    fn alias_inherits_its_canonical_cross_dup_annotation() {
+        // Regression: aliases got no `dup_annot` row at all, so every consumer
+        // reading `COALESCE(cross_dup, 0)` treated them as exclusive to this
+        // device. A filtered consolidation drag then carried across a second
+        // name for content whose canonical the same filter had just hidden.
+        let (mut conn, ws, src_a, src_b) = setup();
+        let dir = insert_node(&conn, src_a, None, "photos", "directory", 0);
+        let canonical = insert_node(&conn, src_a, Some(dir), "shared.jpg", "file", 100);
+        let alias = insert_alias(&conn, src_a, Some(dir), "shared_alias.jpg", 100, canonical);
+        let other = insert_node(&conn, src_b, None, "shared.jpg", "file", 100);
+        insert_file_group(&conn, ws, &[canonical, other]);
 
-        // Unlike the matcher's loads, this describes the device itself, so
-        // hiding a source must not blank out its header count.
-        conn.execute(
-            "UPDATE sources SET excluded = 1 WHERE id = ?1",
-            params![src_b],
-        )
-        .unwrap();
-        let counts = physical_file_count_by_source(&conn, ws).unwrap();
+        build_folder_groups(&mut conn, ws).unwrap();
+        rebuild_annotations(&mut conn, ws).unwrap();
+
         assert_eq!(
-            counts.get(&src_b),
-            Some(&1),
-            "an excluded device still has files"
+            cross_dup_of(&conn, canonical),
+            1,
+            "canonical is duplicated on another device"
         );
+        assert_eq!(
+            cross_dup_of(&conn, alias),
+            1,
+            "so its other name is equally non-exclusive and must hide with it"
+        );
+    }
+
+    #[test]
+    fn alias_bumps_cross_dup_count_but_not_cross_dup_size() {
+        // The names/bytes split, at the directory rollup. Two names are hidden
+        // by the funnel, but they are one file's worth of bytes -- and
+        // `subtree_size` excludes alias bytes too, so counting them here would
+        // make `subtree_size - cross_dup_size` subtract bytes never in the
+        // total.
+        let (mut conn, ws, src_a, src_b) = setup();
+        let dir = insert_node(&conn, src_a, None, "photos", "directory", 0);
+        let canonical = insert_node(&conn, src_a, Some(dir), "shared.jpg", "file", 100);
+        insert_alias(&conn, src_a, Some(dir), "shared_alias.jpg", 100, canonical);
+        let other = insert_node(&conn, src_b, None, "shared.jpg", "file", 100);
+        insert_file_group(&conn, ws, &[canonical, other]);
+
+        build_folder_groups(&mut conn, ws).unwrap();
+        rebuild_annotations(&mut conn, ws).unwrap();
+
+        let (_, _, _, cross_size, cross_count) = annot(&conn, dir).unwrap();
+        assert_eq!(cross_count, 2, "both names are hidden, so both count");
+        assert_eq!(cross_size, 100, "but they are one file's worth of bytes");
     }
 
     #[test]

@@ -52,17 +52,16 @@
     const visibleRoots = $derived(
         roots?.filter(n => !filterCrossDevice || !n.cross_dup) ?? null
     );
-    // Both halves of the header are on the *physical* (alias-free) base.
-    // `file_count` is alias-inclusive -- it counts every name on disk, and
-    // links.rs never revises it -- while `cross_dup_file_count`, like
-    // `cross_dup_size`, is computed over canonical files only. Subtracting one
-    // from the other mixed the two bases; `physical_file_count` is the
-    // count counterpart to `physical_size`, so the pair stays consistent
-    // whether or not the funnel is on.
+    // A count counts *names* -- canonical files, hardlink aliases and symlinks
+    // alike -- so it matches what the user would find inspecting the source by
+    // hand. `cross_dup_file_count` is name-based too (an alias inherits its
+    // canonical's `cross_dup`), so both sides of the subtraction agree.
+    // Sizes are the other axis: an alias is a name with zero marginal bytes,
+    // so `physical_size`/`cross_dup_size` stay canonical-only.
     const visibleFileCount = $derived(
         filterCrossDevice
-            ? source.physical_file_count - source.cross_dup_file_count
-            : source.physical_file_count
+            ? source.file_count - source.cross_dup_file_count
+            : source.file_count
     );
     const visibleSize = $derived(
         filterCrossDevice

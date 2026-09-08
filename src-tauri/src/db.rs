@@ -234,7 +234,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 
 /// Target schema version. Bump this and add an entry to `migrate`'s
 /// `alterations` list whenever a column is added to an already-shipped table.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
@@ -393,6 +393,38 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
              phase TEXT NOT NULL, last_cursor INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL
          );",
     )?;
+    // v9 changed what a *count* means: `sources.file_count` and
+    // `nodes.subtree_file_count` now count every name (canonical files,
+    // hardlink aliases and symlinks alike) rather than distinct non-alias
+    // files, so that a count matches what the user finds listing the folder by
+    // hand. Sizes were not touched and still exclude alias bytes.
+    //
+    // Unlike an added column this cannot be defaulted -- the stored numbers are
+    // simply stale -- so already-imported sources are recomputed once here.
+    // Still gated by the `user_version` early-return above, so it does not
+    // reintroduce a write on the common already-current path.
+    //
+    // `dup_annot` deliberately gets no equivalent: it is rebuilt wholesale by
+    // every dedup run, and any workspace reaching this point is already
+    // flagged `dedup_stale`.
+    if current < 9 {
+        let tx = conn.unchecked_transaction()?;
+        let source_ids: Vec<i64> = {
+            let mut stmt = tx.prepare("SELECT id FROM sources")?;
+            let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for source_id in source_ids {
+            crate::links::recompute_subtree_totals(&tx, source_id)?;
+        }
+        tx.execute(
+            "UPDATE sources SET file_count = (
+                 SELECT COUNT(*) FROM nodes
+                 WHERE nodes.source_id = sources.id AND nodes.type IN ('file', 'link'))",
+            [],
+        )?;
+        tx.commit()?;
+    }
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }

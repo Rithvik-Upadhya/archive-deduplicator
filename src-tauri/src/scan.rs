@@ -210,8 +210,14 @@ fn scan_folder_fast(
                 link_target,
             });
 
+            // A count counts *names*: a symlink is something the user finds when listing
+    // the directory, and something they must recreate at a destination, so it
+    // counts. Its bytes do not -- a symlink holds no content of its own, so
+    // `total_size`/`subtree_size` stay files-only.
             if node_type == "file" {
                 flat.total_size += size;
+            }
+            if node_type == "file" || node_type == "link" {
                 flat.file_count += 1;
             }
 
@@ -318,6 +324,8 @@ fn scan_folder_walkdir(root: &Path, mut on_progress: impl FnMut(u64)) -> Result<
 
         if node_type == "file" {
             flat.total_size += size;
+        }
+        if node_type == "file" || node_type == "link" {
             flat.file_count += 1;
         }
     }
@@ -335,6 +343,8 @@ fn rollup(flat: &mut Flattened) {
     for n in flat.nodes.iter_mut() {
         if n.node_type == "file" {
             n.subtree_size = n.size;
+        }
+        if n.node_type == "file" || n.node_type == "link" {
             n.subtree_file_count = 1;
         }
     }

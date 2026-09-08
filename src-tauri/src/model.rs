@@ -45,6 +45,10 @@ pub struct Source {
     pub dev_id: Option<i64>,
     pub imported_at: String,
     pub total_size: i64,
+    /// Every *name* on this device: canonical files, hardlink aliases, and
+    /// symlinks alike. A user inspecting the source by hand must not find a
+    /// different number of files than this reports, so it is deliberately not
+    /// reduced to distinct physical files.
     pub file_count: i64,
     /// When true, this source is left out of the matcher (and its tree panels
     /// are hidden) until re-included, without deleting any of its data.
@@ -71,12 +75,6 @@ pub struct Source {
     /// aliases (`(k-1) * size` per alias set).
     #[serde(default)]
     pub alias_bytes: i64,
-    /// Canonical (non-alias) file count -- the count counterpart to
-    /// `physical_size`. `file_count` stays alias-inclusive (every name on
-    /// disk); pair this one with `physical_size`, and with
-    /// `cross_dup_file_count`, which is canonical-only too.
-    #[serde(default)]
-    pub physical_file_count: i64,
     /// Detected (or user-overridden) storage medium at scan time: "hdd",
     /// "ssd", "network", "optical", "unknown". `None` for JSON imports and
     /// any source scanned before this field existed.
@@ -223,6 +221,13 @@ pub struct ConsolidationNode {
     /// `nodes.rel_path` (full path from the source root) of the origin node.
     #[serde(default)]
     pub origin_path: Option<String>,
+    /// Whether the origin node is a hardlink alias. The row still counts as a
+    /// file (it is a name someone must recreate), but its bytes are already
+    /// accounted for by the canonical, so subtree size rollups must skip them.
+    /// Always false for a node created directly in the consolidation tree,
+    /// which has no `source_node_id` to be an alias of.
+    #[serde(default)]
+    pub is_alias: bool,
 }
 
 /// One node in the consolidated end-state tree, annotated with path-length
