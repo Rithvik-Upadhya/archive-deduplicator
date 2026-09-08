@@ -50,7 +50,10 @@ pub struct Source {
     /// are hidden) until re-included, without deleting any of its data.
     #[serde(default)]
     pub excluded: bool,
-    /// Percentage (0-100) of this device's bytes that appear duplicated elsewhere.
+    /// Percentage (0-100) of this device's *physical* bytes that appear
+    /// duplicated elsewhere -- the base is `physical_size`, not `total_size`,
+    /// because hardlink aliases are excluded from the matcher's candidate pool
+    /// and so can never appear in the numerator.
     #[serde(default)]
     pub duplicated_pct: f64,
     /// Bytes among `total_size` that are cross-device duplicates -- what the
@@ -68,6 +71,12 @@ pub struct Source {
     /// aliases (`(k-1) * size` per alias set).
     #[serde(default)]
     pub alias_bytes: i64,
+    /// Canonical (non-alias) file count -- the count counterpart to
+    /// `physical_size`. `file_count` stays alias-inclusive (every name on
+    /// disk); pair this one with `physical_size`, and with
+    /// `cross_dup_file_count`, which is canonical-only too.
+    #[serde(default)]
+    pub physical_file_count: i64,
     /// Detected (or user-overridden) storage medium at scan time: "hdd",
     /// "ssd", "network", "optical", "unknown". `None` for JSON imports and
     /// any source scanned before this field existed.

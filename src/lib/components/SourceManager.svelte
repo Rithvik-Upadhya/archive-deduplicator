@@ -495,7 +495,12 @@
                             ]}" />
                         <div
                             class="flex items-center justify-between font-heading text-[0.7rem] tabular-nums text-muted-foreground">
-                            <span>{formatBytes(s.total_size)}</span>
+                            <!-- `physical_size`, matching DeviceTree's header
+                                 and the base `duplicated_pct` is computed
+                                 against: quoting `total_size` beside the same
+                                 badge made the two panes disagree about how
+                                 big a device is. -->
+                            <span>{formatBytes(s.physical_size)}</span>
                             {#if s.excluded}
                                 <Badge
                                     variant="outline"

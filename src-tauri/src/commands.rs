@@ -102,6 +102,8 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
     let dup_by_src = rollup::duplicated_size_by_source(&conn, workspace_id).map_err(map_err)?;
     let cross_dup_by_src =
         rollup::cross_dup_size_by_source(&conn, workspace_id).map_err(map_err)?;
+    let phys_files_by_src =
+        rollup::physical_file_count_by_source(&conn, workspace_id).map_err(map_err)?;
     let hash_phase_by_src = hashing::hash_phase_by_source(&conn, workspace_id).map_err(map_err)?;
     let mut stmt = conn
         .prepare(
@@ -127,6 +129,7 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
                 cross_dup_size: 0,
                 cross_dup_file_count: 0,
                 physical_size: r.get(11)?,
+                physical_file_count: 0,
                 alias_bytes: r.get(12)?,
                 medium_kind: r.get(13)?,
                 filesystem: r.get(14)?,
@@ -144,11 +147,32 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
         .map_err(map_err)?;
     for s in &mut sources {
         let dup = *dup_by_src.get(&s.id).unwrap_or(&0);
-        s.duplicated_pct = if s.total_size > 0 {
-            dup as f64 / s.total_size as f64 * 100.0
+        // Physical, not logical: `dup` can only ever range over canonical
+        // files, since the matcher drops hardlink aliases from its candidate
+        // pool. Dividing by `total_size` (which counts every alias) would cap
+        // the badge at `physical_size / total_size` -- on a device where a
+        // third of the bytes are aliases, a perfect duplicate reads as ~63%.
+        //
+        // The fallback is load-bearing, not defensive: `physical_size` was
+        // added with `DEFAULT 0` (db.rs) and `migrate` never backfills it, so
+        // sources imported before that migration still carry 0 here. Every
+        // source created since gets it from
+        // `links::collapse_hardlinks_and_recompute`, which writes it on both
+        // the trusted and untrusted paths.
+        let base = if s.physical_size > 0 {
+            s.physical_size
+        } else {
+            s.total_size
+        };
+        s.duplicated_pct = if base > 0 {
+            dup as f64 / base as f64 * 100.0
         } else {
             0.0
         };
+        s.physical_file_count = phys_files_by_src
+            .get(&s.id)
+            .copied()
+            .unwrap_or(s.file_count);
         let (cross_size, cross_count) = cross_dup_by_src.get(&s.id).copied().unwrap_or((0, 0));
         s.cross_dup_size = cross_size;
         s.cross_dup_file_count = cross_count;
@@ -188,7 +212,7 @@ pub async fn import_tree_json(
         .map_err(map_err)?;
         let source_id = tx.last_insert_rowid();
         parse::insert_nodes(&tx, source_id, &flat).map_err(map_err)?;
-        let (physical_size, alias_bytes) =
+        let (physical_size, alias_bytes, physical_file_count) =
             links::collapse_hardlinks_and_recompute(&tx, source_id).map_err(map_err)?;
         tx.commit().map_err(map_err)?;
 
@@ -219,6 +243,7 @@ pub async fn import_tree_json(
             hashing_phase: None,
             physical_size,
             alias_bytes,
+            physical_file_count,
         })
     })
     .await
@@ -271,7 +296,7 @@ pub async fn scan_folder(
         .map_err(map_err)?;
         let source_id = tx.last_insert_rowid();
         parse::insert_nodes(&tx, source_id, &flat).map_err(map_err)?;
-        let (physical_size, alias_bytes) =
+        let (physical_size, alias_bytes, physical_file_count) =
             links::collapse_hardlinks_and_recompute(&tx, source_id).map_err(map_err)?;
         tx.commit().map_err(map_err)?;
 
@@ -300,6 +325,7 @@ pub async fn scan_folder(
             cross_dup_file_count: 0,
             physical_size,
             alias_bytes,
+            physical_file_count,
         })
     })
     .await

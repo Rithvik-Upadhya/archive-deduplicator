@@ -21,16 +21,23 @@ struct MiniNode {
 /// any trusted alias sets (setting `alias_of`, writing a `kind='hardlink'`
 /// match group per set), recompute `subtree_size`/`subtree_file_count`
 /// excluding aliases from ancestor totals, and refresh `sources.alias_bytes`/
-/// `physical_size`. Returns the new `(physical_size, alias_bytes)` so the
-/// caller can populate the `Source` it returns to the frontend without a
-/// second round-trip query.
+/// `physical_size`. Returns the new `(physical_size, alias_bytes,
+/// physical_file_count)` so the caller can populate the `Source` it returns to
+/// the frontend without a second round-trip query.
+///
+/// `physical_file_count` is the canonical (non-alias) file count. It is
+/// returned rather than stored because `sources.file_count` deliberately keeps
+/// its alias-inclusive import value -- the user still has that many names on
+/// disk -- while anything that pairs a count with `physical_size` needs the
+/// alias-free one. `rollup::physical_file_count_by_source` recomputes it for
+/// sources loaded later.
 ///
 /// Must run inside the same transaction as the `insert_nodes` call that just
 /// created `source_id`, before commit.
 pub fn collapse_hardlinks_and_recompute(
     tx: &Transaction,
     source_id: i64,
-) -> rusqlite::Result<(i64, i64)> {
+) -> rusqlite::Result<(i64, i64, i64)> {
     let (kind, filesystem): (String, Option<String>) = tx.query_row(
         "SELECT kind, filesystem FROM sources WHERE id = ?1",
         params![source_id],
@@ -64,7 +71,13 @@ pub fn collapse_hardlinks_and_recompute(
         params![source_id],
         |r| r.get(0),
     )?;
-    Ok((physical_size, alias_bytes))
+    let physical_file_count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM nodes
+         WHERE source_id = ?1 AND type = 'file' AND alias_of IS NULL",
+        params![source_id],
+        |r| r.get(0),
+    )?;
+    Ok((physical_size, alias_bytes, physical_file_count))
 }
 
 /// Find alias sets (files sharing `(dev, inode)` within this source) and
@@ -322,7 +335,7 @@ mod tests {
             .unwrap();
 
         let tx = conn.transaction().unwrap();
-        let (physical_size, alias_bytes) =
+        let (physical_size, alias_bytes, _physical_file_count) =
             collapse_hardlinks_and_recompute(&tx, source_id).unwrap();
         tx.commit().unwrap();
 
@@ -393,7 +406,7 @@ mod tests {
         let (mut conn, _ws, source_id) =
             setup_with_filesystem("scan", Some("exFAT"), HARDLINK_TREE);
         let tx = conn.transaction().unwrap();
-        let (physical_size, alias_bytes) =
+        let (physical_size, alias_bytes, _physical_file_count) =
             collapse_hardlinks_and_recompute(&tx, source_id).unwrap();
         tx.commit().unwrap();
 
@@ -469,7 +482,7 @@ mod tests {
             .unwrap();
 
         let tx = conn.transaction().unwrap();
-        let (physical_size, alias_bytes) =
+        let (physical_size, alias_bytes, _physical_file_count) =
             collapse_hardlinks_and_recompute(&tx, source_id).unwrap();
         tx.commit().unwrap();
 

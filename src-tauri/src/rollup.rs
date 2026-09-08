@@ -552,16 +552,24 @@ fn load_dir_names(conn: &Connection, workspace_id: i64) -> rusqlite::Result<Hash
 /// its match group spans more than one source (every copy is redundant
 /// somewhere else), **or** when the group is internal to a single source, in
 /// which case all but one copy per source are surplus (`(k - 1) * size`).
+///
+/// The result is measured against a source's *physical* bytes, not its logical
+/// `total_size`: hardlink aliases are excluded from the matcher's candidate
+/// pool (`dedup.rs::load_files` filters `alias_of IS NULL`), so alias bytes can
+/// never appear here. `source_list` divides by `sources.physical_size` to
+/// match -- dividing by `total_size` caps the ratio at `physical/total`, which
+/// on an alias-heavy device reads as a low percentage that no amount of real
+/// duplication can lift.
 pub fn duplicated_size_by_source(
     conn: &Connection,
     workspace_id: i64,
 ) -> rusqlite::Result<HashMap<i64, i64>> {
-    // group_id -> set of source ids and list of (group, source, size).
+    // group_id -> set of source ids and list of (group, node, source, size).
     let mut group_srcs: HashMap<i64, HashSet<i64>> = HashMap::new();
-    let mut members: Vec<(i64, i64, i64)> = Vec::new();
+    let mut members: Vec<(i64, i64, i64, i64)> = Vec::new();
 
     let mut stmt = conn.prepare(
-        "SELECT mm.group_id, n.source_id, n.size FROM match_members mm
+        "SELECT mm.group_id, mm.node_id, n.source_id, n.size FROM match_members mm
          JOIN match_groups mg ON mg.id = mm.group_id
          JOIN nodes n ON n.id = mm.node_id
          WHERE mg.workspace_id = ?1 AND mg.kind = 'file'",
@@ -571,32 +579,74 @@ pub fn duplicated_size_by_source(
             r.get::<_, i64>(0)?,
             r.get::<_, i64>(1)?,
             r.get::<_, i64>(2)?,
+            r.get::<_, i64>(3)?,
         ))
     })?;
     for row in rows {
-        let (gid, src, size) = row?;
+        let (gid, node_id, src, size) = row?;
         group_srcs.entry(gid).or_default().insert(src);
-        members.push((gid, src, size));
+        members.push((gid, node_id, src, size));
     }
 
     // For internal-only groups we count all-but-one copy per source, so we
     // track (group, source) -> member count seen so far.
     let mut seen: HashMap<(i64, i64), i64> = HashMap::new();
+    // As in `cross_dup_size_by_source` below: a file may sit in more than one
+    // match group across tiers (see dedup.rs's note on mixed groups), so count
+    // each node's bytes at most once per source. Without this the total can
+    // exceed the source's own physical size and the badge prints over 100%.
+    let mut counted: HashMap<i64, HashSet<i64>> = HashMap::new();
     let mut result: HashMap<i64, i64> = HashMap::new();
-    for (gid, src, size) in members {
+    for (gid, node_id, src, size) in members {
         let cross = group_srcs.get(&gid).map(|s| s.len() > 1).unwrap_or(false);
-        if cross {
-            *result.entry(src).or_insert(0) += size;
+        let surplus = if cross {
+            true
         } else {
             // Internal duplicates: first copy is the "original", the rest count.
+            // This counter is per (group, source) and stays independent of the
+            // per-node guard -- it decides *whether* a copy is surplus, while
+            // `counted` decides whether an already-surplus node has been
+            // billed to this source under some other group.
             let count = seen.entry((gid, src)).or_insert(0);
-            if *count > 0 {
-                *result.entry(src).or_insert(0) += size;
-            }
+            let is_surplus = *count > 0;
             *count += 1;
+            is_surplus
+        };
+        if surplus && counted.entry(src).or_default().insert(node_id) {
+            *result.entry(src).or_insert(0) += size;
         }
     }
     Ok(result)
+}
+
+/// Canonical (non-alias) file count per source -- the counterpart to
+/// `sources.physical_size`, which `links.rs` refreshes while leaving
+/// `sources.file_count` at its alias-inclusive import value. Computed at read
+/// time rather than stored so no migration is needed; `source_list` pairs it
+/// with `physical_size` so a device header quotes one consistent base.
+///
+/// Deliberately *not* filtered on `s.excluded`, unlike `load_file_locs`: this
+/// describes the device itself rather than the matcher's candidate pool, so
+/// like the stored `physical_size` it stays truthful while a source is hidden.
+pub fn physical_file_count_by_source(
+    conn: &Connection,
+    workspace_id: i64,
+) -> rusqlite::Result<HashMap<i64, i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT n.source_id, COUNT(*) FROM nodes n
+         JOIN sources s ON s.id = n.source_id
+         WHERE s.workspace_id = ?1 AND n.type = 'file' AND n.alias_of IS NULL
+         GROUP BY n.source_id",
+    )?;
+    let rows = stmt.query_map(params![workspace_id], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+    })?;
+    let mut map = HashMap::new();
+    for row in rows {
+        let (src, n) = row?;
+        map.insert(src, n);
+    }
+    Ok(map)
 }
 
 /// Cross-device duplicate bytes and file count per source. Unlike
@@ -1137,6 +1187,114 @@ mod tests {
         let stats = cross_dup_size_by_source(&conn, ws).unwrap();
         assert_eq!(stats.get(&src_a), Some(&(100, 1)), "a's bytes counted once");
         assert_eq!(stats.get(&src_b), Some(&(200, 2)));
+    }
+
+    #[test]
+    fn duplicated_size_by_source_counts_a_file_once_even_in_multiple_groups() {
+        // The `duplicated_size_by_source` counterpart to the
+        // `cross_dup_size_by_source` test above. Without the per-node guard
+        // `a`'s 100 bytes were billed to src_a once per group, so a source
+        // could report more duplicated bytes than it physically holds and the
+        // "% dup" badge printed over 100%.
+        let (conn, ws, src_a, src_b) = setup();
+        let a = insert_node(&conn, src_a, None, "shared.jpg", "file", 100);
+        let b1 = insert_node(&conn, src_b, None, "shared.jpg", "file", 100);
+        let b2 = insert_node(&conn, src_b, None, "shared_alt.jpg", "file", 100);
+        insert_file_group(&conn, ws, &[a, b1]);
+        insert_file_group(&conn, ws, &[a, b2]);
+
+        let dup = duplicated_size_by_source(&conn, ws).unwrap();
+        assert_eq!(dup.get(&src_a), Some(&100), "a's bytes counted once");
+        assert_eq!(dup.get(&src_b), Some(&200));
+    }
+
+    #[test]
+    fn duplicated_size_by_source_still_counts_all_but_one_internal_copy() {
+        // The per-node guard must not disturb the internal-duplicate rule:
+        // three copies in one source means two are surplus. Each node is
+        // distinct, so the guard never fires here.
+        let (conn, ws, src_a, _src_b) = setup();
+        let c1 = insert_node(&conn, src_a, None, "copy1.png", "file", 30);
+        let c2 = insert_node(&conn, src_a, None, "copy2.png", "file", 30);
+        let c3 = insert_node(&conn, src_a, None, "copy3.png", "file", 30);
+        insert_file_group(&conn, ws, &[c1, c2, c3]);
+
+        let dup = duplicated_size_by_source(&conn, ws).unwrap();
+        assert_eq!(dup.get(&src_a), Some(&60), "3 copies -> 2 are surplus");
+    }
+
+    #[test]
+    fn duplicated_size_by_source_is_measured_against_physical_not_logical_bytes() {
+        // The regression that made a byte-for-byte duplicate device read as
+        // ~63%. Every canonical file here is duplicated on the other source,
+        // so the duplicated bytes must equal the source's `physical_size` --
+        // not some fraction of a `total_size` inflated by hardlink aliases.
+        let (conn, ws, src_a, src_b) = setup();
+        let a = insert_node(&conn, src_a, None, "shared.jpg", "file", 100);
+        let b = insert_node(&conn, src_b, None, "shared.jpg", "file", 100);
+        insert_file_group(&conn, ws, &[a, b]);
+        // An alias of `a`: same physical bytes under a second name. It is
+        // excluded from the matcher, so it can never be in the numerator.
+        conn.execute(
+            "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, alias_of)
+             VALUES (?1, NULL, 'shared_alias.jpg', 'shared_alias.jpg', 'file', 100, ?2)",
+            params![src_a, a],
+        )
+        .unwrap();
+
+        let dup = *duplicated_size_by_source(&conn, ws)
+            .unwrap()
+            .get(&src_a)
+            .unwrap();
+        // total_size would be 200 (both names), physical_size is 100.
+        assert_eq!(dup, 100);
+        assert_eq!(
+            dup as f64 / 100.0 * 100.0,
+            100.0,
+            "against physical bytes this device is fully duplicated"
+        );
+        assert_eq!(
+            dup as f64 / 200.0 * 100.0,
+            50.0,
+            "against logical bytes the same device would read as half -- the bug"
+        );
+    }
+
+    #[test]
+    fn physical_file_count_excludes_aliases_but_not_hidden_sources() {
+        let (conn, ws, src_a, src_b) = setup();
+        let a = insert_node(&conn, src_a, None, "real.jpg", "file", 100);
+        conn.execute(
+            "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, alias_of)
+             VALUES (?1, NULL, 'alias.jpg', 'alias.jpg', 'file', 100, ?2)",
+            params![src_a, a],
+        )
+        .unwrap();
+        // Directories never count, only files.
+        insert_node(&conn, src_a, None, "photos", "directory", 0);
+        insert_node(&conn, src_b, None, "other.jpg", "file", 50);
+
+        let counts = physical_file_count_by_source(&conn, ws).unwrap();
+        assert_eq!(
+            counts.get(&src_a),
+            Some(&1),
+            "the alias is not a file of its own"
+        );
+        assert_eq!(counts.get(&src_b), Some(&1));
+
+        // Unlike the matcher's loads, this describes the device itself, so
+        // hiding a source must not blank out its header count.
+        conn.execute(
+            "UPDATE sources SET excluded = 1 WHERE id = ?1",
+            params![src_b],
+        )
+        .unwrap();
+        let counts = physical_file_count_by_source(&conn, ws).unwrap();
+        assert_eq!(
+            counts.get(&src_b),
+            Some(&1),
+            "an excluded device still has files"
+        );
     }
 
     #[test]

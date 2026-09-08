@@ -23,12 +23,19 @@ export interface Source {
     total_size: number;
     file_count: number;
     excluded: boolean;
+    /** Percentage (0-100) of this device's *physical* bytes duplicated
+     *  elsewhere. The base is `physical_size`, not `total_size`: hardlink
+     *  aliases never enter the matcher, so they can never be in the numerator. */
     duplicated_pct: number;
     cross_dup_size: number;
     cross_dup_file_count: number;
     /** `total_size` minus bytes double-counted by hardlink alias sets --
      *  what the UI should display as the device's real disk usage. */
     physical_size: number;
+    /** Canonical (non-alias) file count -- the counterpart to `physical_size`.
+     *  `file_count` stays alias-inclusive (every name on disk); pair this with
+     *  `physical_size` and `cross_dup_file_count`, which are alias-free too. */
+    physical_file_count: number;
     /** Bytes among `total_size` that belong to non-canonical hardlink aliases. */
     alias_bytes: number;
     /** Detected (or user-overridden) storage medium: "hdd" | "ssd" | "network"
