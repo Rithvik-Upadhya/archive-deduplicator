@@ -14,7 +14,13 @@
     import * as AlertDialog from '$lib/components/ui/alert-dialog';
     import { taskTray } from '$lib/stores/tasks.svelte';
 
-    type DragMeta = { name: string; type: TreeNode['type'] };
+    // Kept in lockstep with TreeItem.svelte's DragMeta.
+    type DragMeta = {
+        name: string;
+        type: TreeNode['type'];
+        source_id: number;
+        cross_dup: boolean;
+    };
 
     interface Props {
         source: Source;
@@ -196,12 +202,20 @@
         {visibleFileCount} files · {formatBytes(visibleSize)}
         {#if source.kind === 'scan'}· scanned{/if}
         {#if source.alias_bytes > 0}
+            <!-- No minus sign: the size to the left is already `physical_size`,
+                 so these bytes have been deducted from it, not from what the
+                 reader is looking at. A leading `-` read as a second
+                 subtraction still to apply. -->
             <span
                 class="text-muted-foreground/70"
-                title="{formatBytes(
+                title="This device holds {formatBytes(
+                    source.total_size
+                )} of files by name, but {formatBytes(
                     source.alias_bytes
-                )} of this device's logical size comes from hardlink aliases -- the same physical bytes under more than one name. Counted once here.">
-                (-{formatBytes(source.alias_bytes)} hardlinked, counts once)
+                )} of that is hardlink aliases -- the same physical bytes under more than one name. The {formatBytes(
+                    visibleSize
+                )} shown already counts those bytes once.">
+                ({formatBytes(source.alias_bytes)} hardlinked, counted once)
             </span>
         {/if}
     </div>
