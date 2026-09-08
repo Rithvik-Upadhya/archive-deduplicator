@@ -158,10 +158,7 @@ fn collapse(tx: &Transaction, source_id: i64) -> rusqlite::Result<()> {
 /// `rollup()`, but reads from the `nodes` table directly: `insert_nodes`
 /// already wrote these totals before `alias_of` existed (computed in-memory,
 /// over `FlatNode`s with no concept of aliasing), so they need redoing here.
-pub(crate) fn recompute_subtree_totals(
-    tx: &Transaction,
-    source_id: i64,
-) -> rusqlite::Result<()> {
+pub(crate) fn recompute_subtree_totals(tx: &Transaction, source_id: i64) -> rusqlite::Result<()> {
     let nodes: Vec<MiniNode> = {
         let mut stmt = tx.prepare(
             "SELECT id, parent_id, type, size, alias_of, depth FROM nodes WHERE source_id = ?1",

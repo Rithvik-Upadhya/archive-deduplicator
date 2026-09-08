@@ -34,7 +34,8 @@ pub(crate) fn build_folder_groups(
 ) -> rusqlite::Result<usize> {
     let files = load_file_locs(conn, workspace_id)?;
     let parent_of = load_parent_of(conn, workspace_id)?;
-    build_folder_groups_with(conn, workspace_id, &files, &parent_of)
+    let cross_source = load_cross_source_files(conn, workspace_id)?;
+    build_folder_groups_with(conn, workspace_id, &files, &parent_of, &cross_source)
 }
 
 pub(crate) fn build_folder_groups_with(
@@ -42,24 +43,8 @@ pub(crate) fn build_folder_groups_with(
     workspace_id: i64,
     files: &[FileLoc],
     parent_of: &HashMap<i64, Option<i64>>,
+    cross_source: &HashSet<i64>,
 ) -> rusqlite::Result<usize> {
-    // node_id -> group_id for file members.
-    let mut file_group: HashMap<i64, i64> = HashMap::new();
-    {
-        let mut stmt = conn.prepare(
-            "SELECT mm.node_id, mm.group_id FROM match_members mm
-             JOIN match_groups mg ON mg.id = mm.group_id
-             WHERE mg.workspace_id = ?1 AND mg.kind = 'file'",
-        )?;
-        let rows = stmt.query_map(params![workspace_id], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
-        })?;
-        for row in rows {
-            let (nid, gid) = row?;
-            file_group.insert(nid, gid);
-        }
-    }
-
     let source_of = load_source_of(conn, workspace_id)?;
 
     // For each directory: total subtree file bytes, and duplicated bytes (files
@@ -68,14 +53,6 @@ pub(crate) fn build_folder_groups_with(
     let mut dir_total: HashMap<i64, i64> = HashMap::new();
     let mut dir_dup: HashMap<i64, i64> = HashMap::new();
 
-    // group_id -> list of (source_id, parent_dir_id) to detect cross-source dup.
-    let mut group_sources: HashMap<i64, HashSet<i64>> = HashMap::new();
-    for f in files {
-        if let Some(gid) = file_group.get(&f.node_id) {
-            group_sources.entry(*gid).or_default().insert(f.source_id);
-        }
-    }
-
     for f in files {
         // Accumulate this file's size into every ancestor directory's total.
         let mut cur = f.parent_id;
@@ -83,13 +60,10 @@ pub(crate) fn build_folder_groups_with(
             *dir_total.entry(dir).or_insert(0) += f.size;
             cur = parent_of.get(&dir).copied().flatten();
         }
-        // Is this file duplicated across sources?
-        let is_cross_dup = file_group
-            .get(&f.node_id)
-            .and_then(|gid| group_sources.get(gid))
-            .map(|srcs| srcs.len() > 1)
-            .unwrap_or(false);
-        if is_cross_dup {
+        // Is this file duplicated across sources? See
+        // `load_cross_source_files` for why this must consider *every* group
+        // the file belongs to, not one of them.
+        if cross_source.contains(&f.node_id) {
             let mut cur = f.parent_id;
             while let Some(dir) = cur {
                 *dir_dup.entry(dir).or_insert(0) += f.size;
@@ -445,6 +419,55 @@ pub fn compute_listing_hashes(conn: &mut Connection, workspace_id: i64) -> rusql
     Ok(count)
 }
 
+/// Node ids of files sitting in at least one *cross-source* `kind='file'` match
+/// group -- the set backing both the folder rollup's 80%-overlap heuristic and
+/// `dup_annot.cross_dup` (the "exclusive to this device" funnel).
+///
+/// Built from the raw `match_members` rows, and it must stay that way. A file
+/// can legitimately belong to several groups across tiers (a tier-C match with
+/// one partner, a tier-E match with another), and it is cross-source when
+/// **any** of them spans more than one source. Both call sites used to keep a
+/// `HashMap<node_id, group_id>` filled with `insert`, collapsing a file to one
+/// arbitrary group, and then derive each group's source set from that collapsed
+/// map -- so a group only counted the members that happened to select it, and a
+/// genuine cross-source pair could read as single-source from both ends. The
+/// errors only ever lose cross-ness, never invent it, which is why the symptom
+/// was silent: 2,562 of 30,696 canonical files marked exclusive-to-this-device
+/// while sitting in a cross-source group, with no false positives to notice.
+///
+/// `s.excluded = 0` mirrors `load_file_locs`: a hidden source must not be able
+/// to make a group look cross-source.
+pub(crate) fn load_cross_source_files(
+    conn: &Connection,
+    workspace_id: i64,
+) -> rusqlite::Result<HashSet<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT mm.node_id, mm.group_id, n.source_id FROM match_members mm
+         JOIN match_groups mg ON mg.id = mm.group_id
+         JOIN nodes n ON n.id = mm.node_id
+         JOIN sources s ON s.id = n.source_id
+         WHERE mg.workspace_id = ?1 AND mg.kind = 'file' AND s.excluded = 0",
+    )?;
+    let rows = stmt.query_map(params![workspace_id], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+    })?;
+    let mut group_sources: HashMap<i64, HashSet<i64>> = HashMap::new();
+    let mut node_groups: HashMap<i64, Vec<i64>> = HashMap::new();
+    for row in rows {
+        let (node_id, group_id, source_id) = row?;
+        group_sources.entry(group_id).or_default().insert(source_id);
+        node_groups.entry(node_id).or_default().push(group_id);
+    }
+    Ok(node_groups
+        .into_iter()
+        .filter(|(_, gids)| {
+            gids.iter()
+                .any(|g| group_sources.get(g).map(|s| s.len() > 1).unwrap_or(false))
+        })
+        .map(|(node_id, _)| node_id)
+        .collect())
+}
+
 pub(crate) fn load_file_locs(
     conn: &Connection,
     workspace_id: i64,
@@ -695,7 +718,8 @@ pub(crate) fn rebuild_annotations(
 ) -> rusqlite::Result<()> {
     let files = load_file_locs(conn, workspace_id)?;
     let parent_of = load_parent_of(conn, workspace_id)?;
-    rebuild_annotations_with(conn, workspace_id, &files, &parent_of)
+    let cross_source = load_cross_source_files(conn, workspace_id)?;
+    rebuild_annotations_with(conn, workspace_id, &files, &parent_of, &cross_source)
 }
 
 pub(crate) fn rebuild_annotations_with(
@@ -703,6 +727,7 @@ pub(crate) fn rebuild_annotations_with(
     workspace_id: i64,
     files: &[FileLoc],
     parent_of: &HashMap<i64, Option<i64>>,
+    cross_source: &HashSet<i64>,
 ) -> rusqlite::Result<()> {
     // A file is a duplicate when its group has >= 2 members anywhere (cross-
     // source or internal).
@@ -761,42 +786,11 @@ pub(crate) fn rebuild_annotations_with(
         }
     }
 
-    // A file is a *cross-device* duplicate when its match group contains a
-    // member from a different source_id (reuses the `group_sources` pattern
-    // from `build_folder_groups`, restricted to file-kind groups so folder
-    // groups' directory members don't leak into this check).
-    let mut file_group: HashMap<i64, i64> = HashMap::new();
-    {
-        let mut stmt = conn.prepare(
-            "SELECT mm.node_id, mm.group_id FROM match_members mm
-             JOIN match_groups mg ON mg.id = mm.group_id
-             WHERE mg.workspace_id = ?1 AND mg.kind = 'file'",
-        )?;
-        let rows = stmt.query_map(params![workspace_id], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
-        })?;
-        for row in rows {
-            let (nid, gid) = row?;
-            file_group.insert(nid, gid);
-        }
-    }
-    let mut group_sources: HashMap<i64, HashSet<i64>> = HashMap::new();
-    for f in files {
-        if let Some(gid) = file_group.get(&f.node_id) {
-            group_sources.entry(*gid).or_default().insert(f.source_id);
-        }
-    }
-    let mut cross_dup_files: HashSet<i64> = files
-        .iter()
-        .filter(|f| {
-            file_group
-                .get(&f.node_id)
-                .and_then(|gid| group_sources.get(gid))
-                .map(|srcs| srcs.len() > 1)
-                .unwrap_or(false)
-        })
-        .map(|f| f.node_id)
-        .collect();
+    // A file is a *cross-device* duplicate when any of its match groups holds a
+    // member from a different source_id -- see `load_cross_source_files`, which
+    // is restricted to file-kind groups so folder groups' directory members
+    // don't leak into this check.
+    let mut cross_dup_files: HashSet<i64> = cross_source.clone();
     for (alias_id, canonical_id, _) in &aliases {
         if cross_dup_files.contains(canonical_id) {
             cross_dup_files.insert(*alias_id);
@@ -1314,6 +1308,64 @@ mod tests {
         )
         .unwrap();
         conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn file_in_two_groups_is_cross_dup_via_either_of_them() {
+        // Regression, and the reason the rest of this suite could not catch it:
+        // every other test puts a file in exactly one group, which is the case
+        // that always worked. Here `a` sits in a cross-source group *and* an
+        // internal-only one. The old code kept a single arbitrary group per
+        // node and derived each group's source set from that collapsed map, so
+        // `a` -- and its partner `b` -- could each resolve to the internal
+        // group and read as exclusive-to-this-device despite being a genuine
+        // cross-source duplicate. 2,562 files were mislabelled this way.
+        let (mut conn, ws, src_a, src_b) = setup();
+        let a = insert_node(&conn, src_a, None, "shared.jpg", "file", 100);
+        let b = insert_node(&conn, src_b, None, "shared.jpg", "file", 100);
+        let a2 = insert_node(&conn, src_a, None, "shared_copy.jpg", "file", 100);
+        insert_file_group(&conn, ws, &[a, b]); // cross-source
+        insert_file_group(&conn, ws, &[a, a2]); // internal to src_a, inserted last
+
+        let cross = load_cross_source_files(&conn, ws).unwrap();
+        assert!(cross.contains(&a), "a is cross-source via its first group");
+        assert!(cross.contains(&b));
+        assert!(
+            !cross.contains(&a2),
+            "a2 only ever shares a group with a file on its own source"
+        );
+
+        build_folder_groups(&mut conn, ws).unwrap();
+        rebuild_annotations(&mut conn, ws).unwrap();
+        assert_eq!(cross_dup_of(&conn, a), 1, "and the annotation agrees");
+        assert_eq!(cross_dup_of(&conn, b), 1);
+        assert_eq!(cross_dup_of(&conn, a2), 0);
+    }
+
+    #[test]
+    fn folder_group_forms_when_files_are_cross_source_only_via_a_second_group() {
+        // The same fault in the folder rollup: `dir_dup` under-counted, so a
+        // directory could miss the 80%-overlap threshold and produce no folder
+        // group at all. Every file here is cross-source, but only through a
+        // group that is not the last one inserted for it.
+        let (mut conn, ws, src_a, src_b) = setup();
+        let dir_a = insert_node(&conn, src_a, None, "photos", "directory", 0);
+        let dir_b = insert_node(&conn, src_b, None, "photos", "directory", 0);
+        let a = insert_node(&conn, src_a, Some(dir_a), "one.jpg", "file", 100);
+        let b = insert_node(&conn, src_b, Some(dir_b), "one.jpg", "file", 100);
+        let a2 = insert_node(&conn, src_a, Some(dir_a), "two.jpg", "file", 100);
+        let b2 = insert_node(&conn, src_b, Some(dir_b), "two.jpg", "file", 100);
+        insert_file_group(&conn, ws, &[a, b]);
+        insert_file_group(&conn, ws, &[a2, b2]);
+        // Internal-only groups inserted last, so a collapsed node->group map
+        // would resolve every file to one of these.
+        insert_file_group(&conn, ws, &[a, a2]);
+        insert_file_group(&conn, ws, &[b, b2]);
+
+        let groups = build_folder_groups(&mut conn, ws).unwrap();
+        assert_eq!(groups, 1, "photos/ is 100% cross-source duplicated");
+        rebuild_annotations(&mut conn, ws).unwrap();
+        assert_eq!(in_folder_group_of(&conn, dir_a), 1);
     }
 
     #[test]

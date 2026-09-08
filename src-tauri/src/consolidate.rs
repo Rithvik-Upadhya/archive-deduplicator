@@ -362,8 +362,7 @@ mod tests {
 
         // Unfiltered, both names come across, and the alias is marked.
         let root_id = node_id(&conn, source_id, "photos");
-        let all =
-            materialize_subtree(&mut conn, consolidation_id, None, root_id, false).unwrap();
+        let all = materialize_subtree(&mut conn, consolidation_id, None, root_id, false).unwrap();
         let alias_row = all
             .iter()
             .find(|n| n.source_node_id == Some(alias))

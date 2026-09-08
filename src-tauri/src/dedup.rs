@@ -656,17 +656,28 @@ pub fn run_with_progress(
     on_phase("folder_rollup", 3, TOTAL_PHASES);
     let rollup_files = super::rollup::load_file_locs(conn, workspace_id)?;
     let rollup_parent_of = super::rollup::load_parent_of(conn, workspace_id)?;
+    // Which files sit in a cross-source group. Safe to compute once up front
+    // for both passes: it reads only `kind='file'` groups, and the folder pass
+    // below inserts only `kind='folder'` ones.
+    let rollup_cross_source = super::rollup::load_cross_source_files(conn, workspace_id)?;
     let folder_groups = super::rollup::build_folder_groups_with(
         conn,
         workspace_id,
         &rollup_files,
         &rollup_parent_of,
+        &rollup_cross_source,
     )?;
     let listing_groups = super::rollup::compute_listing_hashes(conn, workspace_id)?;
 
     // Rebuild the per-node duplicate annotation cache so tree browsing is fast.
     on_phase("annotating", 4, TOTAL_PHASES);
-    super::rollup::rebuild_annotations_with(conn, workspace_id, &rollup_files, &rollup_parent_of)?;
+    super::rollup::rebuild_annotations_with(
+        conn,
+        workspace_id,
+        &rollup_files,
+        &rollup_parent_of,
+        &rollup_cross_source,
+    )?;
 
     on_phase("done", TOTAL_PHASES, TOTAL_PHASES);
     Ok(group_count + folder_groups + listing_groups)

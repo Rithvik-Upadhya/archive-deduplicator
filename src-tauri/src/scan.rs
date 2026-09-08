@@ -211,9 +211,9 @@ fn scan_folder_fast(
             });
 
             // A count counts *names*: a symlink is something the user finds when listing
-    // the directory, and something they must recreate at a destination, so it
-    // counts. Its bytes do not -- a symlink holds no content of its own, so
-    // `total_size`/`subtree_size` stay files-only.
+            // the directory, and something they must recreate at a destination, so it
+            // counts. Its bytes do not -- a symlink holds no content of its own, so
+            // `total_size`/`subtree_size` stay files-only.
             if node_type == "file" {
                 flat.total_size += size;
             }
