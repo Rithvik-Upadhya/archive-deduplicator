@@ -7,7 +7,18 @@
     import * as Breadcrumb from '$lib/components/ui/breadcrumb/index.js';
     import TaskTray from '$lib/components/TaskTray.svelte';
     import { app, viewLabel } from '$lib/stores/app.svelte';
+    import { getVersion } from '@tauri-apps/api/app';
     let { children } = $props();
+
+    // Read from the running bundle rather than hardcoded here, so this can
+    // never disagree with `tauri.conf.json` -- the same file the installer and
+    // the updater version against. Null until it resolves, and if it never
+    // does (a `pnpm dev` frontend with no Tauri behind it) it simply doesn't
+    // render.
+    let version = $state<string | null>(null);
+    getVersion()
+        .then((v) => (version = v))
+        .catch(() => (version = null));
 </script>
 
 <Sidebar.Provider class="flex flex-row">
@@ -29,6 +40,14 @@
                     </Breadcrumb.Item>
                 </Breadcrumb.List>
             </Breadcrumb.Root>
+            {#if version}
+                <!-- `Breadcrumb.Root` above carries `grow`, so this sits hard
+                     against the right edge without needing `ms-auto`. -->
+                <span
+                    class="shrink-0 font-heading text-xs tabular-nums text-muted-foreground">
+                    v{version}
+                </span>
+            {/if}
         </div>
         {@render children?.()}
     </main>
