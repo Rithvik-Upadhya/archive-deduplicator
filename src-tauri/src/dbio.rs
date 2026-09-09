@@ -18,12 +18,21 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
+/// One `ext.dup_annot` row joined to its node id, in `SELECT` order:
+/// `(node_id, has_dup, dup_pct, cross_dup, cross_dup_size,
+/// cross_dup_file_count, in_folder_group, skipped, skipped_count)`.
+type DupAnnotRow = (i64, i64, f64, i64, i64, i64, i64, i64, i64);
+
+/// One `ext.consolidation_nodes` row, in `SELECT` order:
+/// `(id, parent_id, name, type, source_node_id, sort_order)`.
+type ConsolidationNodeRow = (i64, Option<i64>, String, String, Option<i64>, i64);
+
 /// Checkpoint the WAL and copy the database file to `dest`.
 pub fn export_to(conn: &Connection, dest: &Path) -> rusqlite::Result<()> {
     if let Some(parent) = dest.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let mut dest_conn = Connection::open(&dest)?;
+    let mut dest_conn = Connection::open(dest)?;
     let backup = Backup::new(conn, &mut dest_conn)?;
     backup.run_to_completion(1000, Duration::from_millis(0), None)?;
     Ok(())
@@ -343,15 +352,38 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
             }
 
             // --- dup_annot (per-node duplicate annotation cache) ---
+            //
+            // `migrate` never runs on `ext`: it is attached read-only, so it
+            // stays at whatever schema version the exporting build wrote. Any
+            // column added to `db.rs`'s `alterations` list therefore needs an
+            // `ext_has_column` guard here too, or importing an older export
+            // fails with `no such column` and rolls the whole import back.
+            // `skipped` / `skipped_count` (v10) are the current instance;
+            // substituting 0 matches their migration DEFAULT, and is right for
+            // the same reason -- `dup_annot` is rebuilt wholesale by the next
+            // dedup run.
             {
-                let mut stmt = tx.prepare(
-                    "SELECT n.id, d.has_dup, d.dup_pct, d.cross_dup, d.cross_dup_size, d.cross_dup_file_count, d.in_folder_group, d.skipped, d.skipped_count
+                // Guarded per column rather than as a pair: `migrate` adds them
+                // as two independent `alterations` entries, so a database
+                // interrupted between the two is a shape that can exist.
+                let skipped = if ext_has_column(&tx, "dup_annot", "skipped")? {
+                    "d.skipped"
+                } else {
+                    "0"
+                };
+                let skipped_count = if ext_has_column(&tx, "dup_annot", "skipped_count")? {
+                    "d.skipped_count"
+                } else {
+                    "0"
+                };
+                let mut stmt = tx.prepare(&format!(
+                    "SELECT n.id, d.has_dup, d.dup_pct, d.cross_dup, d.cross_dup_size, d.cross_dup_file_count, d.in_folder_group, {skipped}, {skipped_count}
                      FROM ext.dup_annot d
                      JOIN ext.nodes n ON n.id = d.node_id
                      JOIN ext.sources s ON s.id = n.source_id
-                     WHERE s.workspace_id = ?1",
-                )?;
-                let rows: Vec<(i64, i64, f64, i64, i64, i64, i64, i64, i64)> = stmt
+                     WHERE s.workspace_id = ?1"
+                ))?;
+                let rows: Vec<DupAnnotRow> = stmt
                     .query_map(params![old_ws_id], |r| {
                         Ok((
                             r.get(0)?,
@@ -453,7 +485,7 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                     "SELECT id, parent_id, name, type, source_node_id, sort_order
                      FROM ext.consolidation_nodes WHERE consolidation_id = ?1 ORDER BY id",
                 )?;
-                let rows: Vec<(i64, Option<i64>, String, String, Option<i64>, i64)> = stmt
+                let rows: Vec<ConsolidationNodeRow> = stmt
                     .query_map(params![old_cons_id], |r| {
                         Ok((
                             r.get(0)?,
@@ -497,14 +529,14 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                         // look it up the slow way (small table, fine to scan).
                         None
                     };
-                    if kind == "source" {
-                        if let Some(new_ref_id) = new_ref_id {
-                            tx.execute(
-                                "INSERT OR IGNORE INTO pathfix_state (workspace_id, kind, ref_id, new_name, original_name, resolved)
-                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                                params![new_ws_id, kind, new_ref_id, new_name, original_name, resolved],
-                            )?;
-                        }
+                    if kind == "source"
+                        && let Some(new_ref_id) = new_ref_id
+                    {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO pathfix_state (workspace_id, kind, ref_id, new_name, original_name, resolved)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                            params![new_ws_id, kind, new_ref_id, new_name, original_name, resolved],
+                        )?;
                     }
                     // "cons" kind pathfix rows are skipped: consolidation node
                     // remapping is per-consolidation and not worth the added
@@ -1012,6 +1044,84 @@ mod tests {
         assert_eq!(
             hashing_enabled, 1,
             "missing column must default to enabled, matching the column's own migration default"
+        );
+    }
+
+    #[test]
+    fn import_merge_tolerates_a_dup_annot_export_missing_the_skip_columns() {
+        // The v10 counterpart of the test above, and the reason the `ext`
+        // guard has to be a rule rather than a one-off: `ext` is attached
+        // read-only and never migrated, so a pre-v10 export has no
+        // `dup_annot.skipped` at all. Selecting it unconditionally raised
+        // `no such column: d.skipped` *inside* the import transaction, which
+        // rolled back the entire import -- every workspace lost, not just the
+        // annotation cache.
+        let path = std::env::temp_dir().join(format!(
+            "archive-dedup-preimport-skip-test-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _cleanup = CleanupOnDrop(path.clone());
+
+        {
+            let seed = db::open(&path).unwrap();
+            seed.execute(
+                "INSERT INTO workspaces (name, created_at, updated_at) VALUES ('old-export', 't', 't')",
+                [],
+            )
+            .unwrap();
+            let ws = seed.last_insert_rowid();
+            seed.execute(
+                "INSERT INTO sources (workspace_id, kind, label, device_label, imported_at, total_size, file_count)
+                 VALUES (?1, 'scan', 'disc-a', 'disc-a', 't', 100, 1)",
+                params![ws],
+            )
+            .unwrap();
+            let src = seed.last_insert_rowid();
+            seed.execute(
+                "INSERT INTO nodes (source_id, parent_id, name, rel_path, type, size, depth)
+                 VALUES (?1, NULL, 'a.jpg', 'a.jpg', 'file', 100, 0)",
+                params![src],
+            )
+            .unwrap();
+            let node = seed.last_insert_rowid();
+            seed.execute(
+                "INSERT INTO dup_annot (node_id, has_dup, dup_pct, cross_dup) VALUES (?1, 1, 100.0, 1)",
+                params![node],
+            )
+            .unwrap();
+            seed.execute("ALTER TABLE dup_annot DROP COLUMN skipped", [])
+                .unwrap();
+            seed.execute("ALTER TABLE dup_annot DROP COLUMN skipped_count", [])
+                .unwrap();
+        }
+
+        let mut dest = Connection::open_in_memory().unwrap();
+        db::init_schema(&dest).unwrap();
+
+        let summary = import_merge(&mut dest, &path)
+            .expect("import must not hard-fail just because an older export predates skipped");
+        assert_eq!(summary.workspaces_added, 1);
+        assert_eq!(summary.nodes_added, 1);
+
+        // The annotation itself must survive -- the point is that the missing
+        // columns are filled in, not that the row is dropped.
+        let (has_dup, cross_dup, skipped, skipped_count): (i64, i64, i64, i64) = dest
+            .query_row(
+                "SELECT d.has_dup, d.cross_dup, d.skipped, d.skipped_count
+                 FROM dup_annot d JOIN nodes n ON n.id = d.node_id WHERE n.name = 'a.jpg'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((has_dup, cross_dup), (1, 1));
+        assert_eq!(
+            (skipped, skipped_count),
+            (0, 0),
+            "missing skip columns take the same DEFAULT their own migration uses"
         );
     }
 }
