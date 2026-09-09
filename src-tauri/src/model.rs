@@ -286,6 +286,14 @@ pub struct PathTreeNode {
     /// consolidation_nodes.sort_order, passed through so the frontend can
     /// compute a correct append position when moving a node via drag-drop.
     pub sort_order: i64,
+    /// Device label this node was dragged in from, and its path on that
+    /// device. Both `None` for a folder the user created by hand, which has no
+    /// source. Shown as the row's hover text -- deliberately *not* what the
+    /// copy button yields, which is the source-free end-state path.
+    #[serde(default)]
+    pub origin_device: Option<String>,
+    #[serde(default)]
+    pub origin_path: Option<String>,
 }
 
 /// Progress payload emitted while a long-running dedup pass is executing.

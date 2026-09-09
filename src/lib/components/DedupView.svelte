@@ -10,7 +10,7 @@
     } from '$lib/types';
     import {
         confidenceTone,
-        copyFolderPath,
+        copyPath,
         formatBytes,
         formatTime,
         pct,
@@ -31,6 +31,11 @@
 
     let selectedNode = $state<TreeNode | null>(null);
     let selectedGroup = $state<MatchGroup | null>(null);
+    // A folder group's members are folders and a file group's are files, so one
+    // label per group covers every member row.
+    const memberCopyLabel = $derived(
+        selectedGroup?.kind === 'folder' ? 'Copy folder path' : 'Copy file path'
+    );
     let sentinel = $state<HTMLElement | null>(null);
     let reviewPane = $state<HTMLElement | null>(null);
 
@@ -322,22 +327,20 @@
                                                         : m.size
                                                 )} · {formatTime(m.mtime)}
                                             </span>
-                                            {#if selectedGroup.kind === 'folder'}
-                                                <Button
-                                                    variant="ghost"
-                                                    size="icon"
-                                                    class="size-5 shrink-0 opacity-0 transition-opacity group-hover/row:opacity-100"
-                                                    title="Copy folder path"
-                                                    onclick={() =>
-                                                        copyFolderPath(
-                                                            m.rel_path,
-                                                            app.pathSep
-                                                        )}>
-                                                    <Icon icon="ph:copy-fill" />
-                                                    <span class="sr-only"
-                                                        >Copy folder path</span>
-                                                </Button>
-                                            {/if}
+                                            <Button
+                                                variant="ghost"
+                                                size="icon"
+                                                class="size-5 shrink-0 opacity-0 transition-opacity group-hover/row:opacity-100"
+                                                title={memberCopyLabel}
+                                                onclick={() =>
+                                                    copyPath(
+                                                        m.rel_path,
+                                                        app.pathSep
+                                                    )}>
+                                                <Icon icon="ph:copy-fill" />
+                                                <span class="sr-only"
+                                                    >{memberCopyLabel}</span>
+                                            </Button>
                                         </li>
                                     {/each}
                                 </ul>
@@ -372,6 +375,10 @@
                         <div class="overflow-y-auto">
                             <ul class="flex flex-col gap-2">
                                 {#each app.groups as g (g.id)}
+                                    {@const groupCopyLabel =
+                                        g.kind === 'folder'
+                                            ? 'Copy folder path'
+                                            : 'Copy file path'}
                                     <li
                                         class="rounded-md border transition-colors data-[folder=true]:border-brand/40 data-[folder=true]:bg-brand/[0.04]"
                                         data-folder={g.kind === 'folder'}>
@@ -414,25 +421,23 @@
                                                         class="flex-1 truncate"
                                                         title={m.rel_path}
                                                         >{m.rel_path}</span>
-                                                    {#if g.kind === 'folder'}
-                                                        <Button
-                                                            variant="ghost"
-                                                            size="icon"
-                                                            class="size-5 shrink-0 opacity-0 transition-opacity group-hover/row:opacity-100"
-                                                            title="Copy folder path"
-                                                            onclick={e => {
-                                                                e.stopPropagation();
-                                                                copyFolderPath(
-                                                                    m.rel_path,
-                                                                    app.pathSep
-                                                                );
-                                                            }}>
-                                                            <Icon
-                                                                icon="ph:copy-fill" />
-                                                            <span class="sr-only"
-                                                                >Copy folder path</span>
-                                                        </Button>
-                                                    {/if}
+                                                    <Button
+                                                        variant="ghost"
+                                                        size="icon"
+                                                        class="size-5 shrink-0 opacity-0 transition-opacity group-hover/row:opacity-100"
+                                                        title={groupCopyLabel}
+                                                        onclick={e => {
+                                                            e.stopPropagation();
+                                                            copyPath(
+                                                                m.rel_path,
+                                                                app.pathSep
+                                                            );
+                                                        }}>
+                                                        <Icon
+                                                            icon="ph:copy-fill" />
+                                                        <span class="sr-only"
+                                                            >{groupCopyLabel}</span>
+                                                    </Button>
                                                 </li>
                                             {/each}
                                         </ul>

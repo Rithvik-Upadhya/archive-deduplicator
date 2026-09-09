@@ -26,6 +26,10 @@ struct CNode {
     name: String,
     node_type: String,
     sort_order: i64,
+    /// Where this node came from, for the tree's hover text. `None` for a
+    /// folder the user made by hand, which has no source.
+    origin_device: Option<String>,
+    origin_path: Option<String>,
 }
 
 /// Stored rename edit for a consolidation node.
@@ -36,10 +40,17 @@ struct FixState {
 }
 
 fn load_cnodes(conn: &Connection, workspace_id: i64) -> rusqlite::Result<Vec<CNode>> {
+    // The two joins are the same pair `consolidation_get` uses, and they must
+    // stay LEFT: a folder the user created by hand has `source_node_id IS NULL`,
+    // and an inner join would drop it from the Fix Paths tree entirely -- a far
+    // worse bug than a missing tooltip.
     let mut stmt = conn.prepare(
-        "SELECT cn.id, cn.parent_id, cn.name, cn.type, cn.sort_order
+        "SELECT cn.id, cn.parent_id, cn.name, cn.type, cn.sort_order,
+                s.device_label, n.rel_path
          FROM consolidation_nodes cn
          JOIN consolidations c ON c.id = cn.consolidation_id
+         LEFT JOIN nodes n ON n.id = cn.source_node_id
+         LEFT JOIN sources s ON s.id = n.source_id
          WHERE c.workspace_id = ?1",
     )?;
     let rows = stmt.query_map(params![workspace_id], |r| {
@@ -49,6 +60,8 @@ fn load_cnodes(conn: &Connection, workspace_id: i64) -> rusqlite::Result<Vec<CNo
             name: r.get(2)?,
             node_type: r.get(3)?,
             sort_order: r.get(4)?,
+            origin_device: r.get(5)?,
+            origin_path: r.get(6)?,
         })
     })?;
     rows.collect()
@@ -111,6 +124,8 @@ impl<'a> Walker<'a> {
         edited: bool,
         path_length: i64,
         sort_order: i64,
+        origin_device: Option<String>,
+        origin_path: Option<String>,
     ) {
         let idx = self.out.len();
         self.out.push(PathTreeNode {
@@ -123,6 +138,8 @@ impl<'a> Walker<'a> {
             over_limit: false,
             path_length,
             sort_order,
+            origin_device,
+            origin_path,
         });
         self.stack.push(idx);
     }
@@ -168,6 +185,8 @@ impl<'a> Walker<'a> {
                 edited,
                 path_length,
                 c.sort_order,
+                c.origin_device.clone(),
+                c.origin_path.clone(),
             );
 
             if node_type == "directory" && has_kids {

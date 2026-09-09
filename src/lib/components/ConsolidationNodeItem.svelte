@@ -1,6 +1,6 @@
 <script lang="ts">
     import type { ConsolidationNode } from '$lib/types';
-    import { copyFolderPath, formatBytes } from '$lib/util';
+    import { copyPath, formatBytes } from '$lib/util';
     import { app } from '$lib/stores/app.svelte';
     import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
     import { consolidationTreeExpanded } from '$lib/stores/treeExpansion.svelte';
@@ -33,6 +33,9 @@
     }: Props = $props();
 
     const isDir = $derived(node.type === 'directory');
+    const copyLabel = $derived(
+        isDir ? 'Copy folder path' : 'Copy file path'
+    );
     const kids = $derived(childrenOf(node.id));
     const nodeStats = $derived(stats.get(node.id));
     const origin = $derived(
@@ -149,22 +152,20 @@
             </span>
         {/if}
 
-        {#if isDir}
-            <Button
-                variant="ghost"
-                size="icon"
-                class="size-6 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/row:opacity-100 hover:text-foreground"
-                title="Copy folder path"
-                aria-label="Copy folder path"
-                onclick={e => {
-                    e.stopPropagation();
-                    // The walk stops at a consolidation root -- a folder the
-                    // user made or dropped -- so no source name is included.
-                    copyFolderPath(pathOf(node.id), app.pathSep);
-                }}>
-                <Icon icon="ph:copy-fill" />
-            </Button>
-        {/if}
+        <Button
+            variant="ghost"
+            size="icon"
+            class="size-6 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/row:opacity-100 hover:text-foreground"
+            title={copyLabel}
+            aria-label={copyLabel}
+            onclick={e => {
+                e.stopPropagation();
+                // The walk stops at a consolidation root -- a folder the
+                // user made or dropped -- so no source name is included.
+                copyPath(pathOf(node.id), app.pathSep);
+            }}>
+            <Icon icon="ph:copy-fill" />
+        </Button>
 
         <Button
             variant="ghost"

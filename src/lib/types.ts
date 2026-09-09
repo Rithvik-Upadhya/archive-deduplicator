@@ -226,6 +226,12 @@ export interface PathTreeNode {
     over_limit: boolean;
     path_length: number;
     sort_order: number;
+    /** Device this node was dragged in from, and its path on that device. Both
+     *  null for a folder the user created by hand. Shown on hover -- and
+     *  deliberately not what the copy button yields, which is the source-free
+     *  end-state path. */
+    origin_device: string | null;
+    origin_path: string | null;
 }
 
 export interface DedupProgress {

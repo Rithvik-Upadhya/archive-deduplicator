@@ -2,7 +2,7 @@
     import { untrack } from 'svelte';
     import type { PathTreeNode } from '$lib/types';
     import { app } from '$lib/stores/app.svelte';
-    import { copyFolderPath } from '$lib/util';
+    import { copyPath } from '$lib/util';
     import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
     import { consolidationTreeExpanded } from '$lib/stores/treeExpansion.svelte';
     import Self from './PathTreeItem.svelte';
@@ -37,6 +37,27 @@
     }: Props = $props();
 
     const isDir = $derived(node.type === 'directory');
+    const copyLabel = $derived(
+        isDir ? 'Copy folder path' : 'Copy file path'
+    );
+    // Where this node came from, in the same shape the Consolidate tree uses.
+    // A folder the user created by hand has no source, so it falls back to its
+    // own name. This is hover text only: the copy button deliberately yields
+    // the end-state path instead, with no device name in it.
+    const origin = $derived(
+        node.origin_device && node.origin_path
+            ? `${node.origin_device}://${node.origin_path}`
+            : node.name
+    );
+    // A renamed row keeps its original name in the tooltip, composed with the
+    // origin rather than replacing it, so an edited row shows both. It used to
+    // end "-- click to rename", which was wrong: renaming is the pencil button,
+    // and clicking the row selects it.
+    const nameTitle = $derived(
+        node.edited
+            ? `${origin}\nOriginally “${node.original_name}”`
+            : origin
+    );
     const kids = $derived(childrenOf(node.id));
     const isLeaf = $derived(kids.length === 0);
 
@@ -152,9 +173,7 @@
                 class="flex-1 truncate {node.over_limit
                     ? 'text-destructive'
                     : ''}"
-                title={node.edited
-                    ? `Originally “${node.original_name}” — click to rename`
-                    : node.name}>
+                title={nameTitle}>
                 {node.name}
             </span>
         {/if}
@@ -181,20 +200,21 @@
                 <span class="sr-only">Revert</span>
             </Button>
         {/if}
-        {#if isDir}
-            <Button
-                variant="ghost"
-                size="icon"
-                class="size-6 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/row:opacity-100 hover:text-foreground"
-                title="Copy folder path"
-                aria-label="Copy folder path"
-                onclick={e => {
-                    e.stopPropagation();
-                    copyFolderPath(pathOf(node.id), app.pathSep);
-                }}>
-                <Icon icon="ph:copy-fill" />
-            </Button>
-        {/if}
+        <Button
+            variant="ghost"
+            size="icon"
+            class="size-6 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/row:opacity-100 hover:text-foreground"
+            title={copyLabel}
+            aria-label={copyLabel}
+            onclick={e => {
+                e.stopPropagation();
+                // Deliberately not `origin`: hovering shows where this came
+                // from, but what you copy is the end-state path, free of any
+                // device name.
+                copyPath(pathOf(node.id), app.pathSep);
+            }}>
+            <Icon icon="ph:copy-fill" />
+        </Button>
         <Button
             variant="ghost"
             size="icon"

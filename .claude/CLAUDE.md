@@ -307,11 +307,21 @@ UI-relevant conventions:
   `BASE` map; `IconName` is derived from the map, so `pnpm check` fails on a name that is used but
   not bundled rather than letting it disappear at runtime. Note `phosphor-svelte@3.1.0` has no
   `Radar`, hence `ph:scan-fill` on the Fix Paths scan button.
-- Copying a folder path uses `copyFolderPath` in `src/lib/util.ts` (`navigator.clipboard` — the
-  Tauri webview's custom protocol is a secure context, so no clipboard plugin is needed) joined on
-  `app.pathSep`, which `init()` fills from the `path_separator` command. Every path it is given is
-  already free of a device/source name: `nodes.rel_path` is relative to the scan root, and the
-  consolidation/pathfix `pathOf` walks stop at a user-made root.
+- Copying a path — a file's or a folder's — uses `copyPath` in `src/lib/util.ts`
+  (`navigator.clipboard` — the Tauri webview's custom protocol is a secure context, so no clipboard
+  plugin is needed) joined on `app.pathSep`, which `init()` fills from the `path_separator` command.
+  Every path it is given is already free of a device/source name: `nodes.rel_path` is relative to
+  the scan root, and the consolidation/pathfix `pathOf` walks stop at a user-made root. It returns
+  a success boolean that no caller currently checks, so a clipboard failure is silent today.
+- **Hover text and copy text deliberately differ in the consolidation and Fix Paths trees.** Both
+  rows show `device://source-path` on hover (`origin`, built from `origin_device`/`origin_path`)
+  while their copy button yields the source-free end-state path from `pathOf`. Do not "fix" them
+  into agreement — a user pasting into a file manager wants a usable path, but a user hovering
+  wants to know which shelf the thing came off. Note this means a Fix Paths row can show a source
+  path in its tooltip while the badge beside it counts the *end-state* path length; that is two
+  different paths in one row, on purpose. `pathfix.rs::load_cnodes` gets the origin from the same
+  two `LEFT JOIN`s `consolidation_get` uses, and they must stay `LEFT`: a hand-created folder has
+  `source_node_id IS NULL` and an inner join would drop it from the tree.
 
 ### Styling
 
@@ -333,9 +343,28 @@ device. "How much" is already the number printed on the badge; what the user dec
 whether deleting something would lose their only copy. So:
 
 - a **file** badge is red when `cross_dup`, grey otherwise;
-- a **folder** badge is red only when `in_folder_group && cross_dup` — a high `dup_pct` alone is
-  not enough, since it pools internal and cross-device bytes and a folder outside a folder match
-  group has no whole-folder verdict to report;
+- a **folder** badge is red when `cross_dup_file_count > 0` — i.e. *any* name beneath it has a copy
+  on another source. Deliberately a count, **not** the directory's own `cross_dup`: that flag is
+  all-or-nothing (`dir_cross_dup` requires *every* leaf to be cross-source), so a folder of
+  ninety-nine unique files and one duplicate rendered grey, asserting "all exclusive to this
+  device" about the one file the user needed to see. The count is also rolled up the whole ancestor
+  chain, so one deeply nested duplicate reddens every folder above it, and it counts *names* —
+  aliases and symlinks included — which is the right axis for "even one file". A further benefit:
+  it drops `cross_dup`'s vacuous truth for a leaf-less directory (`0 == 0`, unguarded), so an empty
+  folder is grey rather than red.
+- that count is in the folder badge's **visibility** gate as well as its tone. `dup_pct` is a share
+  of bytes, so a folder whose only cross-source entries are symlinks, hardlink aliases or empty
+  files has none — exactly the folders the count rule exists to catch. Such a badge prints a red
+  `0%`, which is honest for a byte-share column. Every folder badge's tooltip states what the number
+  is a share *of* — and states plainly that `dup_pct` pools duplication of **both** kinds, since the
+  tone beside it is about cross-device only. One row, two questions; do not let the tooltip imply
+  the percentage is the cross-device share. The extra note explaining a `0%` reading appears **only
+  when the displayed figure is actually 0**, and distinguishes the two ways it can be: the
+  duplicates hold no bytes at all, or they hold so few that one decimal place rounds them away.
+  Those are different facts and the note must not claim the first when it is the second.
+- `in_folder_group` is no longer part of any colour rule but is **still live**: it gates the
+  "Locate duplicates" button, which needs a real folder-kind match group to open. Do not remove it
+  as dead.
 - per-source `% dup` badges carry no tint at all; the split bar beneath them does that job.
 
 `--warn` is deliberately **not** used for duplication, so a yellow mark always means "not judged"

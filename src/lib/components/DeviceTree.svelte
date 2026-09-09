@@ -3,7 +3,7 @@
     import { app } from '$lib/stores/app.svelte';
     import { deviceCollapsed, deviceFilterOn } from '$lib/stores/treeExpansion.svelte';
     import type { Source, TreeNode } from '$lib/types';
-    import { formatBytes, pct } from '$lib/util';
+    import { formatBytes, pct, widestBytesWidth } from '$lib/util';
     import type { TreeSelection } from '$lib/stores/selection.svelte';
     import TreeItem from './TreeItem.svelte';
     import Icon from '$lib/components/Icon.svelte';
@@ -79,6 +79,32 @@
             : source.alias_bytes
     );
 
+    // Column widths for the tree below, derived from this device's own totals
+    // and published as CSS variables on the card so they inherit all the way
+    // down TreeItem's recursion (and reach the label cells in the strip).
+    //
+    // The source row bounds every figure any descendant can show: no subtree
+    // holds more names than the device, and none holds more bytes. Sizing from
+    // the data rather than a fixed guess is what closes the dead space between
+    // columns. `widestBytesWidth` rather than `formatBytes(...).length` because
+    // that width is not monotonic -- see its doc comment.
+    //
+    // The `ch` unit is the width of "0"; the small pad absorbs the letters in a
+    // unit suffix, which are wider than a tabular digit.
+    //
+    // The `physical_size || total_size` fallback is load-bearing, not
+    // defensive, and mirrors `source_list` in commands.rs: that column was
+    // added with DEFAULT 0 and `migrate` never backfills it, so sources
+    // imported before it still carry 0 -- which would size this column to
+    // "0 B" and clip every real figure under it.
+    const colCount = $derived(String(source.file_count).length);
+    const colSize = $derived(
+        widestBytesWidth(source.physical_size || source.total_size)
+    );
+    const colVars = $derived(
+        `--col-count: calc(${colCount}ch + 0.25rem); --col-size: calc(${colSize}ch + 0.5rem)`
+    );
+
     async function load() {
         rootsError = false;
         try {
@@ -131,7 +157,10 @@
     }
 </script>
 
-<div class="mb-2 flex flex-col rounded-md border bg-card" class:grow={expanded}>
+<div
+    class="mb-2 flex flex-col rounded-md border bg-card"
+    class:grow={expanded}
+    style={colVars}>
     <div class="flex shrink-0 items-center gap-1.5 bg-muted/50 px-2 py-1.5">
         <Button
             variant="ghost"
@@ -208,24 +237,47 @@
         </Button>
     </div>
 
+    <!-- The summary doubles as the column header for the tree below: its right
+         half was empty, and it already sits directly above the rows. `pe-2.5`
+         (0.625rem) is not arbitrary -- it puts this strip's end edge exactly on
+         a row's, which is the tree body's `px-1` plus each row's own `px-1.5`.
+         `ps-7` stays: that indent lines the summary up under the device name
+         and has nothing to do with the columns.
+
+         `items-end` so the labels stay on the bottom line, right above the
+         columns they name, if the summary text wraps. -->
     <div
-        class="shrink-0 px-2 pt-2 pb-1 ps-7 border-b-1 font-heading text-xs tabular-nums text-muted-foreground">
-        {visibleFileCount} files · {formatBytes(visibleSize)}
-        {#if source.kind === 'scan'}· scanned{/if}
-        {#if visibleAliasBytes > 0}
-            <!-- No minus sign: the size to the left is already `physical_size`,
-                 so these bytes have been deducted from it, not from what the
-                 reader is looking at. A leading `-` read as a second
-                 subtraction still to apply. -->
-            <span
-                class="text-muted-foreground/70"
-                title="Of the {visibleFileCount} files shown, {formatBytes(
-                    visibleAliasBytes
-                )} is hardlink aliases -- the same physical bytes under more than one name. The {formatBytes(
-                    visibleSize
-                )} shown already counts those bytes once.">
-                ({formatBytes(visibleAliasBytes)} hardlinked, counted once)
-            </span>
+        class="flex shrink-0 items-end gap-1.5 ps-7 pe-2.5 pt-2 pb-1 border-b-1 font-heading text-xs tabular-nums text-muted-foreground">
+        <div class="min-w-0 flex-1">
+            {visibleFileCount} files · {formatBytes(visibleSize)}
+            {#if source.kind === 'scan'}· scanned{/if}
+            {#if visibleAliasBytes > 0}
+                <!-- No minus sign: the size to the left is already
+                     `physical_size`, so these bytes have been deducted from it,
+                     not from what the reader is looking at. A leading `-` read
+                     as a second subtraction still to apply. -->
+                <span
+                    class="text-muted-foreground/70"
+                    title="Of the {visibleFileCount} files shown, {formatBytes(
+                        visibleAliasBytes
+                    )} is hardlink aliases -- the same physical bytes under more than one name. The {formatBytes(
+                        visibleSize
+                    )} shown already counts those bytes once.">
+                    ({formatBytes(visibleAliasBytes)} hardlinked, counted once)
+                </span>
+            {/if}
+        </div>
+
+        <!-- Column labels for the tree. Only while it is open: headings over a
+             collapsed tree label nothing. The two trailing cells are empty
+             because the action columns need no label, but they must still be
+             here or the labels land one column too far right. -->
+        {#if expanded}
+            <span class="w-(--col-count) shrink-0 text-right">files</span>
+            <span class="w-(--col-size) shrink-0 text-right">size</span>
+            <span class="w-12 shrink-0 text-right">dup %</span>
+            <span class="w-5 shrink-0"></span>
+            <span class="w-5 shrink-0"></span>
         {/if}
     </div>
 

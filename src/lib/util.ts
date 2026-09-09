@@ -13,6 +13,23 @@ export function formatBytes(bytes: number): string {
     return `${value.toFixed(value >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+/**
+ * Length of the widest string `formatBytes` can return for any value in
+ * [0, max] -- how wide a column has to be to hold every figure under a total.
+ *
+ * Width is not monotonic in the value: "1023 GB" (7 chars) is wider than
+ * "1 TB" (4), so a column sized from `formatBytes(max)` alone would clip the
+ * very rows it exists to fit. The widest string in each unit tier sits just
+ * below the next boundary, so check those.
+ */
+export function widestBytesWidth(max: number): number {
+    let widest = formatBytes(max).length;
+    for (let i = 1; 1024 ** i - 1 <= max; i++) {
+        widest = Math.max(widest, formatBytes(1024 ** i - 1).length);
+    }
+    return widest;
+}
+
 /** Convert the `tree`-style timestamp (YYYY-MM-DD_HH:MM:SS) to a friendlier form. */
 export function formatTime(time: string | null): string {
     if (!time) return '—';
@@ -85,7 +102,7 @@ export const TASK_STATUS_BAR: Record<TaskStatus, string> = {
  * `nodes.rel_path` is always stored with '/') or a list of segments walked from
  * a tree's root. Neither form carries a device or source name: `rel_path` is
  * relative to the scan root, and a consolidation walk stops at a user-made
- * root, so the result is the folder path the user asked for.
+ * root, so the result is the path the user asked for and nothing more.
  */
 export function joinPath(path: string | string[], sep: string): string {
     const segments = Array.isArray(path) ? path : path.split(/[/\\]/);
@@ -118,14 +135,16 @@ export function pathSegments<
 }
 
 /**
- * Copy a folder path to the clipboard. The Tauri webview serves the app over a
- * custom protocol, which is a secure context, so `navigator.clipboard` is
- * available without the clipboard-manager plugin.
+ * Copy a path -- a file's or a folder's -- to the clipboard. The Tauri webview
+ * serves the app over a custom protocol, which is a secure context, so
+ * `navigator.clipboard` is available without the clipboard-manager plugin.
  *
- * Returns whether the write succeeded, so a caller can surface a failure rather
- * than silently appearing to have copied.
+ * Returns whether the write succeeded, for callers that want to report a
+ * failure. Note that no caller currently checks it, so a clipboard failure is
+ * silent today: the button looks like it worked. Wiring this into `taskTray`
+ * would fix that.
  */
-export async function copyFolderPath(
+export async function copyPath(
     path: string | string[],
     sep: string,
 ): Promise<boolean> {
