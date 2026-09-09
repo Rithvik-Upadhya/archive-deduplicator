@@ -247,6 +247,14 @@ hash_spec)` makes re-scanning an unchanged tree a no-op read-wise. Resumable: ca
   subtrees dragged in wholesale. Renames of consolidation nodes are written straight to
   `consolidation_nodes.name`; renames of files inside a dragged-in source directory are stored as
   virtual edits in `pathfix_state` and folded in at path-computation and export time.
+- **`consolidate.rs`** also owns `purge_source_files`, which `source_delete` must call **before**
+  deleting the source row: `consolidation_nodes.source_node_id` is `ON DELETE SET NULL`, so once
+  the `sources → nodes` cascade runs there is nothing left to say which consolidation rows came
+  from that source, and they survive as ghosts that still count as files while reporting no size
+  and no origin. It removes that source's *files* only — folders are deliberately kept, since
+  working out whether the user has cross-populated one with another source's files costs more than
+  a stray empty folder is worth. Pre-existing ghosts from before this fix are not migrated away;
+  every reader already coalesces a NULL `source_node_id` to 0 bytes / no origin.
 - **`dbio.rs`** — export is a SQLite backup-API copy of the live file. Import is deliberately
   non-destructive: it attaches the external file read-only and recreates every workspace found as
   a _new_ workspace with all foreign keys remapped (including `nodes.alias_of`, which — unlike
@@ -290,6 +298,20 @@ UI-relevant conventions:
 - Match groups are paged (50/page, infinite scroll). `refreshGroups` resets, `loadMoreGroups`
   appends — filter changes must go through `refreshGroups`.
 - Any mutation that invalidates matching sets `dedupStale` so the UI nudges a re-run.
+- **Icons go through `$lib/components/Icon.svelte`. Never import `@iconify/svelte`.** That package
+  ships no icon data — it fetches every glyph from `api.iconify.design` at runtime, so all icons
+  silently render empty offline, which is the one condition this app exists for. The wrapper maps a
+  `ph:*` name onto a bundled `phosphor-svelte` component (weight parsed from the `-fill`/`-bold`
+  suffix), keeping the `icon="ph:name"` string API, so names can still live in plain data like
+  `VIEWS` and `TASK_STATUS_ICON`. Adding an icon means adding its base name to that component's
+  `BASE` map; `IconName` is derived from the map, so `pnpm check` fails on a name that is used but
+  not bundled rather than letting it disappear at runtime. Note `phosphor-svelte@3.1.0` has no
+  `Radar`, hence `ph:scan-fill` on the Fix Paths scan button.
+- Copying a folder path uses `copyFolderPath` in `src/lib/util.ts` (`navigator.clipboard` — the
+  Tauri webview's custom protocol is a secure context, so no clipboard plugin is needed) joined on
+  `app.pathSep`, which `init()` fills from the `path_separator` command. Every path it is given is
+  already free of a device/source name: `nodes.rel_path` is relative to the scan root, and the
+  consolidation/pathfix `pathOf` walks stop at a user-made root.
 
 ### Styling
 

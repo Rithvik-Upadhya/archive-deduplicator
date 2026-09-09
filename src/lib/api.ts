@@ -88,6 +88,8 @@ export const sourceSetExcluded = (sourceId: number, excluded: boolean) =>
     invoke<void>('source_set_excluded', { sourceId, excluded });
 export const sourceCopyToWorkspace = (sourceId: number, targetWorkspaceId: number) =>
     invoke<void>('source_copy_to_workspace', { sourceId, targetWorkspaceId });
+export const pathSeparator = () => invoke<string>('path_separator');
+
 export const sourceDelete = (sourceId: number) =>
     invoke<void>('source_delete', { sourceId });
 

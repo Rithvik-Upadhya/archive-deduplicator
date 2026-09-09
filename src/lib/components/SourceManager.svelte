@@ -13,7 +13,7 @@
         Workspace,
     } from '$lib/types';
     import { DUP_BADGE, DUP_BAR, dupLevel, formatBytes, pct } from '$lib/util';
-    import Icon from '@iconify/svelte';
+    import Icon from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button';
     import { Input } from '$lib/components/ui/input';
     import { Badge } from '$lib/components/ui/badge';

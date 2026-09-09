@@ -3,10 +3,16 @@
     import { app } from '$lib/stores/app.svelte';
     import { deviceTreeExpanded } from '$lib/stores/treeExpansion.svelte';
     import type { NodeType, TreeNode } from '$lib/types';
-    import { DUP_BADGE, dupLevel, formatBytes, pct } from '$lib/util';
+    import {
+        copyFolderPath,
+        DUP_BADGE,
+        dupLevel,
+        formatBytes,
+        pct,
+    } from '$lib/util';
     import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
     import Self from './TreeItem.svelte';
-    import Icon from '@iconify/svelte';
+    import Icon from '$lib/components/Icon.svelte';
     import { Badge } from '$lib/components/ui/badge';
     import { Button } from '$lib/components/ui/button';
 
@@ -146,7 +152,7 @@
 
 <div class="text-sm">
     <div
-        class="group/row flex cursor-pointer items-center gap-1.5 rounded-sm px-1.5 py-0.5 select-none hover:bg-accent hover:text-accent-foreground data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground"
+        class="group/row flex cursor-pointer items-center gap-1.5 px-1.5 py-0.5 select-none hover:bg-accent hover:text-accent-foreground data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground"
         data-dup={node.has_duplicate}
         data-selected={selection?.isSelected(node.id) ?? false}
         {draggable}
@@ -237,6 +243,23 @@
                     class="shrink-0 border-brand/45 px-1 py-0 font-heading text-[0.65rem] text-brand"
                     title="This file likely has duplicates">dup</Badge>
             {/if}
+        {/if}
+
+        {#if isDir}
+            <Button
+                variant="ghost"
+                size="icon"
+                class="size-5 shrink-0 opacity-0 transition-opacity group-hover/row:opacity-100"
+                title="Copy folder path"
+                onclick={e => {
+                    e.stopPropagation();
+                    // `rel_path` is relative to the scan root, so the copied
+                    // path carries no device or source name.
+                    copyFolderPath(node.rel_path, app.pathSep);
+                }}>
+                <Icon icon="ph:copy-fill" />
+                <span class="sr-only">Copy folder path</span>
+            </Button>
         {/if}
 
         {#if showLocate}

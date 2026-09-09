@@ -3,6 +3,7 @@
 // mutations that matter to persistence are pushed to the Rust/SQLite backend.
 
 import * as api from '../api';
+import type { IconName } from '../components/Icon.svelte';
 import type {
     GroupSort,
     HashScanReportDto,
@@ -16,7 +17,7 @@ import type {
 const GROUP_PAGE_SIZE = 50;
 
 /** Navigation metadata shared by the sidebar and the breadcrumb. */
-export const VIEWS: { id: ViewName; label: string; icon: string }[] = [
+export const VIEWS: { id: ViewName; label: string; icon: IconName }[] = [
     { id: 'dedup', label: 'Deduplicate', icon: 'ph:copy-simple-fill' },
     { id: 'consolidate', label: 'Consolidate', icon: 'ph:tree-view-fill' },
     { id: 'pathlimits', label: 'Fix Paths', icon: 'ph:password-fill' },
@@ -59,6 +60,13 @@ class AppState {
      *  (without a dedup rerun) doesn't change what `getTree` returns. */
     treeVersion = $state(0);
 
+    /**
+     * The host OS path separator, used when copying a folder path so it can be
+     * pasted straight into the user's own file manager. Defaults to '/' until
+     * `init()` has asked the backend.
+     */
+    pathSep = $state('/');
+
     loading = $state(true);
 
     /** Guards against `init()` running more than once. */
@@ -78,6 +86,13 @@ class AppState {
         this.started = true;
         this.loading = true;
         try {
+            // Cosmetic, so it gets its own catch: failing to learn the
+            // separator must not take the whole boot down with it. '/' stays.
+            try {
+                this.pathSep = await api.pathSeparator();
+            } catch {
+                /* keep the default */
+            }
             this.workspaces = await api.workspaceList();
             if (this.workspaces.length === 0) {
                 const ws = await api.workspaceCreate('Workspace 1');

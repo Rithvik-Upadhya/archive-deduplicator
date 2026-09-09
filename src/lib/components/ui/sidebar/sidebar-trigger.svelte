@@ -1,5 +1,5 @@
 <script lang="ts">
-    import Icon from '@iconify/svelte';
+    import Icon from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button/index.js';
     import { cn } from '$lib/utils.js';
     import { useSidebar } from './context.svelte.js';

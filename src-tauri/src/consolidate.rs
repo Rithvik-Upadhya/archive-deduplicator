@@ -188,6 +188,48 @@ pub fn materialize_subtree(
     Ok(out)
 }
 
+/// Removes a source's *files* from the consolidation tree, plus any virtual
+/// renames that pointed at them.
+///
+/// Must run **before** the source row is deleted. `consolidation_nodes
+/// .source_node_id` is `ON DELETE SET NULL`, so once `sources -> nodes`
+/// cascades there is nothing left to identify which consolidation rows came
+/// from this source; they would survive as ghosts that still count as files
+/// while reporting no size and no origin.
+///
+/// Folders are deliberately kept. Deciding whether the user has since
+/// cross-populated one with files from another source costs far more than a
+/// stray empty folder is worth, and they can delete it by hand. `type` here is
+/// only ever 'file' or 'directory' (see [`normalize_type`]), so the filter is
+/// exact.
+pub fn purge_source_files(conn: &Connection, source_id: i64) -> rusqlite::Result<()> {
+    // Virtual renames first: the `kind='cons'` ones are keyed on the very
+    // consolidation rows the last statement removes.
+    conn.execute(
+        "DELETE FROM pathfix_state
+          WHERE kind = 'cons'
+            AND ref_id IN (SELECT cn.id
+                             FROM consolidation_nodes cn
+                            WHERE cn.type = 'file'
+                              AND cn.source_node_id IN
+                                  (SELECT id FROM nodes WHERE source_id = ?1))",
+        params![source_id],
+    )?;
+    conn.execute(
+        "DELETE FROM pathfix_state
+          WHERE kind = 'source'
+            AND ref_id IN (SELECT id FROM nodes WHERE source_id = ?1)",
+        params![source_id],
+    )?;
+    conn.execute(
+        "DELETE FROM consolidation_nodes
+          WHERE type = 'file'
+            AND source_node_id IN (SELECT id FROM nodes WHERE source_id = ?1)",
+        params![source_id],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,5 +475,99 @@ mod tests {
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].source_node_id, Some(root_id));
         assert_eq!(filtered[0].name, "photos");
+    }
+
+    /// Adds a second source to an existing workspace, so a deletion test can
+    /// prove it removes one source's rows *and nothing else*.
+    fn add_source(conn: &mut Connection, ws: i64, label: &str, json: &str) -> i64 {
+        let flat = parse::parse_tree_json(json).unwrap();
+        let tx = conn.transaction().unwrap();
+        tx.execute(
+            "INSERT INTO sources (workspace_id, kind, label, device_label, imported_at, total_size, file_count)
+             VALUES (?1, 'json', ?2, ?2, 't', ?3, ?4)",
+            params![ws, label, flat.total_size, flat.file_count],
+        )
+        .unwrap();
+        let source_id = tx.last_insert_rowid();
+        parse::insert_nodes(&tx, source_id, &flat).unwrap();
+        tx.commit().unwrap();
+        source_id
+    }
+
+    #[test]
+    fn purging_a_source_drops_its_files_but_keeps_its_folders_and_other_sources() {
+        // Deleting a source used to leave its consolidation rows behind: the
+        // `source_node_id` FK is ON DELETE SET NULL, so the cascade erased the
+        // only link rather than the rows. They survived as ghosts that still
+        // counted as files while reporting no size and no origin.
+        let (mut conn, ws, source_a, consolidation_id) = setup(NESTED_TREE);
+        let source_b = add_source(&mut conn, ws, "disc-b", NESTED_TREE);
+
+        let a_root = node_id(&conn, source_a, "photos");
+        let b_root = node_id(&conn, source_b, "photos");
+        materialize_subtree(&mut conn, consolidation_id, None, a_root, false).unwrap();
+        materialize_subtree(&mut conn, consolidation_id, None, b_root, false).unwrap();
+
+        // A virtual rename hanging off one of A's dragged-in files, and one off
+        // a hand-made folder that must survive.
+        let a_file = node_id(&conn, source_a, "photos/2024/a.jpg");
+        let a_file_cons: i64 = conn
+            .query_row(
+                "SELECT id FROM consolidation_nodes WHERE source_node_id = ?1",
+                params![a_file],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO pathfix_state (workspace_id, kind, ref_id, new_name)
+             VALUES (?1, 'cons', ?2, 'renamed.jpg'), (?1, 'source', ?3, 'other.jpg')",
+            params![ws, a_file_cons, a_file],
+        )
+        .unwrap();
+
+        let files_from = |conn: &Connection, sid: i64| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM consolidation_nodes cn
+                   JOIN nodes n ON n.id = cn.source_node_id
+                  WHERE cn.type = 'file' AND n.source_id = ?1",
+                params![sid],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let dirs_from = |conn: &Connection, sid: i64| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM consolidation_nodes cn
+                   JOIN nodes n ON n.id = cn.source_node_id
+                  WHERE cn.type = 'directory' AND n.source_id = ?1",
+                params![sid],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        // Both sources start out fully represented, so the assertions below
+        // cannot pass vacuously.
+        assert!(files_from(&conn, source_a) > 0);
+        assert!(dirs_from(&conn, source_a) > 0);
+        let b_files_before = files_from(&conn, source_b);
+        let b_dirs_before = dirs_from(&conn, source_b);
+        assert!(b_files_before > 0);
+
+        purge_source_files(&conn, source_a).unwrap();
+
+        assert_eq!(files_from(&conn, source_a), 0, "A's files must be gone");
+        assert!(
+            dirs_from(&conn, source_a) > 0,
+            "A's folders are deliberately left behind"
+        );
+        assert_eq!(files_from(&conn, source_b), b_files_before, "B untouched");
+        assert_eq!(dirs_from(&conn, source_b), b_dirs_before, "B untouched");
+
+        // The virtual rename on A's file goes with it; nothing else does.
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pathfix_state", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0, "both dangling renames swept");
     }
 }

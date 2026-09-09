@@ -1,6 +1,6 @@
 <script lang="ts">
     import * as Sidebar from '$lib/components/ui/sidebar';
-    import Icon from '@iconify/svelte';
+    import Icon from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button';
     import * as ButtonGroup from '$lib/components/ui/button-group';
     import * as DropdownMenu from '$lib/components/ui/dropdown-menu';

@@ -711,6 +711,12 @@ fn sweep_orphaned_match_groups(conn: &rusqlite::Connection) -> rusqlite::Result<
 pub fn source_delete(db: State<Db>, source_id: i64) -> CmdResult<()> {
     let mut conn = db.lock();
     let tx = conn.transaction().map_err(map_err)?;
+
+    // Strictly before the `DELETE FROM sources` below: the cascade into `nodes`
+    // nulls out `consolidation_nodes.source_node_id`, which is the only thing
+    // tying a consolidation row back to this source. See the doc comment there.
+    crate::consolidate::purge_source_files(&tx, source_id).map_err(map_err)?;
+
     tx.execute("DELETE FROM sources WHERE id = ?1", params![source_id])
         .map_err(map_err)?;
     // Cascading deletes just removed this source's nodes, and with them
@@ -723,6 +729,14 @@ pub fn source_delete(db: State<Db>, source_id: i64) -> CmdResult<()> {
     sweep_orphaned_match_groups(&tx).map_err(map_err)?;
     tx.commit().map_err(map_err)?;
     Ok(())
+}
+
+/// The host OS path separator, so the frontend can render and copy paths the
+/// way the user's own file manager writes them. Cheaper and more honest than
+/// sniffing the webview's user agent.
+#[tauri::command]
+pub fn path_separator() -> String {
+    std::path::MAIN_SEPARATOR.to_string()
 }
 
 // ---------------------------------------------------------------------------

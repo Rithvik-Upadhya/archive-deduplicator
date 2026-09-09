@@ -7,7 +7,7 @@
     import { Label } from '$lib/components/ui/label';
     import * as Dialog from '$lib/components/ui/dialog';
     import * as ToggleGroup from '$lib/components/ui/toggle-group';
-    import Icon from '@iconify/svelte';
+    import Icon from '$lib/components/Icon.svelte';
     import { taskTray } from '$lib/stores/tasks.svelte';
 
     let {

@@ -58,6 +58,7 @@ pub fn run() {
             commands::source_set_excluded,
             commands::source_copy_to_workspace,
             commands::source_delete,
+            commands::path_separator,
             commands::get_tree,
             commands::run_dedup,
             commands::get_groups,

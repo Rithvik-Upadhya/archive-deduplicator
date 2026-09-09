@@ -6,7 +6,7 @@
     import { DUP_BADGE, dupLevel, formatBytes, pct } from '$lib/util';
     import type { TreeSelection } from '$lib/stores/selection.svelte';
     import TreeItem from './TreeItem.svelte';
-    import Icon from '@iconify/svelte';
+    import Icon from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button';
     import { Input } from '$lib/components/ui/input';
     import { Badge } from '$lib/components/ui/badge';

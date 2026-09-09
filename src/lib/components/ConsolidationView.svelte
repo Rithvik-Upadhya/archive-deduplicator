@@ -6,7 +6,7 @@
     import { TreeSelection } from '$lib/stores/selection.svelte';
     import DeviceTree from './DeviceTree.svelte';
     import ConsolidationNodeItem from './ConsolidationNodeItem.svelte';
-    import Icon from '@iconify/svelte';
+    import Icon from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button';
     import { Input } from '$lib/components/ui/input';
     import * as Dialog from '$lib/components/ui/dialog';
@@ -14,6 +14,7 @@
     import * as Field from '$lib/components/ui/field';
     import * as Empty from '$lib/components/ui/empty';
     import { taskTray } from '$lib/stores/tasks.svelte';
+    import { formatBytes, pathSegments } from '$lib/util';
 
     let consolidationId = $state<number | null>(null);
     let nodes = $state<ConsolidationNode[]>([]);
@@ -51,14 +52,21 @@
         }
     }
 
-    // Reload whenever the active workspace changes.
+    // Reload whenever the active workspace changes, or whenever the source
+    // trees change underneath us. The latter matters because deleting a source
+    // also deletes its files from the consolidation tree in the same
+    // transaction; without this the in-memory `nodes` array would keep showing
+    // them until the next workspace switch.
     let loadedFor = $state<number | null>(null);
+    let loadedTreeVersion = $state<number | null>(null);
     $effect(() => {
         if (
             app.activeWorkspaceId != null &&
-            app.activeWorkspaceId !== loadedFor
+            (app.activeWorkspaceId !== loadedFor ||
+                app.treeVersion !== loadedTreeVersion)
         ) {
             loadedFor = app.activeWorkspaceId;
+            loadedTreeVersion = app.treeVersion;
             load();
         }
     });
@@ -86,9 +94,12 @@
         // (node_modules read 7.6 MB where the content occupies 1.9 MB).
         // Symlinks arrive here as type 'file' via normalize_type and have no
         // content bytes of their own, so `size` is null and contributes 0.
+        const total = { size: 0, fileCount: 0 };
         for (const n of nodes) {
             if (n.type !== 'file') continue;
             const size = n.is_alias ? 0 : (n.size ?? 0);
+            total.size += size;
+            total.fileCount += 1;
             let pid = n.parent_id;
             while (pid != null) {
                 const cur = stats.get(pid) ?? { size: 0, fileCount: 0 };
@@ -98,8 +109,11 @@
                 pid = byId.get(pid)?.parent_id ?? null;
             }
         }
-        return { byParent, stats };
+        return { byParent, stats, byId, total };
     });
+
+    /** A node's path within the consolidated tree, root-first. */
+    const pathOf = (id: number) => pathSegments(index.byId, id);
 
     function childrenOf(parentId: number | null): ConsolidationNode[] {
         return index.byParent.get(parentId) ?? [];
@@ -358,7 +372,14 @@
     <!-- Consolidated target tree -->
     <section class="flex min-h-0 min-w-0 flex-col overflow-hidden">
         <div class="mb-2 flex items-center justify-between gap-2">
-            <h2 class="section-label">Consolidated tree</h2>
+            <div class="flex min-w-0 items-baseline gap-2">
+                <h2 class="section-label">Consolidated tree</h2>
+                <span class="truncate text-xs text-muted-foreground">
+                    {index.total.fileCount.toLocaleString()}
+                    {index.total.fileCount === 1 ? 'file' : 'files'} ·
+                    {formatBytes(index.total.size)}
+                </span>
+            </div>
             <Button variant="outline" size="sm" onclick={openNewFolderDialog}>
                 <Icon icon="ph:folder-plus-fill" />
                 <span>Folder</span>
@@ -390,6 +411,7 @@
                         {node}
                         {childrenOf}
                         stats={index.stats}
+                        {pathOf}
                         selection={consSelection}
                         ondelete={n => (deleteTarget = n)}
                         ondropInto={handleDrop}

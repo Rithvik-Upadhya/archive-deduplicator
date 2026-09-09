@@ -71,9 +71,10 @@ export function confidenceTone(percent: number): string {
 /* --- Task tray -------------------------------------------------------- */
 
 import type { TaskStatus } from './stores/tasks.svelte';
+import type { IconName } from './components/Icon.svelte';
 
 /** Icon + text colour for a task tray card's status glyph. */
-export const TASK_STATUS_ICON: Record<TaskStatus, { icon: string; class: string }> = {
+export const TASK_STATUS_ICON: Record<TaskStatus, { icon: IconName; class: string }> = {
     running: { icon: 'ph:spinner-gap-fill', class: 'animate-spin text-muted-foreground' },
     success: { icon: 'ph:check-circle-fill', class: 'text-ok' },
     error: { icon: 'ph:x-circle-fill', class: 'text-destructive' },
@@ -85,3 +86,64 @@ export const TASK_STATUS_BAR: Record<TaskStatus, string> = {
     success: '[&_[data-slot=progress-indicator]]:bg-ok',
     error: '[&_[data-slot=progress-indicator]]:bg-destructive',
 };
+
+/* --- Folder paths ------------------------------------------------------- */
+
+/**
+ * Join path segments with the host OS separator.
+ *
+ * Accepts either an already-built path (whose own separators are normalized --
+ * `nodes.rel_path` is always stored with '/') or a list of segments walked from
+ * a tree's root. Neither form carries a device or source name: `rel_path` is
+ * relative to the scan root, and a consolidation walk stops at a user-made
+ * root, so the result is the folder path the user asked for.
+ */
+export function joinPath(path: string | string[], sep: string): string {
+    const segments = Array.isArray(path) ? path : path.split(/[/\\]/);
+    return segments.filter(s => s.length > 0).join(sep);
+}
+
+/**
+ * Walk a node's parent chain and return its path segments, root-first.
+ *
+ * Shared by the consolidation and Fix Paths trees: same algorithm, different id
+ * spaces, so it lives here rather than being written out twice. Both trees walk
+ * to a consolidation root -- a folder the user made or dropped -- so the result
+ * never contains a device or source name.
+ */
+export function pathSegments<
+    T extends { id: number; name: string; parent_id: number | null },
+>(byId: Map<number, T>, id: number): string[] {
+    const segments: string[] = [];
+    let cur: number | null = id;
+    // A malformed parent chain would otherwise spin forever inside a render.
+    const seen = new Set<number>();
+    while (cur != null && !seen.has(cur)) {
+        seen.add(cur);
+        const node = byId.get(cur);
+        if (!node) break;
+        segments.unshift(node.name);
+        cur = node.parent_id;
+    }
+    return segments;
+}
+
+/**
+ * Copy a folder path to the clipboard. The Tauri webview serves the app over a
+ * custom protocol, which is a secure context, so `navigator.clipboard` is
+ * available without the clipboard-manager plugin.
+ *
+ * Returns whether the write succeeded, so a caller can surface a failure rather
+ * than silently appearing to have copied.
+ */
+export async function copyFolderPath(
+    path: string | string[],
+    sep: string,
+): Promise<boolean> {
+    try {
+        await navigator.clipboard.writeText(joinPath(path, sep));
+        return true;
+    } catch {
+        return false;
+    }
+}

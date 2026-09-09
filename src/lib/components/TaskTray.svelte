@@ -2,7 +2,7 @@
     import { taskTray, type Task } from '$lib/stores/tasks.svelte';
     import { TASK_STATUS_BAR, TASK_STATUS_ICON } from '$lib/util';
     import { cancelHashScan } from '$lib/api';
-    import Icon from '@iconify/svelte';
+    import Icon from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button';
     import { Progress } from '$lib/components/ui/progress';
     import * as Card from '$lib/components/ui/card';

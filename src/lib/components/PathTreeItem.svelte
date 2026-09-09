@@ -1,10 +1,12 @@
 <script lang="ts">
     import { untrack } from 'svelte';
     import type { PathTreeNode } from '$lib/types';
+    import { app } from '$lib/stores/app.svelte';
+    import { copyFolderPath } from '$lib/util';
     import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
     import { consolidationTreeExpanded } from '$lib/stores/treeExpansion.svelte';
     import Self from './PathTreeItem.svelte';
-    import Icon from '@iconify/svelte';
+    import Icon from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button';
     import { Input } from '$lib/components/ui/input';
     import { Badge } from '$lib/components/ui/badge';
@@ -12,6 +14,8 @@
     interface Props {
         node: PathTreeNode;
         childrenOf: (parentId: number | null) => PathTreeNode[];
+        /** Path of a node within the end-state tree, root-first. */
+        pathOf: (id: number) => string[];
         limit: number;
         selection: TreeSelection;
         onrename: (node: PathTreeNode, newName: string) => void;
@@ -23,6 +27,7 @@
     let {
         node,
         childrenOf,
+        pathOf,
         limit,
         selection,
         onrename,
@@ -89,7 +94,7 @@
 
 <div class="text-sm">
     <div
-        class="group/row flex items-center gap-1.5 rounded-sm border border-transparent px-1.5 py-0.5 select-none data-[dir=true]:bg-muted/50 data-[over=true]:border-destructive/50 data-[over=true]:bg-destructive/[0.06] data-[drag=true]:border-brand data-[drag=true]:bg-brand/15 data-[selected=true]:bg-accent"
+        class="group/row flex items-center gap-1.5 border border-transparent px-1.5 py-0.5 select-none data-[dir=true]:bg-muted/50 data-[over=true]:border-destructive/50 data-[over=true]:bg-destructive/[0.06] data-[drag=true]:border-brand data-[drag=true]:bg-brand/15 data-[selected=true]:bg-accent"
         data-dir={isDir}
         data-over={node.over_limit}
         data-drag={dragOver}
@@ -176,6 +181,20 @@
                 <span class="sr-only">Revert</span>
             </Button>
         {/if}
+        {#if isDir}
+            <Button
+                variant="ghost"
+                size="icon"
+                class="size-6 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/row:opacity-100 hover:text-foreground"
+                title="Copy folder path"
+                aria-label="Copy folder path"
+                onclick={e => {
+                    e.stopPropagation();
+                    copyFolderPath(pathOf(node.id), app.pathSep);
+                }}>
+                <Icon icon="ph:copy-fill" />
+            </Button>
+        {/if}
         <Button
             variant="ghost"
             size="icon"
@@ -206,6 +225,7 @@
                 <Self
                     node={child}
                     {childrenOf}
+                    {pathOf}
                     {limit}
                     {selection}
                     {onrename}

@@ -4,7 +4,8 @@
     import type { PathTreeNode } from '$lib/types';
     import { TreeSelection } from '$lib/stores/selection.svelte';
     import PathTreeItem from './PathTreeItem.svelte';
-    import Icon from '@iconify/svelte';
+    import Icon from '$lib/components/Icon.svelte';
+    import { pathSegments } from '$lib/util';
     import { Button } from '$lib/components/ui/button';
     import { Slider } from '$lib/components/ui/slider';
     import { Label } from '$lib/components/ui/label';
@@ -59,12 +60,20 @@
             bucket.push(n);
             byParent.set(n.parent_id, bucket);
         }
-        return byParent;
+        const byId = new Map(nodes.map(n => [n.id, n]));
+        return { byParent, byId };
     });
 
     function childrenOf(parentId: number | null): PathTreeNode[] {
-        return index.get(parentId) ?? [];
+        return index.byParent.get(parentId) ?? [];
     }
+
+    /**
+     * A node's path within the end-state tree, root-first -- the same path
+     * pathfix.rs measures against the 260-char limit. `name` already reflects
+     * any pending virtual rename.
+     */
+    const pathOf = (id: number) => pathSegments(index.byId, id);
 
     /** Ids in `ids` that lie under some other id also in `ids` -- moving the
      *  ancestor already carries them along, so moving them again to the
@@ -73,7 +82,7 @@
      *  closure, to stay O(k*depth) instead of O(k^2). */
     function topLevelOf(ids: number[]): number[] {
         const idsSet = new Set(ids);
-        const byId = new Map(nodes.map(n => [n.id, n]));
+        const byId = index.byId;
         return ids.filter(id => {
             let pid = byId.get(id)?.parent_id ?? null;
             while (pid != null) {
@@ -202,7 +211,7 @@
         </div>
         <Button variant="outline" disabled={loading} onclick={reload}>
             <Icon
-                icon={loading ? 'ph:spinner-gap-fill' : 'ph:radar-fill'}
+                icon={loading ? 'ph:spinner-gap-fill' : 'ph:scan-fill'}
                 class={loading ? 'animate-spin' : ''} />
             <span>{loading ? 'Scanning…' : 'Rescan'}</span>
         </Button>
@@ -257,6 +266,7 @@
                     <PathTreeItem
                         {node}
                         {childrenOf}
+                        {pathOf}
                         {limit}
                         {selection}
                         onrename={handleRename}

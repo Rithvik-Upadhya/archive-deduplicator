@@ -1,10 +1,11 @@
 <script lang="ts">
     import type { ConsolidationNode } from '$lib/types';
-    import { formatBytes } from '$lib/util';
+    import { copyFolderPath, formatBytes } from '$lib/util';
+    import { app } from '$lib/stores/app.svelte';
     import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
     import { consolidationTreeExpanded } from '$lib/stores/treeExpansion.svelte';
     import Self from './ConsolidationNodeItem.svelte';
-    import Icon from '@iconify/svelte';
+    import Icon from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button';
     import { Input } from '$lib/components/ui/input';
 
@@ -12,6 +13,8 @@
         node: ConsolidationNode;
         childrenOf: (parentId: number | null) => ConsolidationNode[];
         stats: Map<number, { size: number; fileCount: number }>;
+        /** Path of a node within the consolidated tree, root-first. */
+        pathOf: (id: number) => string[];
         selection: TreeSelection;
         ondelete: (node: ConsolidationNode) => void;
         ondropInto: (parentId: number | null, e: DragEvent) => void;
@@ -22,6 +25,7 @@
         node,
         childrenOf,
         stats,
+        pathOf,
         selection,
         ondelete,
         ondropInto,
@@ -77,7 +81,7 @@
 
 <div class="text-sm">
     <div
-        class="group/row flex items-center gap-1.5 rounded-sm border border-transparent px-1.5 py-0.5 select-none data-[dir=true]:bg-muted/50 data-[drag=true]:border-brand data-[drag=true]:bg-brand/15 data-[selected=true]:bg-accent"
+        class="group/row flex items-center gap-1.5 border border-transparent px-1.5 py-0.5 select-none data-[dir=true]:bg-muted/50 data-[drag=true]:border-brand data-[drag=true]:bg-brand/15 data-[selected=true]:bg-accent"
         data-dir={isDir}
         data-drag={dragOver}
         data-selected={selection.isSelected(node.id)}
@@ -145,6 +149,23 @@
             </span>
         {/if}
 
+        {#if isDir}
+            <Button
+                variant="ghost"
+                size="icon"
+                class="size-6 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/row:opacity-100 hover:text-foreground"
+                title="Copy folder path"
+                aria-label="Copy folder path"
+                onclick={e => {
+                    e.stopPropagation();
+                    // The walk stops at a consolidation root -- a folder the
+                    // user made or dropped -- so no source name is included.
+                    copyFolderPath(pathOf(node.id), app.pathSep);
+                }}>
+                <Icon icon="ph:copy-fill" />
+            </Button>
+        {/if}
+
         <Button
             variant="ghost"
             size="icon"
@@ -176,6 +197,7 @@
                     node={child}
                     {childrenOf}
                     {stats}
+                    {pathOf}
                     {selection}
                     {ondelete}
                     {ondropInto}

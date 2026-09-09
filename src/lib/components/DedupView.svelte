@@ -8,10 +8,16 @@
         MatchGroup,
         TreeNode,
     } from '$lib/types';
-    import { confidenceTone, formatBytes, formatTime, pct } from '$lib/util';
+    import {
+        confidenceTone,
+        copyFolderPath,
+        formatBytes,
+        formatTime,
+        pct,
+    } from '$lib/util';
     import DeviceTree from './DeviceTree.svelte';
     import SourceManager from './SourceManager.svelte';
-    import Icon from '@iconify/svelte';
+    import Icon from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button';
     import { Badge } from '$lib/components/ui/badge';
     import { Slider } from '$lib/components/ui/slider';
@@ -297,7 +303,7 @@
                                 <ul class="flex flex-col">
                                     {#each selectedGroup.members as m (m.node_id)}
                                         <li
-                                            class="flex gap-2 rounded-sm px-1 py-0.5 text-xs data-[self=true]:bg-brand/10"
+                                            class="group/row flex items-center gap-2 rounded-sm px-1 py-0.5 text-xs data-[self=true]:bg-brand/10"
                                             data-self={m.node_id ===
                                                 selectedNode?.id}>
                                             <span
@@ -316,6 +322,22 @@
                                                         : m.size
                                                 )} · {formatTime(m.mtime)}
                                             </span>
+                                            {#if selectedGroup.kind === 'folder'}
+                                                <Button
+                                                    variant="ghost"
+                                                    size="icon"
+                                                    class="size-5 shrink-0 opacity-0 transition-opacity group-hover/row:opacity-100"
+                                                    title="Copy folder path"
+                                                    onclick={() =>
+                                                        copyFolderPath(
+                                                            m.rel_path,
+                                                            app.pathSep
+                                                        )}>
+                                                    <Icon icon="ph:copy-fill" />
+                                                    <span class="sr-only"
+                                                        >Copy folder path</span>
+                                                </Button>
+                                            {/if}
                                         </li>
                                     {/each}
                                 </ul>
@@ -384,7 +406,7 @@
                                         <ul class="flex flex-col py-0.5">
                                             {#each g.members as m (m.node_id)}
                                                 <li
-                                                    class="flex gap-2 px-2 py-0.5 text-xs">
+                                                    class="group/row flex items-center gap-2 px-2 py-0.5 text-xs">
                                                     <span
                                                         class="shrink-0 font-medium whitespace-nowrap text-muted-foreground"
                                                         >{m.device_label}</span>
@@ -392,6 +414,25 @@
                                                         class="flex-1 truncate"
                                                         title={m.rel_path}
                                                         >{m.rel_path}</span>
+                                                    {#if g.kind === 'folder'}
+                                                        <Button
+                                                            variant="ghost"
+                                                            size="icon"
+                                                            class="size-5 shrink-0 opacity-0 transition-opacity group-hover/row:opacity-100"
+                                                            title="Copy folder path"
+                                                            onclick={e => {
+                                                                e.stopPropagation();
+                                                                copyFolderPath(
+                                                                    m.rel_path,
+                                                                    app.pathSep
+                                                                );
+                                                            }}>
+                                                            <Icon
+                                                                icon="ph:copy-fill" />
+                                                            <span class="sr-only"
+                                                                >Copy folder path</span>
+                                                        </Button>
+                                                    {/if}
                                                 </li>
                                             {/each}
                                         </ul>

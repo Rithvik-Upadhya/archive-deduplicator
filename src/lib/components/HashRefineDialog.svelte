@@ -6,7 +6,7 @@
     import { Input } from '$lib/components/ui/input';
     import { Label } from '$lib/components/ui/label';
     import * as Dialog from '$lib/components/ui/dialog';
-    import Icon from '@iconify/svelte';
+    import Icon from '$lib/components/Icon.svelte';
 
     let {
         open = $bindable(false),
