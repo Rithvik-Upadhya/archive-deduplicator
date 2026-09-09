@@ -25,8 +25,9 @@ struct MiniNode {
 /// Detect hardlink alias sets for `source_id`, mark `inode_trusted`, collapse
 /// any trusted alias sets (setting `alias_of`, writing a `kind='hardlink'`
 /// match group per set), recompute `subtree_size`/`subtree_file_count`
-/// excluding aliases from ancestor totals, and refresh `sources.alias_bytes`/
-/// `physical_size`. Returns the new `(physical_size, alias_bytes)` so the
+/// excluding alias *bytes* (but not alias *names*) from ancestor totals, and
+/// refresh `sources.alias_bytes`/`physical_size`.
+/// Returns the new `(physical_size, alias_bytes)` so the
 /// caller can populate the `Source` it returns to the frontend without a
 /// second round-trip query.
 ///
@@ -150,10 +151,17 @@ fn collapse(tx: &Transaction, source_id: i64) -> rusqlite::Result<()> {
 }
 
 /// Recompute `subtree_size`/`subtree_file_count` for every node under
-/// `source_id`, excluding aliased files' contribution to their *ancestors*
-/// (an aliased file's own row still reports its real size -- only the
-/// double-counted propagation into containing directories is skipped, so a
-/// folder's total isn't inflated by counting the same physical bytes twice).
+/// `source_id`. The two axes are treated differently on purpose, per "counts
+/// count names; sizes count bytes held":
+///
+/// - **Bytes** from an aliased file do *not* propagate to its ancestors. They
+///   are a second name for bytes the canonical already contributed, so a
+///   folder's total would otherwise be inflated by counting the same physical
+///   bytes twice. (The alias's own row still reports its real size.)
+/// - **Names** from an aliased file *do* propagate. Someone listing the folder
+///   by hand sees every name, and must not find a different count than the app
+///   reported.
+///
 /// Mirrors the reverse-depth-order accumulation in `scan.rs`'s local
 /// `rollup()`, but reads from the `nodes` table directly: `insert_nodes`
 /// already wrote these totals before `alias_of` existed (computed in-memory,
@@ -384,8 +392,11 @@ mod tests {
         collapse_hardlinks_and_recompute(&tx, source_id).unwrap();
         tx.commit().unwrap();
 
-        // photos/ contains a.jpg (1000, canonical) + b.jpg (1000, alias,
-        // excluded from propagation) + unique.jpg (50) => 1050, not 2050.
+        // photos/ contains a.jpg (1000, canonical) + b.jpg (1000, alias) +
+        // unique.jpg (50). The two axes diverge here: b.jpg's *bytes* are a
+        // second name for a.jpg's, so they never propagate => 1050, not 2050;
+        // b.jpg's *name* is one the user can see in the folder, so it does
+        // propagate => 3, not 2.
         let (photos_size, photos_count): (i64, i64) = conn
             .query_row(
                 "SELECT subtree_size, subtree_file_count FROM nodes WHERE id = ?1",
@@ -393,8 +404,8 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(photos_size, 1050);
-        assert_eq!(photos_count, 2);
+        assert_eq!(photos_size, 1050, "alias bytes never reach the ancestor");
+        assert_eq!(photos_count, 3, "every name counts, alias included");
 
         // b.jpg's own row still shows its real size/count.
         let (b_size, b_count): (i64, i64) = conn
