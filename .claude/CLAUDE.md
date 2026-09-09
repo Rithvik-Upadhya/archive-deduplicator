@@ -39,33 +39,38 @@ cargo clippy && cargo fmt
 There is no JS test runner and no ESLint config; `pnpm check` is the only frontend gate.
 Formatting is Prettier via `.prettierrc` (4 spaces, single quotes, `bracketSameLine: true`).
 
-### Do not run pnpm from a Linux sandbox
+### Running pnpm and cargo
 
-**Claude: never run `pnpm` (or anything that shells out to it) when working from a Linux
-container/sandbox. Ask the user to run it and paste back the output.** The `cargo` commands above
-are fine to run anywhere.
+This repo now runs in a Linux dev environment (not the old macOS-host sandbox), so `pnpm install`
+and the other `pnpm`/`cargo` commands are safe to run here.
 
-Two independent reasons:
+**Claude: do not run `pnpm` or `cargo` commands unless the user explicitly asks you to.** Backend
+and frontend changes still ship unverified unless the user requests a build/test/check run.
 
-- `node_modules/` is mounted live from the macOS host and holds darwin-arm64 native binaries
-  (`@esbuild/darwin-arm64`, `@rollup/rollup-darwin-arm64`, `@tailwindcss/oxide-darwin-arm64`) plus
-  a `storeDir` under `/Users/…/Library/pnpm/store`. On Linux, pnpm treats that as a foreign store
-  and wants to **purge and refetch the whole directory** — which would delete the host's working
-  install. It bails with `ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY` instead. Do not defeat that
-  guard with `CI=true` or `confirmModulesPurge=false`.
-- pnpm 11 runs a deps-status check before _every_ script, so `pnpm check`, `pnpm dev`, and
-  `pnpm tauri dev` all trigger the same implicit `pnpm install` and hit the same wall. There is no
-  read-only pnpm subcommand that dodges it.
+The request has to be a live one, made in the moment. In particular, a plan that lists a build,
+test, typecheck or lint step is **not** that request, even once the plan is approved: approving a
+plan approves the code changes it describes, not the commands. Finish the edits, then say which
+command would verify them and let the user ask for it. The same goes for a step you inferred
+yourself — "I changed Rust, so I should `cargo test`" is exactly the automatic run this rule
+forbids. `cargo build`, `cargo test`, `cargo clippy`, `cargo fmt`, `pnpm check`, `pnpm install`
+and `pnpm tauri build` all count, including when they are only a step on the way to something the
+user did ask for.
 
-Running the app from a sandbox is not a workaround either: Tauri's Linux stack (webkit2gtk-4.1,
-GTK3, libsoup-3.0) is absent, and there is no display, X server, or Xvfb. `pnpm tauri dev` is a
-**macOS-host-only** command.
+If `pnpm` or `cargo` is not on `PATH` at the start of a session, `source /home/agent/.bashrc` and
+retry once. If that still doesn't find them, stop and report to the user, and ask how to proceed —
+do not try to fix the environment yourself.
+
+Running the full app (`pnpm tauri dev`) still needs Tauri's Linux stack (webkit2gtk-4.1, GTK3,
+libsoup-3.0) and a display; if those are absent it remains a macOS-host-only command.
 
 ### Branches, not worktrees
 
 **Claude: never create a git worktree in this repo — use an ordinary branch.** That means no
 `git worktree add` and no `EnterWorktree`; `git checkout -b <name>` from `main` instead. Work is
 merged back into `main` directly and the branch deleted; this repo does not use pull requests, and nothing is pushed to `origin`. **And when the change is confined to one or two files, always make the changes directly on main unless otherwise instructed.** Do not litter the git history with unnecessary branches for small changes. If the change breaks something we can always roll back to a working commit.
+
+**Claude: only commit when the user explicitly instructs you to.** Make and stage changes, but
+leave committing to an explicit request.
 
 Worktrees cost more than they're worth here: `src-tauri/target/` is not shared, so every worktree
 triggers a full multi-minute rebuild of the entire Tauri dependency tree (and the link step alone
@@ -111,7 +116,8 @@ parse.rs / scan.rs  →  nodes table  →  links.rs  →  hashing.rs  →  dedup
   since the dump has no way to attest to real device/inode semantics. The lowest-`rel_path` member
   becomes canonical; the rest get `nodes.alias_of` set and a `kind='hardlink', confidence=100` match
   group. Aliases stay fully visible in `get_tree` (the user still needs to see every name a physical
-  file has) but are excluded from `subtree_size`/`subtree_file_count` propagation into ancestors and
+  file has) but are excluded from `subtree_size` propagation into ancestors (their *counts* still
+  propagate — see below) and
   from the matcher's candidate pool (`dedup.rs::load_files` filters `alias_of IS NULL`) — deleting
   `k-1` aliases frees zero bytes until the last name is gone, so they must never be scored as
   ordinary duplicates.
@@ -157,10 +163,32 @@ hash_spec)` makes re-scanning an unchanged tree a no-op read-wise. Resumable: ca
   node in it is actually hashed, so mixing incompatible specs within one workspace is structurally
   prevented rather than merely discouraged.
 - **`dedup.rs`** is the matcher: absolute vetoes (different size via bucketing, different extension,
-  zero-byte, or — for two files that are both hashed under the same spec — differing digests) followed
-  by five fixed-confidence evidence tiers that never merge or average — A (100, full-file hash match),
-  B (99, sampled-hash match), C (70, exact name + strong mtime), D (55, exact name only), E (45, same
-  parent-folder name + some mtime support, names differ). Tiers A/B are built by plain hash-equality
+  or — for two files that are both hashed under the same spec — differing digests) followed
+  by six fixed-confidence evidence tiers that never merge or average — A (100, full-file hash match),
+  B (99, sampled-hash match), **S (100, two symlinks with the same name and the same `link_target`)**,
+  C (70, exact name + strong mtime), D (55, exact name only), E (45, same
+  parent-folder name + some mtime support, names differ).
+
+  **Only `min_size_bytes` excludes a node from matching.** That setting is the user's
+  processing-time budget — they trade completeness for speed knowingly — whereas a category
+  hardcoded out of the candidate pool is an exclusion they never chose and cannot see. Two used to
+  be: symlinks (`load_files` filtered `type = 'file'`) and zero-byte files (an absolute veto). Both
+  could therefore never be `cross_dup`, so the "exclusive to this device" funnel asserted that every
+  symlink and every empty file was unique to its source, which is what it means for a filter to lie.
+  Both now participate, subject only to the threshold, and carry their own vetoes instead:
+
+  - A **symlink** is grouped on `(name, link_target)` — a target *is* the node's whole content, so
+    equality there is an equivalence relation (grouped by `HashMap`, like the hash tiers, never by
+    clique search) and a differing target simply fails to match. Expressing the veto as the grouping
+    key also makes the type veto structural: symlinks never enter the metadata size-buckets, so one
+    can never be grouped with a same-sized regular file.
+  - A **zero-byte file** reaches tiers C/D (exact name) but is excluded from tier E. "Same name,
+    empty on both sources" is evidence; "different names, same parent folder, similar mtime, both
+    empty" is coincidence — there is no content to agree. This is what survives of the old blanket
+    veto, and it keeps every empty file in the workspace (one size bucket, one extension sub-bucket,
+    often one mtime) out of the clique search that `MAX_CLIQUE_CANDIDATES` exists to bound.
+    `hashing.rs` also refuses them regardless of `hash_min_size`: BLAKE3 of no bytes is a constant,
+    so hashing them would put every empty file in one tier-A group at confidence 100. Tiers A/B are built by plain hash-equality
   grouping (`HashMap` keyed on `(size, hash_spec, content_hash)`) since digest equality is a true
   transitive equivalence relation — the one place this matcher uses union-find-style grouping.
   Metadata tiers C–E are never built that way; a group must be a genuine clique (every pair
@@ -188,10 +216,33 @@ hash_spec)` makes re-scanning an unchanged tree a no-op read-wise. Resumable: ca
   `rebuild_annotations` then writes the `dup_annot` table (per-node `has_dup` / `dup_pct`) so
   `get_tree` is a plain query. Its byte/leaf rollup queries (`load_file_locs`, `load_leaf_locs`)
   also filter `alias_of IS NULL`.
-  The per-source stat helpers `source_list` calls — `duplicated_size_by_source` and
-  `cross_dup_size_by_source` — each keep a `counted: HashMap<i64, HashSet<i64>>` guard, because a
-  file may sit in more than one group across tiers and billing its bytes once per group lets a
-  source report more duplication than it physically holds.
+  **A file can be in more than one match group**, and every consumer has to handle that. It is the
+  single most repeated bug in this file. `duplicated_size_by_source` keeps a
+  `counted: HashMap<i64, HashSet<i64>>` guard, because billing a file's bytes once per group lets a
+  source report more duplication than it physically holds. And cross-source-ness must be read as
+  "**any** of this file's groups spans >1 source" — hence `load_cross_source_files`, which the
+  folder rollup, `dup_annot.cross_dup` and `cross_dup_size_by_source` all take rather than deriving
+  themselves. Never rebuild it from a `HashMap<node_id, group_id>`: collapsing a file to one
+  arbitrary group, and then deriving each group's source set from that collapsed map, silently
+  loses cross-ness from both ends and marks genuine duplicates exclusive-to-this-device (it was
+  mislabelling 2,562 of 30,696 files, with no false positives to make it visible).
+
+  That helper also folds in the hardlink aliases, once, so the device header and the tree cannot
+  disagree about what the funnel hides — when `cross_dup_size_by_source` computed its own answer it
+  missed them and reported 5,071 exclusive files where the tree showed 1,322.
+
+  **`dup_annot` gets a row for every directory, and for skipped files** — not only for nodes with
+  duplicated bytes. `get_tree` reads it through `COALESCE(…, 0)`, so a *missing* row silently means
+  "not duplicated, not hidden, not skipped", which is a claim rather than an absence. That is how
+  153 empty directories stayed visible under the funnel reporting "0 files", and it is why
+  `dir_cross_dup` has no `total > 0` guard: a directory with no leaves is vacuously fully-hidden.
+
+  **A safety cap is not a finding.** When `dedup.rs` declines to judge a cohort (oversized name
+  group, un-enumerable clique graph, internally contradictory group) its members are marked
+  `dup_annot.skipped`, rolled up to ancestors as `skipped_count`, and badged in the tree. Without
+  that, 2,618 cargo build artifacts read as "exclusive to this device" when the truth was "never
+  compared". Only the `>` cap branches mark it — a `< 2` branch means no partner exists, which is
+  genuine uniqueness, and conflating the two would badge every unique file in the workspace.
 - **`pathfix.rs`** walks the _consolidation_ tree, not the sources — but descends into `nodes` for
   subtrees dragged in wholesale. Renames of consolidation nodes are written straight to
   `consolidation_nodes.name`; renames of files inside a dragged-in source directory are stored as
@@ -208,7 +259,7 @@ hash_spec)` makes re-scanning an unchanged tree a no-op read-wise. Resumable: ca
   there would reintroduce lock contention with `run_dedup`'s dedicated connection). Adding a column
   to an already-shipped table needs an entry in _both_ `init_schema`'s DDL (for fresh databases) and
   `migrate`'s `alterations` list (for existing ones) — `CREATE TABLE IF NOT EXISTS` alone only ever
-  helps the former. `SCHEMA_VERSION` is **9**; version 3 added the hashing/medium columns to `nodes`
+  helps the former. `SCHEMA_VERSION` is **10**; version 3 added the hashing/medium columns to `nodes`
   and `sources` plus two brand-new tables, `hash_cache` and `scan_progress` (new tables need only the
   `CREATE TABLE IF NOT EXISTS` in `init_schema`, not a `migrate` entry). Note that a column added
   by `migrate` is **not backfilled** — existing rows get the `DEFAULT`. `sources.physical_size`
@@ -253,3 +304,119 @@ hand-editing.
 `--warn` = uncertain/getting heavy. `src/lib/util.ts` maps magnitudes onto these
 (`dupLevel`, `DUP_BADGE`, `DUP_BAR`, `confidenceTone`) — reuse those helpers rather than
 picking colors per component, so a 0.1%-duplicated folder stays visually quiet.
+
+## Recurring failure modes
+
+Every bug found in this codebase so far has been one of the following, and none of them were
+crashes — each produced a plausible-looking number that was quietly wrong. The matcher's own
+output has been reliable throughout; what fails is the arithmetic and the claims layered on top
+of it. Read this before changing anything that produces a number the UI shows.
+
+### 1. Two numbers, one base
+
+Every subtraction and every division needs both sides measured over the *same population*.
+Getting this wrong never looks like an error — it looks like a number.
+
+- `duplicated_pct` divided a canonical-only numerator by `total_size`, which counts hardlink
+  aliases. The ratio was structurally capped at `physical_size / total_size`, so a byte-for-byte
+  duplicate device reported **63%** and no amount of real duplication could lift it.
+- The device header subtracted a canonical-only `cross_dup_file_count` from a name-based
+  `file_count`, leaving every hidden alias in the visible total — **5,071** shown where the tree
+  showed **1,322**.
+- A label counts too: `(-3.3 GB hardlinked)` sat beside a size those bytes had *already* been
+  removed from, inviting the reader to subtract twice.
+
+**Check:** for every `a - b` and `a / b`, name the population each side ranges over and say them
+out loud. Counts count names (files, aliases, symlinks); sizes count bytes actually held. An
+alias is +1 name and +0 bytes, which is why `cross_dup_file_count` includes aliases and
+`cross_dup_size` must not — that asymmetry is the model, not an oversight to tidy away.
+
+### 2. Correct when written, wrong later
+
+`dup / total_size` was right the day it was written. Five days later hardlink aliases were
+excluded from the matcher's candidate pool, and that commit — which never touched the divide —
+made it wrong. Nobody wrote a bad line; the meaning of `total_size` shifted underneath a good one.
+
+**Check:** when you narrow or widen a *population* (a `WHERE` clause, a candidate pool, a filter
+in a loader), grep for every consumer of quantities derived from it. Ask not "does this still
+compile" but "does this still mean what its readers think it means".
+
+### 3. A missing row is a positive claim
+
+`get_tree` reads `dup_annot` through `COALESCE(d.cross_dup, 0)`. A row that was never written
+therefore asserts *not hidden, not duplicated, not skipped* — an assertion, not an absence.
+
+- Hardlink aliases got no `dup_annot` row (the annotation pass builds from `load_file_locs`,
+  which filters them out), so every alias read as exclusive-to-this-device — and a filtered
+  consolidation drag carried across **1,139** aliases whose canonical the same filter had hidden.
+- Empty directories got no row either, so **153** of them survived the funnel forever, reporting
+  "0 files".
+- Skipped files are in no group, so they too would have had no row.
+
+**Check:** for every `LEFT JOIN` + `COALESCE` default, ask what that default *claims* and whether
+it is true for the rows deliberately absent from the source table. If not, write rows for them.
+
+### 4. Absence of evidence is not evidence of absence
+
+A filter that promises "files unique to this source" must not report as unique anything it never
+examined. Three shapes of this:
+
+- **Safety caps.** `MAX_GROUP_SIZE` declining an oversized cohort is correct — 1,906 same-named
+  48-byte cargo timestamps are not one duplicate set — but its output was reported as uniqueness.
+  Of 2,656 files the funnel called unique, only **38** were. Hence `dup_annot.skipped`.
+- **Structural exclusions.** `load_files` filtered `type = 'file'` and vetoed zero-byte files, so
+  822 nodes could never be matched and were always shown as unique.
+- **Who chose it.** `min_size_bytes` is the user's processing-time budget: a duplicate missed
+  because of it is *their decision*, knowingly made. A category hardcoded out of the pipeline is
+  an exclusion they never made and cannot see. The first is fine; the second is a lie in the UI.
+
+**Check:** three states, not two — *duplicated*, *unique*, and *not judged*. Any `continue` in a
+matching path is potentially the third. Note that a `< 2` guard means "no partner exists", which
+is a genuine finding; only the `>` cap branches are declined judgements. Conflating them would
+badge every unique file and make the marker worthless.
+
+### 5. A many-to-many relation flattened into a map
+
+A file legitimately belongs to several match groups across tiers. `HashMap<node_id, group_id>`
+filled with `insert` keeps whichever row came last, and building each group's source set *from
+that collapsed map* compounds it — a genuine cross-source pair then reads as single-source from
+both ends. This mislabelled **2,562 of 30,696** files, with zero false positives to make it
+visible.
+
+**Check:** before keying a map on an entity id, confirm the relation is actually 1:1. If it is
+not, key on the pair or collect a `Vec`, and derive aggregates from the raw rows rather than from
+a lossy index.
+
+### 6. The same question answered in two places
+
+The device header and the tree have now drifted **three times** — the multi-group bug, the alias
+inheritance, the cross-dup count — because each derived cross-source-ness independently. Two
+correct-looking implementations of one question will diverge the moment either is updated alone.
+
+**Check:** if two paths answer the same question, make one call the other.
+`load_cross_source_files` exists for exactly this; add to it rather than beside it.
+
+### 7. Tests that cannot fail, and verification that lies
+
+- The whole suite passed while `cross_dup` was wrong for 2,562 files, because **every test put a
+  file in exactly one group** — the one case that always worked.
+- `symlink_keeps_directory_visible_and_is_never_annotated` kept passing after symlinks became
+  matchable, but only because its symlink had no partner. Passing for the wrong reason.
+- A draft test for tier E never reached tier E: its fixture had no parent directory, so the code
+  under test was unreachable.
+- A verification script reported "8,319 rows lost" that were entirely directories and aliases —
+  two categories the query wasn't scoped to.
+
+**Check:** confirm a new regression test *fails before the fix*. Ask what fixture shape the bug
+needs and whether any existing test has it. When a verification number surprises you, break it
+down by category before believing or acting on it — in both directions.
+
+### Working notes
+
+- `cargo` and `pnpm` are available here but must not be run unless the user asks (see above), so
+  backend changes still ship unverified by a compiler unless a run is requested. Grep every struct
+  literal after adding a field, and every call site after changing a signature — a text edit that
+  matches 2 of 3 sites looks like it worked.
+- The reference export under `.references/exports/` is the fastest oracle in this repo: replaying
+  a proposed algorithm against it in Python has caught wrong diagnoses (`MAX_CLIQUE_CANDIDATES`
+  vs `MAX_GROUP_SIZE`) and confirmed fixes before any Rust compiled. Prefer it over reasoning.
