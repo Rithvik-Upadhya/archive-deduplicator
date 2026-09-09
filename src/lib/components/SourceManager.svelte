@@ -380,12 +380,16 @@
                          bar inside the <li>. Two decimals: these feed the
                          tooltip as well as the segment widths, and a share
                          that rounds to 0% on the badge is still worth reading
-                         precisely on hover. -->
+                         precisely on hover.
+
+                         The outer `pct2` on the remainder is not a second
+                         rounding of the data -- the difference of two 2dp
+                         values is already a 2dp value. It scrubs binary float
+                         error, which otherwise reaches the tooltip verbatim:
+                         63.4 - 21.3 evaluates to 42.099999999999994. -->
+                    {@const dupPct = pct2(s.duplicated_pct)}
                     {@const crossPct = pct2(s.cross_duplicated_pct)}
-                    {@const internalPct = Math.max(
-                        0,
-                        pct2(s.duplicated_pct) - crossPct
-                    )}
+                    {@const internalPct = pct2(Math.max(0, dupPct - crossPct))}
                     <li
                         class="group/device flex min-w-0 w-[280px] flex-col gap-1 rounded-md border bg-card px-2 py-1.5 transition-colors hover:border-brand/40 {s.excluded
                             ? 'opacity-60'
