@@ -378,6 +378,16 @@ from `cross_dup_size` instead: that is the _funnel's_ figure over a different po
 in hardlink aliases and ranges over `nodes` rather than `match_members`), and subtracting it can go
 negative.
 
+**Every per-source *byte* figure is files-only.** `duplicated_size_by_source` ranges over
+`match_members`, and symlinks reach it — they are matchable via tier S — so it explicitly zeroes
+their contribution, the same guard `cross_dup_size_by_source` uses. `nodes.size` for a symlink is
+the length of its target path, and `total_size`/`physical_size` are files-only, so billing those
+bytes put them in a numerator whose base could not hold them. Hardlink aliases need no such guard:
+they never reach the matcher (`load_files` filters `alias_of IS NULL`) and their own groups are
+`kind='hardlink'`, which that query excludes. The guard is applied to the *bytes*, not as a SQL
+row filter, so a group's source set stays complete — filtering rows would silently change
+cross-source determination if a group ever mixed symlinks with files.
+
 **Every per-source duplication figure filters `s.excluded = 0`.** `duplicated_size_by_source` was
 the odd one out until it was fixed, and the mismatch was not merely cosmetic: a group whose only
 other member sat on an excluded device still read as cross-source there, so the badge counted

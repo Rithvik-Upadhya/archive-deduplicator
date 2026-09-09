@@ -649,29 +649,45 @@ pub fn duplicated_size_by_source(
     conn: &Connection,
     workspace_id: i64,
 ) -> rusqlite::Result<HashMap<i64, DupSplit>> {
-    // group_id -> set of source ids and list of (group, node, source, size).
+    // group_id -> set of source ids and list of (group, node, source, bytes).
+    // `bytes` is what this node may contribute, already zeroed for anything
+    // that holds no content of its own -- see the guard in the query below.
     let mut group_srcs: HashMap<i64, HashSet<i64>> = HashMap::new();
     let mut members: Vec<(i64, i64, i64, i64)> = Vec::new();
 
     let mut stmt = conn.prepare(
-        "SELECT mm.group_id, mm.node_id, n.source_id, n.size FROM match_members mm
+        "SELECT mm.group_id, mm.node_id, n.source_id, n.size, n.type FROM match_members mm
          JOIN match_groups mg ON mg.id = mm.group_id
          JOIN nodes n ON n.id = mm.node_id
          JOIN sources s ON s.id = n.source_id
          WHERE mg.workspace_id = ?1 AND mg.kind = 'file' AND s.excluded = 0",
     )?;
     let rows = stmt.query_map(params![workspace_id], |r| {
+        let size: i64 = r.get(3)?;
+        let node_type: String = r.get(4)?;
+        // Counts count names, sizes count bytes held. Symlinks are matchable
+        // (dedup.rs's tier S) and so reach `match_members`, but they hold no
+        // content of their own -- `nodes.size` for one is the length of its
+        // target path, and `total_size`/`physical_size` never took those bytes
+        // in. Billing them here would put bytes in the numerator that the base
+        // this ratio divides by cannot hold. The row is kept rather than
+        // filtered in SQL so a group's source set stays complete: today a
+        // symlink group is pure symlinks, but a filter would silently change
+        // cross-source determination if that ever stopped being true.
+        //
+        // Mirrors the same guard in `cross_dup_size_by_source` below.
+        let bytes = if node_type == "file" { size } else { 0 };
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, i64>(1)?,
             r.get::<_, i64>(2)?,
-            r.get::<_, i64>(3)?,
+            bytes,
         ))
     })?;
     for row in rows {
-        let (gid, node_id, src, size) = row?;
+        let (gid, node_id, src, bytes) = row?;
         group_srcs.entry(gid).or_default().insert(src);
-        members.push((gid, node_id, src, size));
+        members.push((gid, node_id, src, bytes));
     }
 
     // For internal-only groups we count all-but-one copy per source, so we
@@ -683,7 +699,7 @@ pub fn duplicated_size_by_source(
     // exceed the source's own physical size and the badge prints over 100%.
     let mut counted: HashMap<i64, HashSet<i64>> = HashMap::new();
     let mut result: HashMap<i64, DupSplit> = HashMap::new();
-    for (gid, node_id, src, size) in members {
+    for (gid, node_id, src, bytes) in members {
         let cross = group_srcs.get(&gid).map(|s| s.len() > 1).unwrap_or(false);
         let surplus = if cross {
             true
@@ -705,9 +721,9 @@ pub fn duplicated_size_by_source(
             // `internal + cross` equal to the old pooled total.
             let entry = result.entry(src).or_default();
             if cross {
-                entry.cross += size;
+                entry.cross += bytes;
             } else {
-                entry.internal += size;
+                entry.internal += bytes;
             }
         }
     }
@@ -1499,6 +1515,38 @@ mod tests {
         let b = dup.get(&src_b).copied().unwrap_or_default();
         assert_eq!(b.internal, 0);
         assert_eq!(b.cross, 100);
+    }
+
+    #[test]
+    fn duplicated_size_by_source_bills_no_bytes_for_symlinks() {
+        // Symlinks became matchable (tier S), so they reach `match_members` and
+        // this function billed their `nodes.size` -- which on a live scan is
+        // the length of the target path, not content. `total_size` and
+        // `physical_size` are files-only, so those bytes went into the
+        // numerator of a ratio whose base could never hold them.
+        //
+        // The real file pair is here so the assertion cannot pass merely
+        // because nothing was counted at all.
+        let (conn, ws, src_a, _src_b) = setup();
+
+        let l1 = insert_node(&conn, src_a, None, "link1", "link", 42);
+        let l2 = insert_node(&conn, src_a, None, "link2", "link", 42);
+        insert_file_group(&conn, ws, &[l1, l2]);
+
+        let f1 = insert_node(&conn, src_a, None, "copy1.bin", "file", 500);
+        let f2 = insert_node(&conn, src_a, None, "copy2.bin", "file", 500);
+        insert_file_group(&conn, ws, &[f1, f2]);
+
+        let a = duplicated_size_by_source(&conn, ws)
+            .unwrap()
+            .get(&src_a)
+            .copied()
+            .unwrap_or_default();
+        assert_eq!(
+            a.internal, 500,
+            "the surplus real copy counts, the surplus symlink does not"
+        );
+        assert_eq!(a.cross, 0);
     }
 
     #[test]
