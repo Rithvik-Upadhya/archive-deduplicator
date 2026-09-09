@@ -30,6 +30,14 @@ export interface Source {
      *  elsewhere. The base is `physical_size`, not `total_size`: hardlink
      *  aliases never enter the matcher, so they can never be in the numerator. */
     duplicated_pct: number;
+    /** The cross-source share of `duplicated_pct`, over the same
+     *  `physical_size` base; the remainder is duplication internal to this
+     *  device. Split from one pass in `duplicated_size_by_source`, so the two
+     *  always sum back to `duplicated_pct` -- which is what lets the source
+     *  bar draw them as two segments of one whole. Not derived from
+     *  `cross_dup_size`: that answers what the funnel hides, over a different
+     *  population. */
+    cross_duplicated_pct: number;
     /** Canonical-file bytes the funnel hides. Subtract from `physical_size`. */
     cross_dup_size: number;
     /** *Names* the funnel hides -- canonical files, hardlink aliases and

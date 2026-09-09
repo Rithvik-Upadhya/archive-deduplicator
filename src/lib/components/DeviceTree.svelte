@@ -3,7 +3,7 @@
     import { app } from '$lib/stores/app.svelte';
     import { deviceCollapsed, deviceFilterOn } from '$lib/stores/treeExpansion.svelte';
     import type { Source, TreeNode } from '$lib/types';
-    import { DUP_BADGE, dupLevel, formatBytes, pct } from '$lib/util';
+    import { formatBytes, pct } from '$lib/util';
     import type { TreeSelection } from '$lib/stores/selection.svelte';
     import TreeItem from './TreeItem.svelte';
     import Icon from '$lib/components/Icon.svelte';
@@ -174,9 +174,7 @@
         {#if !filterCrossDevice}
             <Badge
                 variant="outline"
-                class="shrink-0 px-1.5 py-0 font-heading text-[0.65rem] tabular-nums {DUP_BADGE[
-                    dupLevel(pct(source.duplicated_pct))
-                ]}"
+                class="shrink-0 px-1.5 py-0 font-heading text-[0.65rem] tabular-nums"
                 title="Percentage of bytes duplicated elsewhere">
                 {pct(source.duplicated_pct)}% dup
             </Badge>

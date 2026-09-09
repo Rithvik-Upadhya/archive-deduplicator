@@ -5,8 +5,7 @@
     import type { NodeType, TreeNode } from '$lib/types';
     import {
         copyFolderPath,
-        DUP_BADGE,
-        dupLevel,
+        DUP_TONE,
         formatBytes,
         pct,
     } from '$lib/util';
@@ -67,6 +66,13 @@
     );
     const visibleSize = $derived(
         filterCrossDevice ? node.subtree_size - node.cross_dup_size : node.subtree_size
+    );
+    // Red only when the folder is itself a matched folder *and* every leaf
+    // under it is duplicated on another device. A high `dup_pct` alone is not
+    // enough: it pools internal and cross-device bytes, and a folder that is
+    // not in a folder match group has no whole-folder verdict to report.
+    const folderTone = $derived(
+        node.in_folder_group && node.cross_dup ? 'external' : 'internal'
     );
     const showLocate = $derived(
         !!onlocate && (isDir ? node.in_folder_group : node.has_duplicate)
@@ -210,10 +216,12 @@
             {#if !filterCrossDevice && node.dup_pct > 0}
                 <Badge
                     variant="outline"
-                    class="shrink-0 px-1 py-0 font-heading text-[0.65rem] tabular-nums {DUP_BADGE[
-                        dupLevel(node.dup_pct)
+                    class="shrink-0 px-1 py-0 font-heading text-[0.65rem] tabular-nums {DUP_TONE[
+                        folderTone
                     ]}"
-                    title="Portion of this folder duplicated elsewhere">
+                    title={folderTone === 'external'
+                        ? 'This whole folder matches one on another device -- every file in it has a copy elsewhere'
+                        : 'Portion of this folder duplicated elsewhere. Not itself a matched folder, or its copies are all on this device.'}>
                     {pct(node.dup_pct)}% dup
                 </Badge>
             {/if}
@@ -240,8 +248,13 @@
             {:else if node.has_duplicate}
                 <Badge
                     variant="outline"
-                    class="shrink-0 border-brand/45 px-1 py-0 font-heading text-[0.65rem] text-brand"
-                    title="This file likely has duplicates">dup</Badge>
+                    class="shrink-0 px-1 py-0 font-heading text-[0.65rem] {DUP_TONE[
+                        node.cross_dup ? 'external' : 'internal'
+                    ]}"
+                    title={node.cross_dup
+                        ? 'This file also exists on another device -- deleting it here would not lose the only copy'
+                        : 'This file has a duplicate, but only on this device -- every copy is on this one shelf'}
+                    >dup</Badge>
             {/if}
         {/if}
 

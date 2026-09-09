@@ -12,12 +12,11 @@
         Source,
         Workspace,
     } from '$lib/types';
-    import { DUP_BADGE, DUP_BAR, dupLevel, formatBytes, pct } from '$lib/util';
+    import { formatBytes, pct } from '$lib/util';
     import Icon from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button';
     import { Input } from '$lib/components/ui/input';
     import { Badge } from '$lib/components/ui/badge';
-    import { Progress } from '$lib/components/ui/progress';
     import * as Empty from '$lib/components/ui/empty';
     import * as AlertDialog from '$lib/components/ui/alert-dialog';
     import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
@@ -376,6 +375,14 @@
         <div class="overflow-x-auto">
             <ul class="grid grid-flow-col gap-1.5 min-w-0">
                 {#each app.sources as s (s.id)}
+                    <!-- The bar's two shares. `{@const}` has to sit here, as
+                         an immediate child of the block, not down beside the
+                         bar inside the <li>. -->
+                    {@const crossPct = pct(s.cross_duplicated_pct)}
+                    {@const internalPct = Math.max(
+                        0,
+                        pct(s.duplicated_pct) - crossPct
+                    )}
                     <li
                         class="group/device flex min-w-0 w-[280px] flex-col gap-1 rounded-md border bg-card px-2 py-1.5 transition-colors hover:border-brand/40 {s.excluded
                             ? 'opacity-60'
@@ -488,11 +495,32 @@
                                 </Button>
                             {/if}
                         </div>
-                        <Progress
-                            value={pct(s.duplicated_pct)}
-                            class="h-1 {DUP_BAR[
-                                dupLevel(pct(s.duplicated_pct))
-                            ]}" />
+                        <!-- Two segments of one whole, not two bars: the
+                             cross-source share in brand red, the rest (this
+                             device's own internal duplication) in grey. They
+                             sum to the "% dup" badge below because both come
+                             from one pass over one population -- see
+                             `cross_duplicated_pct` in types.ts.
+
+                             Hidden entirely when the device is excluded, as
+                             the badge below already is: an excluded device is
+                             left out of the matcher, so an empty bar would
+                             claim "0% duplicated" about something that was
+                             never analysed. -->
+                        {#if !s.excluded}
+                            <div
+                                class="flex h-1 w-full overflow-hidden rounded-full bg-muted"
+                                title="{crossPct}% duplicated on another device, {internalPct}% duplicated only within this one">
+                                <div
+                                    class="h-full bg-brand"
+                                    style="width: {crossPct}%">
+                                </div>
+                                <div
+                                    class="h-full bg-muted-foreground/70"
+                                    style="width: {internalPct}%">
+                                </div>
+                            </div>
+                        {/if}
                         <div
                             class="flex items-center justify-between font-heading text-[0.7rem] tabular-nums text-muted-foreground">
                             <!-- `physical_size`, matching DeviceTree's header
@@ -510,9 +538,7 @@
                             {:else}
                                 <Badge
                                     variant="outline"
-                                    class="px-1.5 py-0 text-[0.65rem] {DUP_BADGE[
-                                        dupLevel(pct(s.duplicated_pct))
-                                    ]}">
+                                    class="px-1.5 py-0 text-[0.65rem]">
                                     {pct(s.duplicated_pct)}% dup
                                 </Badge>
                             {/if}

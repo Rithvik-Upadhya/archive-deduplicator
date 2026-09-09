@@ -26,35 +26,24 @@ export function pct(value: number): number {
 
 /* --- Colour scales ---------------------------------------------------------
  *
- * "% duplicated" and match confidence are magnitudes, so they get scales
- * rather than a flat brand tint. A 0.1%-duplicated folder and a 56% one used
- * to render identically; now only the ones worth acting on carry colour.
+ * Duplicate markers are coloured by *where the other copies live*, not by how
+ * many bytes are involved. "How much" is already the number printed on the
+ * badge; what the user actually decides on is whether deleting this thing
+ * would lose the only copy on their shelf. So an item that also exists on
+ * another device reads brand-red, and one duplicated only inside its own
+ * device reads a quiet grey.
+ *
+ * `--warn` keeps its own meaning (skipped / not judged) and is deliberately
+ * not used for duplication, so a yellow mark always means "no verdict" rather
+ * than "some duplication".
  */
 
-export type DupLevel = 'none' | 'low' | 'mid' | 'high';
+export type DupTone = 'external' | 'internal';
 
-/** Bucket a "portion duplicated" percentage by how much it's worth reclaiming. */
-export function dupLevel(percent: number): DupLevel {
-    if (percent >= 50) return 'high';
-    if (percent >= 20) return 'mid';
-    if (percent >= 5) return 'low';
-    return 'none';
-}
-
-/** Outline-badge classes for a "% dup" figure. */
-export const DUP_BADGE: Record<DupLevel, string> = {
-    none: 'border-border text-muted-foreground',
-    low: 'border-border text-foreground',
-    mid: 'border-warn/45 text-warn',
-    high: 'border-brand/50 text-brand',
-};
-
-/** Fill for the `Progress` indicator behind a "% dup" figure. */
-export const DUP_BAR: Record<DupLevel, string> = {
-    none: '[&_[data-slot=progress-indicator]]:bg-muted-foreground/40',
-    low: '[&_[data-slot=progress-indicator]]:bg-muted-foreground/70',
-    mid: '[&_[data-slot=progress-indicator]]:bg-warn',
-    high: '[&_[data-slot=progress-indicator]]:bg-brand',
+/** Outline-badge classes for a duplicate marker, by where the other copies live. */
+export const DUP_TONE: Record<DupTone, string> = {
+    external: 'border-brand/45 text-brand',
+    internal: 'border-muted-foreground/45 text-muted-foreground',
 };
 
 /**

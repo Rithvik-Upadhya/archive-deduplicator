@@ -60,6 +60,15 @@ pub struct Source {
     /// and so can never appear in the numerator.
     #[serde(default)]
     pub duplicated_pct: f64,
+    /// The cross-source share of `duplicated_pct`, over the same
+    /// `physical_size` base; the remainder of `duplicated_pct` is duplication
+    /// internal to this device. The two are split from one pass in
+    /// `rollup::duplicated_size_by_source`, so they always sum back to it.
+    ///
+    /// Not derived from `cross_dup_size` below -- that answers a different
+    /// question (what the funnel hides) over a different population.
+    #[serde(default)]
+    pub cross_duplicated_pct: f64,
     /// Canonical-file bytes the "exclusive to this device" filter hides.
     /// Subtract from `physical_size` for the filtered size.
     #[serde(default)]

@@ -124,6 +124,7 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
                 file_count: r.get(9)?,
                 excluded: r.get::<_, i64>(10)? != 0,
                 duplicated_pct: 0.0,
+                cross_duplicated_pct: 0.0,
                 cross_dup_size: 0,
                 cross_dup_file_count: 0,
                 cross_dup_alias_bytes: 0,
@@ -144,7 +145,7 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(map_err)?;
     for s in &mut sources {
-        let dup = *dup_by_src.get(&s.id).unwrap_or(&0);
+        let dup = dup_by_src.get(&s.id).copied().unwrap_or_default();
         // Physical, not logical: `dup` can only ever range over canonical
         // files, since the matcher drops hardlink aliases from its candidate
         // pool. Dividing by `total_size` (which counts every alias) would cap
@@ -162,11 +163,18 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
         } else {
             s.total_size
         };
-        s.duplicated_pct = if base > 0 {
-            dup as f64 / base as f64 * 100.0
-        } else {
-            0.0
+        // Both halves divide by the same `base` and come from the same pass,
+        // so `cross_duplicated_pct` is always <= `duplicated_pct` and the
+        // remainder is exactly the internal-only share the bar draws in grey.
+        let share = |bytes: i64| {
+            if base > 0 {
+                bytes as f64 / base as f64 * 100.0
+            } else {
+                0.0
+            }
         };
+        s.duplicated_pct = share(dup.total());
+        s.cross_duplicated_pct = share(dup.cross);
         let cross = cross_dup_by_src.get(&s.id).copied().unwrap_or_default();
         s.cross_dup_size = cross.size;
         s.cross_dup_file_count = cross.file_count;
@@ -224,6 +232,7 @@ pub async fn import_tree_json(
             file_count: flat.file_count,
             excluded: false,
             duplicated_pct: 0.0,
+            cross_duplicated_pct: 0.0,
             cross_dup_size: 0,
             cross_dup_file_count: 0,
             // `tree` JSON imports carry no filesystem/medium signal at all --
@@ -313,6 +322,7 @@ pub async fn scan_folder(
             file_count: flat.file_count,
             excluded: false,
             duplicated_pct: 0.0,
+            cross_duplicated_pct: 0.0,
             medium_kind: Some(medium_kind.as_str().to_string()),
             filesystem,
             hash_min_size,

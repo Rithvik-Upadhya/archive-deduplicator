@@ -323,9 +323,38 @@ hand-editing.
 `src/styles/app.css` defines the design tokens. Beyond the standard shadcn set:
 `--brand` (crimson, for text/icons/borders — `--primary` is for solid fills only), and
 `--ok` / `--warn` which carry _data_ semantics: `--ok` = confident/within limits,
-`--warn` = uncertain/getting heavy. `src/lib/util.ts` maps magnitudes onto these
-(`dupLevel`, `DUP_BADGE`, `DUP_BAR`, `confidenceTone`) — reuse those helpers rather than
-picking colors per component, so a 0.1%-duplicated folder stays visually quiet.
+`--warn` = uncertain/getting heavy. `confidenceTone` in `src/lib/util.ts` maps a match
+confidence onto those — reuse it rather than picking colors per component.
+
+**Duplicate markers are coloured by _where the other copies live_, never by how much.**
+`DUP_TONE` (`src/lib/util.ts`) is the only source of those classes: `external` (brand red) means
+the item also exists on another source, `internal` (muted grey) means every copy is on this one
+device. "How much" is already the number printed on the badge; what the user decides on is
+whether deleting something would lose their only copy. So:
+
+- a **file** badge is red when `cross_dup`, grey otherwise;
+- a **folder** badge is red only when `in_folder_group && cross_dup` — a high `dup_pct` alone is
+  not enough, since it pools internal and cross-device bytes and a folder outside a folder match
+  group has no whole-folder verdict to report;
+- per-source `% dup` badges carry no tint at all; the split bar beneath them does that job.
+
+`--warn` is deliberately **not** used for duplication, so a yellow mark always means "not judged"
+(skipped) rather than "somewhat duplicated". The older magnitude scale (`dupLevel`/`DUP_BADGE`/
+`DUP_BAR`) was removed with this change — don't reintroduce it.
+
+The source bar's two segments come from `duplicated_pct` and `cross_duplicated_pct`, which
+`rollup::duplicated_size_by_source` splits in **one** pass under **one** `counted` guard, so
+`internal + cross` is exactly the pooled total the badge shows. Do not compute the internal share
+from `cross_dup_size` instead: that is the _funnel's_ figure over a different population (it folds
+in hardlink aliases and ranges over `nodes` rather than `match_members`), and subtracting it can go
+negative.
+
+**Every per-source duplication figure filters `s.excluded = 0`.** `duplicated_size_by_source` was
+the odd one out until it was fixed, and the mismatch was not merely cosmetic: a group whose only
+other member sat on an excluded device still read as cross-source there, so the badge counted
+redundancy against a device the user had switched off while the funnel beside it treated the same
+file as having no partner. When you add a query that decides whether a file "has a duplicate
+elsewhere", filter excluded sources in it, or it will disagree with the three that do.
 
 ## Recurring failure modes
 

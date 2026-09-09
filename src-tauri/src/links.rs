@@ -436,7 +436,10 @@ mod tests {
         )
         .unwrap();
         let dup = crate::rollup::duplicated_size_by_source(&conn, ws).unwrap();
-        assert_eq!(dup.get(&source_id).copied().unwrap_or(0), 0);
+        assert_eq!(
+            dup.get(&source_id).copied().unwrap_or_default().total(),
+            0
+        );
     }
 
     #[test]

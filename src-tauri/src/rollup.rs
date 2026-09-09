@@ -612,10 +612,43 @@ fn load_dir_names(conn: &Connection, workspace_id: i64) -> rusqlite::Result<Hash
 /// match -- dividing by `total_size` caps the ratio at `physical/total`, which
 /// on an alias-heavy device reads as a low percentage that no amount of real
 /// duplication can lift.
+///
+/// Excluded sources are left out entirely (`s.excluded = 0`, matching
+/// `load_cross_source_files` and `cross_dup_size_by_source`). That has two
+/// consequences, and both are the point: an excluded device reports no
+/// duplication of its own, and a group whose only other member lives on an
+/// excluded device is no longer "cross-source" -- so the remaining copy is the
+/// original, not surplus. Without this the badge counted redundancy against a
+/// device the user had switched off, and disagreed with the funnel beside it
+/// about whether a file had a partner at all.
+/// Duplicated bytes for one source, split by where the other copies live.
+///
+/// `internal + cross` is exactly the pooled total this function has always
+/// returned, because both buckets are filled from one pass under one
+/// `counted` guard -- so the two segments of the source bar always sum to the
+/// "% dup" badge beside them.
+///
+/// `cross` here is still **not** `CrossDupStats::size` (what the "exclusive to
+/// this device" funnel hides). Both now agree on excluded sources, but that one
+/// additionally folds in hardlink aliases and ranges over `nodes` rather than
+/// `match_members`. Take the split from here; don't reconstruct it by
+/// subtracting the funnel's figure.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DupSplit {
+    pub internal: i64,
+    pub cross: i64,
+}
+
+impl DupSplit {
+    pub fn total(&self) -> i64 {
+        self.internal + self.cross
+    }
+}
+
 pub fn duplicated_size_by_source(
     conn: &Connection,
     workspace_id: i64,
-) -> rusqlite::Result<HashMap<i64, i64>> {
+) -> rusqlite::Result<HashMap<i64, DupSplit>> {
     // group_id -> set of source ids and list of (group, node, source, size).
     let mut group_srcs: HashMap<i64, HashSet<i64>> = HashMap::new();
     let mut members: Vec<(i64, i64, i64, i64)> = Vec::new();
@@ -624,7 +657,8 @@ pub fn duplicated_size_by_source(
         "SELECT mm.group_id, mm.node_id, n.source_id, n.size FROM match_members mm
          JOIN match_groups mg ON mg.id = mm.group_id
          JOIN nodes n ON n.id = mm.node_id
-         WHERE mg.workspace_id = ?1 AND mg.kind = 'file'",
+         JOIN sources s ON s.id = n.source_id
+         WHERE mg.workspace_id = ?1 AND mg.kind = 'file' AND s.excluded = 0",
     )?;
     let rows = stmt.query_map(params![workspace_id], |r| {
         Ok((
@@ -648,7 +682,7 @@ pub fn duplicated_size_by_source(
     // each node's bytes at most once per source. Without this the total can
     // exceed the source's own physical size and the badge prints over 100%.
     let mut counted: HashMap<i64, HashSet<i64>> = HashMap::new();
-    let mut result: HashMap<i64, i64> = HashMap::new();
+    let mut result: HashMap<i64, DupSplit> = HashMap::new();
     for (gid, node_id, src, size) in members {
         let cross = group_srcs.get(&gid).map(|s| s.len() > 1).unwrap_or(false);
         let surplus = if cross {
@@ -665,7 +699,16 @@ pub fn duplicated_size_by_source(
             is_surplus
         };
         if surplus && counted.entry(src).or_default().insert(node_id) {
-            *result.entry(src).or_insert(0) += size;
+            // One `counted` guard across both buckets: a node billed under one
+            // group is not billed again under another, and whichever group
+            // bills it decides which half it lands in. That keeps
+            // `internal + cross` equal to the old pooled total.
+            let entry = result.entry(src).or_default();
+            if cross {
+                entry.cross += size;
+            } else {
+                entry.internal += size;
+            }
         }
     }
     Ok(result)
@@ -1399,8 +1442,12 @@ mod tests {
         insert_file_group(&conn, ws, &[a, b2]);
 
         let dup = duplicated_size_by_source(&conn, ws).unwrap();
-        assert_eq!(dup.get(&src_a), Some(&100), "a's bytes counted once");
-        assert_eq!(dup.get(&src_b), Some(&200));
+        assert_eq!(
+            dup.get(&src_a).copied().unwrap_or_default().total(),
+            100,
+            "a's bytes counted once"
+        );
+        assert_eq!(dup.get(&src_b).copied().unwrap_or_default().total(), 200);
     }
 
     #[test]
@@ -1415,7 +1462,102 @@ mod tests {
         insert_file_group(&conn, ws, &[c1, c2, c3]);
 
         let dup = duplicated_size_by_source(&conn, ws).unwrap();
-        assert_eq!(dup.get(&src_a), Some(&60), "3 copies -> 2 are surplus");
+        assert_eq!(
+            dup.get(&src_a).copied().unwrap_or_default().total(),
+            60,
+            "3 copies -> 2 are surplus"
+        );
+    }
+
+    #[test]
+    fn duplicated_size_by_source_splits_internal_from_cross_source() {
+        // The two halves the source bar draws. Source A carries both kinds at
+        // once: an internal-only pair (one surplus copy) and a file that also
+        // lives on source B. They must land in different buckets, and their
+        // sum must still be the pooled total the badge beside the bar shows --
+        // otherwise the bar's two segments would not add up to it.
+        let (conn, ws, src_a, src_b) = setup();
+
+        // Internal-only: two copies on A, so 30 bytes are surplus.
+        let i1 = insert_node(&conn, src_a, None, "inner1.png", "file", 30);
+        let i2 = insert_node(&conn, src_a, None, "inner2.png", "file", 30);
+        insert_file_group(&conn, ws, &[i1, i2]);
+
+        // Cross-source: every copy is redundant somewhere else, so A's full
+        // 100 bytes count.
+        let x_a = insert_node(&conn, src_a, None, "shared.jpg", "file", 100);
+        let x_b = insert_node(&conn, src_b, None, "shared.jpg", "file", 100);
+        insert_file_group(&conn, ws, &[x_a, x_b]);
+
+        let dup = duplicated_size_by_source(&conn, ws).unwrap();
+        let a = dup.get(&src_a).copied().unwrap_or_default();
+        assert_eq!(a.internal, 30, "one surplus copy of the internal pair");
+        assert_eq!(a.cross, 100, "the cross-source file's bytes");
+        assert_eq!(a.total(), 130, "the pooled total the badge shows");
+
+        // B has only the cross-source half.
+        let b = dup.get(&src_b).copied().unwrap_or_default();
+        assert_eq!(b.internal, 0);
+        assert_eq!(b.cross, 100);
+    }
+
+    #[test]
+    fn duplicated_size_by_source_ignores_excluded_sources() {
+        // The badge used to count redundancy against a device the user had
+        // switched off, while the funnel beside it -- which does filter
+        // `s.excluded = 0` -- treated the same file as having no partner at
+        // all. Two devices disagreeing about one file is what this pins.
+        let (conn, ws, src_a, src_b) = setup();
+        conn.execute(
+            "UPDATE sources SET excluded = 1 WHERE id = ?1",
+            params![src_b],
+        )
+        .unwrap();
+
+        // A's only partner lives on the excluded device, so A's copy is the
+        // last one standing: nothing here is surplus.
+        let a = insert_node(&conn, src_a, None, "shared.jpg", "file", 100);
+        let b = insert_node(&conn, src_b, None, "shared.jpg", "file", 100);
+        insert_file_group(&conn, ws, &[a, b]);
+
+        let dup = duplicated_size_by_source(&conn, ws).unwrap();
+        let a_split = dup.get(&src_a).copied().unwrap_or_default();
+        assert_eq!(
+            a_split.cross, 0,
+            "an excluded device cannot make a file cross-source"
+        );
+        assert_eq!(
+            a_split.internal, 0,
+            "one surviving copy is the original, not surplus"
+        );
+        assert_eq!(
+            dup.get(&src_b).copied().unwrap_or_default().total(),
+            0,
+            "the excluded device reports no duplication of its own"
+        );
+    }
+
+    #[test]
+    fn excluding_a_source_leaves_the_remaining_devices_internal_duplication() {
+        // The converse guard: filtering out an excluded device must not also
+        // swallow duplication that is entirely internal to a device still in
+        // play. Without this, "ignore excluded sources" could be implemented
+        // as "ignore any group touching one" and still pass the test above.
+        let (conn, ws, src_a, src_b) = setup();
+        conn.execute(
+            "UPDATE sources SET excluded = 1 WHERE id = ?1",
+            params![src_b],
+        )
+        .unwrap();
+
+        let c1 = insert_node(&conn, src_a, None, "copy1.png", "file", 30);
+        let c2 = insert_node(&conn, src_a, None, "copy2.png", "file", 30);
+        insert_file_group(&conn, ws, &[c1, c2]);
+
+        let dup = duplicated_size_by_source(&conn, ws).unwrap();
+        let a = dup.get(&src_a).copied().unwrap_or_default();
+        assert_eq!(a.internal, 30, "A's own surplus copy still counts");
+        assert_eq!(a.cross, 0);
     }
 
     #[test]
@@ -1437,10 +1579,12 @@ mod tests {
         )
         .unwrap();
 
-        let dup = *duplicated_size_by_source(&conn, ws)
+        let dup = duplicated_size_by_source(&conn, ws)
             .unwrap()
             .get(&src_a)
-            .unwrap();
+            .copied()
+            .unwrap()
+            .total();
         // total_size would be 200 (both names), physical_size is 100.
         assert_eq!(dup, 100);
         assert_eq!(
