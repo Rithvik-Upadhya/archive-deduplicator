@@ -426,9 +426,13 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // Still gated by the `user_version` early-return above, so it does not
     // reintroduce a write on the common already-current path.
     //
-    // `dup_annot` deliberately gets no equivalent: it is rebuilt wholesale by
-    // every dedup run, and any workspace reaching this point is already
-    // flagged `dedup_stale`.
+    // `dup_annot` gets no equivalent recompute -- it is rebuilt wholesale by
+    // every dedup run -- but that only helps if a re-run actually happens, so
+    // every workspace is flagged `dedup_stale` below. Without that a workspace
+    // last deduped before v9 opens with a canonical-only
+    // `cross_dup_file_count` sitting beside a freshly name-based `file_count`
+    // (two populations, one subtraction) and, after v10, a `skipped` of 0 on
+    // every node -- a positive claim that the matcher declined nothing.
     if current < 9 {
         let tx = conn.unchecked_transaction()?;
         let source_ids: Vec<i64> = {
@@ -443,6 +447,15 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             "UPDATE sources SET file_count = (
                  SELECT COUNT(*) FROM nodes
                  WHERE nodes.source_id = sources.id AND nodes.type IN ('file', 'link'))",
+            [],
+        )?;
+        // The re-run request itself. `INSERT OR REPLACE` rather than `INSERT OR
+        // IGNORE`: a workspace already carrying `dedup_stale = 0` is exactly
+        // the one that most needs flagging -- it is claiming its annotations
+        // are current when the meaning underneath them just changed.
+        tx.execute(
+            "INSERT OR REPLACE INTO workspace_state (workspace_id, key, value)
+             SELECT id, 'dedup_stale', '1' FROM workspaces",
             [],
         )?;
         tx.commit()?;
@@ -511,7 +524,19 @@ mod tests {
 
     /// A stand-in for a pre-migration on-disk database: the baseline tables
     /// `migrate` needs to alter, deliberately missing every column added
-    /// since (hardlink columns, then medium/hash/listing columns).
+    /// since (hardlink columns, then medium/hash/listing columns, then
+    /// `dup_annot`'s skip columns).
+    ///
+    /// **Every table `migrate` touches must appear here** -- both the targets
+    /// of an `alterations` entry and the tables the version-gated backfills
+    /// read or write (`workspaces` / `workspace_state` for v9's
+    /// `dedup_stale` flag).
+    ///
+    /// `column_exists` asks `pragma_table_info`, which returns zero rows for a
+    /// table that doesn't exist *at all* -- indistinguishable from a table
+    /// missing that one column. So an absent table doesn't make `migrate` skip
+    /// the ALTER, it makes the ALTER fail. `init_schema` always runs before
+    /// `migrate` in `open`, so only this fixture can hit that.
     const OLD_SCHEMA_DDL: &str = r#"
         CREATE TABLE workspaces (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -546,6 +571,21 @@ mod tests {
             depth INTEGER NOT NULL DEFAULT 0,
             subtree_size INTEGER NOT NULL DEFAULT 0,
             subtree_file_count INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE workspace_state (
+            workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            PRIMARY KEY (workspace_id, key)
+        );
+        CREATE TABLE dup_annot (
+            node_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            has_dup INTEGER NOT NULL DEFAULT 0,
+            dup_pct REAL NOT NULL DEFAULT 0,
+            cross_dup INTEGER NOT NULL DEFAULT 0,
+            cross_dup_size INTEGER NOT NULL DEFAULT 0,
+            cross_dup_file_count INTEGER NOT NULL DEFAULT 0,
+            in_folder_group INTEGER NOT NULL DEFAULT 0
         );
     "#;
 
@@ -587,10 +627,66 @@ mod tests {
                 "sources.{col}"
             );
         }
+        // v10, and the reason `dup_annot` had to join the fixture: it is the
+        // first `alterations` target that is neither `nodes` nor `sources`.
+        for col in ["skipped", "skipped_count"] {
+            assert!(
+                column_exists(&conn, "dup_annot", col).unwrap(),
+                "dup_annot.{col}"
+            );
+        }
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_flags_existing_workspaces_dedup_stale() {
+        // v9 recomputes `file_count` / `subtree_file_count` but cannot recompute
+        // `dup_annot`, whose `cross_dup_file_count` was written under the old
+        // canonical-only meaning and whose v10 `skipped` defaults to 0. Only a
+        // re-run fixes those, so the migration has to ask for one -- otherwise
+        // the device header and the tree quietly disagree, and every node
+        // claims the matcher reached a verdict on it.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(OLD_SCHEMA_DDL).unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (id, name, created_at, updated_at) VALUES (1, 'w', 't', 't')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sources (id, workspace_id, kind, label, device_label, imported_at, total_size, file_count)
+             VALUES (1, 1, 'scan', 'disc-a', 'disc-a', 't', 100, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO nodes (id, source_id, parent_id, name, rel_path, type, size, depth)
+             VALUES (1, 1, NULL, 'a.jpg', 'a.jpg', 'file', 100, 0)",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let stale: String = conn
+            .query_row(
+                "SELECT value FROM workspace_state WHERE workspace_id = 1 AND key = 'dedup_stale'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale, "1");
+
+        // The v9 recompute itself: the stored 0 is stale, not a default.
+        let file_count: i64 = conn
+            .query_row("SELECT file_count FROM sources WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(file_count, 1);
     }
 
     #[test]
