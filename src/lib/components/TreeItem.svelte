@@ -349,22 +349,35 @@
             </Button>
         </span>
 
-        <span class="flex w-5 shrink-0">
-            {#if showLocate}
-                <Button
-                    variant="ghost"
-                    size="icon"
-                    class="size-5 shrink-0 opacity-0 transition-opacity group-hover/row:opacity-100"
-                    title="Show where the duplicates are"
-                    onclick={e => {
-                        e.stopPropagation();
-                        onlocate?.(node);
-                    }}>
-                    <Icon icon="ph:magnifying-glass-bold" />
-                    <span class="sr-only">Locate duplicates</span>
-                </Button>
-            {/if}
-        </span>
+        <!-- The whole column disappears in a tree that cannot locate at all
+             (the Consolidate view's source panel passes no `onlocate`), rather
+             than reserving 20px for a button that can never appear there.
+             Inside a tree that *can*, the slot stays reserved on every row so
+             the rows that do have the button still line up -- `onlocate` is a
+             per-tree constant, `showLocate` is per-row. -->
+        {#if onlocate}
+            <span class="flex w-5 shrink-0">
+                <!-- Always visible, unlike the copy button beside it. Copy is a
+                     utility you go looking for; this one is a *finding* -- its
+                     presence is the signal that this row has duplicates worth
+                     looking at, and a signal you have to hover to discover is
+                     not doing its job. -->
+                {#if showLocate}
+                    <Button
+                        variant="ghost"
+                        size="icon"
+                        class="size-5 shrink-0 text-muted-foreground hover:text-foreground"
+                        title="Show where the duplicates are"
+                        onclick={e => {
+                            e.stopPropagation();
+                            onlocate?.(node);
+                        }}>
+                        <Icon icon="ph:magnifying-glass-bold" />
+                        <span class="sr-only">Locate duplicates</span>
+                    </Button>
+                {/if}
+            </span>
+        {/if}
     </div>
 
     {#if expanded}

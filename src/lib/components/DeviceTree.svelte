@@ -269,15 +269,19 @@
         </div>
 
         <!-- Column labels for the tree. Only while it is open: headings over a
-             collapsed tree label nothing. The two trailing cells are empty
-             because the action columns need no label, but they must still be
-             here or the labels land one column too far right. -->
+             collapsed tree label nothing. The trailing cells are empty because
+             the action columns need no label, but they must still be here or
+             the labels land a column too far right -- and the locate cell must
+             track `onlocate` exactly as TreeItem's does, or the labels shift by
+             20px in the Consolidate view, which has no locate column. -->
         {#if expanded}
             <span class="w-(--col-count) shrink-0 text-right">files</span>
             <span class="w-(--col-size) shrink-0 text-right">size</span>
             <span class="w-12 shrink-0 text-right">dup %</span>
             <span class="w-5 shrink-0"></span>
-            <span class="w-5 shrink-0"></span>
+            {#if onlocate}
+                <span class="w-5 shrink-0"></span>
+            {/if}
         {/if}
     </div>
 
