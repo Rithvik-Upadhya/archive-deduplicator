@@ -162,7 +162,7 @@
                             })}
                                 <Sidebar.MenuButton
                                     {...props}
-                                    disabled={switchingWorkspace}
+                                    aria-disabled={switchingWorkspace}
                                     class="font-heading font-semibold tracking-tight">
                                     <Icon
                                         icon={switchingWorkspace

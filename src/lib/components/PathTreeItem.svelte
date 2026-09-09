@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { untrack } from 'svelte';
     import type { PathTreeNode } from '$lib/types';
     import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
     import { consolidationTreeExpanded } from '$lib/stores/treeExpansion.svelte';
@@ -38,7 +39,10 @@
     // re-sync: a branch that only becomes over-limit after the slider moves
     // shouldn't retroactively snap open, and one the user collapsed
     // shouldn't reopen just because this component remounted.
-    consolidationTreeExpanded.seedOnce(node.id, node.over_limit);
+    // `untrack` states that in code, not just in the comment: the initial
+    // values are exactly what we want here, so the warning about reading them
+    // locally is describing the intent rather than a mistake.
+    untrack(() => consolidationTreeExpanded.seedOnce(node.id, node.over_limit));
     const expanded = $derived(consolidationTreeExpanded.has(node.id));
     let editing = $state(false);
     let editValue = $state('');

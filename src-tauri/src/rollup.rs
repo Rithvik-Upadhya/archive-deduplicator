@@ -14,7 +14,6 @@ use std::collections::{HashMap, HashSet};
 /// A file's location used for folder rollups.
 pub(crate) struct FileLoc {
     pub(crate) node_id: i64,
-    pub(crate) source_id: i64,
     pub(crate) parent_id: Option<i64>,
     pub(crate) size: i64,
 }
@@ -93,13 +92,13 @@ pub(crate) fn build_folder_groups_with(
     for (dir, pct, total) in dup_dirs {
         // Skip a directory if its own parent is also a fully-duplicated dir, to
         // report duplication at the highest folder level rather than every level.
-        if let Some(Some(parent)) = parent_of.get(&dir).copied() {
-            if dir_total.contains_key(&parent) {
-                let ptotal = dir_total[&parent];
-                let pdup = *dir_dup.get(&parent).unwrap_or(&0);
-                if ptotal > 0 && (pdup as f64 / ptotal as f64) >= 0.8 {
-                    continue;
-                }
+        if let Some(Some(parent)) = parent_of.get(&dir).copied()
+            && dir_total.contains_key(&parent)
+        {
+            let ptotal = dir_total[&parent];
+            let pdup = *dir_dup.get(&parent).unwrap_or(&0);
+            if ptotal > 0 && (pdup as f64 / ptotal as f64) >= 0.8 {
+                continue;
             }
         }
         if let Some(name) = dir_names.get(&dir) {
@@ -121,7 +120,7 @@ pub(crate) fn build_folder_groups_with(
         if dirs.len() < 2 || distinct_sources.len() < 2 {
             continue;
         }
-        dirs.sort_by(|a, b| b.2.cmp(&a.2));
+        dirs.sort_by_key(|d| std::cmp::Reverse(d.2));
         let avg_pct = dirs.iter().map(|d| d.1).sum::<f64>() / dirs.len() as f64;
         let max_total = dirs.iter().map(|d| d.2).max().unwrap_or(0);
 
@@ -449,7 +448,11 @@ pub(crate) fn load_cross_source_files(
          WHERE mg.workspace_id = ?1 AND mg.kind = 'file' AND s.excluded = 0",
     )?;
     let rows = stmt.query_map(params![workspace_id], |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
     })?;
     let mut group_sources: HashMap<i64, HashSet<i64>> = HashMap::new();
     let mut node_groups: HashMap<i64, Vec<i64>> = HashMap::new();
@@ -499,16 +502,15 @@ pub(crate) fn load_file_locs(
     // of the matcher entirely, so its files must not feed folder rollups or the
     // `dup_annot` cache either.
     let mut stmt = conn.prepare(
-        "SELECT n.id, n.source_id, n.parent_id, n.size FROM nodes n
+        "SELECT n.id, n.parent_id, n.size FROM nodes n
          JOIN sources s ON s.id = n.source_id
          WHERE s.workspace_id = ?1 AND n.type = 'file' AND n.alias_of IS NULL AND s.excluded = 0",
     )?;
     let rows = stmt.query_map(params![workspace_id], |r| {
         Ok(FileLoc {
             node_id: r.get(0)?,
-            source_id: r.get(1)?,
-            parent_id: r.get(2)?,
-            size: r.get(3)?,
+            parent_id: r.get(1)?,
+            size: r.get(2)?,
         })
     })?;
     rows.collect()
@@ -523,20 +525,22 @@ pub(crate) fn load_file_locs(
 struct LeafLoc {
     node_id: i64,
     parent_id: Option<i64>,
-    is_file: bool,
 }
 
 fn load_leaf_locs(conn: &Connection, workspace_id: i64) -> rusqlite::Result<Vec<LeafLoc>> {
     let mut stmt = conn.prepare(
-        "SELECT n.id, n.parent_id, n.type FROM nodes n
+        "SELECT n.id, n.parent_id FROM nodes n
          JOIN sources s ON s.id = n.source_id
          WHERE s.workspace_id = ?1 AND n.type IN ('file', 'link') AND n.alias_of IS NULL AND s.excluded = 0",
     )?;
+    // `n.type` is deliberately not carried onto `LeafLoc`: every row the
+    // `WHERE` admits counts the same, files and symlinks alike. Selecting it
+    // would invite a caller to reintroduce the file-only restriction this type
+    // exists to drop.
     let rows = stmt.query_map(params![workspace_id], |r| {
         Ok(LeafLoc {
             node_id: r.get(0)?,
             parent_id: r.get(1)?,
-            is_file: r.get::<_, String>(2)? == "file",
         })
     })?;
     rows.collect()

@@ -314,6 +314,11 @@ pub fn hash_file(
 /// disk, and its size (needed for region planning without re-stat'ing).
 pub type HashJob = (i64, PathBuf, i64);
 
+/// One hashing result, tagged with the node id its job carried so the caller
+/// can match it back up -- results arrive in completion order, not job order.
+/// The `Ok` payload is `(digest, hash_kind, bytes_read)`.
+pub type HashOutcome = (i64, std::io::Result<(blake3::Hash, &'static str, i64)>);
+
 /// Worker-pool sizing for `hash_files_pooled`, split by file size into a
 /// "small" lane (many concurrent readers -- these are seek-bound anyway on
 /// a spinning disk, so a deep queue lets the drive's NCQ reorder them
@@ -366,7 +371,7 @@ pub fn hash_files_pooled(
     jobs: Vec<HashJob>,
     spec: HashSpec,
     lanes: LaneConfig,
-) -> Vec<(i64, std::io::Result<(blake3::Hash, &'static str, i64)>)> {
+) -> Vec<HashOutcome> {
     let expected = jobs.len();
     // A stable partition preserves whatever order `resolve_candidates`
     // already sorted `jobs` into (physical-order on HDD) within each lane.

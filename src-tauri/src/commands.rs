@@ -249,6 +249,11 @@ pub async fn import_tree_json(
 /// See `import_tree_json`'s doc comment for why this runs inside
 /// `spawn_blocking` -- this one matters even more, since a folder walk on a
 /// slow disk is the whole reason progress reporting exists here.
+// A `#[tauri::command]`'s arity *is* its IPC signature: these eight are the
+// arguments `scan_folder` takes in `src/lib/api.ts`. Folding them into a
+// struct to satisfy the lint would be a Rust/TS contract change (model.rs,
+// types.ts and api.ts in lockstep) bought purely with style.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn scan_folder(
     app: tauri::AppHandle,
