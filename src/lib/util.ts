@@ -41,6 +41,15 @@ export function pct(value: number): number {
     return Math.round(Math.max(0, Math.min(100, value)) * 10) / 10;
 }
 
+/**
+ * Same, to two decimals -- for tooltips, where a share that reads `0%` on a
+ * badge is still worth seeing. Returns a number rather than a fixed-width
+ * string, so a half-duplicated device reads `50%` and not `50.00%`.
+ */
+export function pct2(value: number): number {
+    return Math.round(Math.max(0, Math.min(100, value)) * 100) / 100;
+}
+
 /* --- Colour scales ---------------------------------------------------------
  *
  * Duplicate markers are coloured by *where the other copies live*, not by how

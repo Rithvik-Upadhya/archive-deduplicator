@@ -12,7 +12,7 @@
         Source,
         Workspace,
     } from '$lib/types';
-    import { formatBytes, pct } from '$lib/util';
+    import { formatBytes, pct, pct2 } from '$lib/util';
     import Icon from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button';
     import { Input } from '$lib/components/ui/input';
@@ -377,11 +377,14 @@
                 {#each app.sources as s (s.id)}
                     <!-- The bar's two shares. `{@const}` has to sit here, as
                          an immediate child of the block, not down beside the
-                         bar inside the <li>. -->
-                    {@const crossPct = pct(s.cross_duplicated_pct)}
+                         bar inside the <li>. Two decimals: these feed the
+                         tooltip as well as the segment widths, and a share
+                         that rounds to 0% on the badge is still worth reading
+                         precisely on hover. -->
+                    {@const crossPct = pct2(s.cross_duplicated_pct)}
                     {@const internalPct = Math.max(
                         0,
-                        pct(s.duplicated_pct) - crossPct
+                        pct2(s.duplicated_pct) - crossPct
                     )}
                     <li
                         class="group/device flex min-w-0 w-[280px] flex-col gap-1 rounded-md border bg-card px-2 py-1.5 transition-colors hover:border-brand/40 {s.excluded
@@ -495,22 +498,30 @@
                                 </Button>
                             {/if}
                         </div>
-                        <!-- Two segments of one whole, not two bars: the
-                             cross-source share in brand red, the rest (this
-                             device's own internal duplication) in grey. They
-                             sum to the "% dup" badge below because both come
-                             from one pass over one population -- see
-                             `cross_duplicated_pct` in types.ts.
+                        <!-- Bar and the figures beneath it share one hover
+                             target: the bar alone is 4px tall, which is a
+                             miserable thing to aim at for the only explanation
+                             of what its two colours mean. -->
+                        <div
+                            class="flex flex-col gap-1"
+                            title={s.excluded
+                                ? 'Excluded from analysis'
+                                : `${crossPct}% duplicated on another device, ${internalPct}% duplicated only within this one`}>
+                            <!-- Two segments of one whole, not two bars: the
+                                 cross-source share in brand red, the rest (this
+                                 device's own internal duplication) in grey. They
+                                 sum to the "% dup" badge below because both come
+                                 from one pass over one population -- see
+                                 `cross_duplicated_pct` in types.ts.
 
-                             Hidden entirely when the device is excluded, as
-                             the badge below already is: an excluded device is
-                             left out of the matcher, so an empty bar would
-                             claim "0% duplicated" about something that was
-                             never analysed. -->
-                        {#if !s.excluded}
+                                 An excluded device draws an empty track rather
+                                 than nothing, so the card keeps its shape. Both
+                                 shares are already 0 for it -- the matcher
+                                 filters `s.excluded = 0` -- but the tooltip
+                                 above still must not say "0% duplicated": that
+                                 would report a measurement never taken. -->
                             <div
-                                class="flex h-1 w-full overflow-hidden rounded-full bg-muted"
-                                title="{crossPct}% duplicated on another device, {internalPct}% duplicated only within this one">
+                                class="flex h-1 w-full overflow-hidden rounded-full bg-muted">
                                 <div
                                     class="h-full bg-brand"
                                     style="width: {crossPct}%">
@@ -520,28 +531,28 @@
                                     style="width: {internalPct}%">
                                 </div>
                             </div>
-                        {/if}
-                        <div
-                            class="flex items-center justify-between font-heading text-[0.7rem] tabular-nums text-muted-foreground">
-                            <!-- `physical_size`, matching DeviceTree's header
-                                 and the base `duplicated_pct` is computed
-                                 against: quoting `total_size` beside the same
-                                 badge made the two panes disagree about how
-                                 big a device is. -->
-                            <span>{formatBytes(s.physical_size)}</span>
-                            {#if s.excluded}
-                                <Badge
-                                    variant="outline"
-                                    class="px-1.5 py-0 text-[0.65rem]">
-                                    Excluded
-                                </Badge>
-                            {:else}
-                                <Badge
-                                    variant="outline"
-                                    class="px-1.5 py-0 text-[0.65rem]">
-                                    {pct(s.duplicated_pct)}% dup
-                                </Badge>
-                            {/if}
+                            <div
+                                class="flex items-center justify-between font-heading text-[0.7rem] tabular-nums text-muted-foreground">
+                                <!-- `physical_size`, matching DeviceTree's
+                                     header and the base `duplicated_pct` is
+                                     computed against: quoting `total_size`
+                                     beside the same badge made the two panes
+                                     disagree about how big a device is. -->
+                                <span>{formatBytes(s.physical_size)}</span>
+                                {#if s.excluded}
+                                    <Badge
+                                        variant="outline"
+                                        class="px-1.5 py-0 text-[0.65rem]">
+                                        Excluded
+                                    </Badge>
+                                {:else}
+                                    <Badge
+                                        variant="outline"
+                                        class="px-1.5 py-0 text-[0.65rem]">
+                                        {pct(s.duplicated_pct)}% dup
+                                    </Badge>
+                                {/if}
+                            </div>
                         </div>
                         {#if s.hashing_enabled && s.hashing_phase === 'hashing' && !isSourceHashingActive(s.id)}
                             <div

@@ -83,34 +83,29 @@
     const folderTone = $derived(
         node.cross_dup_file_count > 0 ? 'external' : 'internal'
     );
-    // The badge can read 0% for two different reasons, and the note has to say
-    // which: the duplicated content genuinely holds no bytes (symlinks,
-    // hardlink aliases, empty files), or it holds so few that one decimal place
-    // rounds it away. Only append it when the displayed figure is actually 0.
+    // The badge can read 0% two ways -- the duplicates hold no bytes at all, or
+    // so few that one decimal rounds them away -- and the note must not claim
+    // one when it is the other. Only appended when the displayed figure is 0.
+    // "Under 0.05%" is exact, not hedging: `pct` rounds to one decimal.
     const folderDupPct = $derived(pct(node.dup_pct));
-    // Said on every folder badge, because the number alone does not say what it
-    // is a share *of*. Note it deliberately does not claim to be the
-    // cross-device share: `dup_pct` pools duplication of both kinds, while the
-    // red/grey tone is about cross-device only. Two different questions in one
-    // row, so the tooltip has to be explicit about which the number answers.
-    const PCT_BASIS =
-        " The percentage is the total size of duplicated content here as a share of this folder's size, counting copies on this device as well as on others.";
     const zeroPctNote = $derived(
         folderDupPct !== 0
             ? ''
             : node.dup_pct > 0
-              ? ' It rounds to 0% here: those duplicates are a negligible fraction of the folder.'
-              : ' It is 0% here because those copies hold no bytes of their own -- symlinks, hardlink aliases and empty files.'
+              ? ' Under 0.05%.'
+              : ' Those copies hold no bytes.'
     );
+    // The "here or elsewhere" clarifier belongs only on the external branch:
+    // `dup_pct` pools duplication of both kinds while the tone is cross-device
+    // only, so that number could otherwise be misread as the cross-device
+    // share. On the internal branch every duplicate *is* on this device, so
+    // there is nothing to disambiguate.
     const folderBadgeTitle = $derived(
         (folderTone === 'external'
             ? `${node.cross_dup_file_count} item${
                   node.cross_dup_file_count === 1 ? '' : 's'
-              } under this folder also exist${
-                  node.cross_dup_file_count === 1 ? 's' : ''
-              } on another device.`
-            : 'Duplicated within this device only -- every copy of everything under this folder is on this device.') +
-        PCT_BASIS +
+              } also on another device. % = share of bytes duplicated, here or elsewhere.`
+            : 'Duplicates are all on this device. % = share of bytes duplicated.') +
         zeroPctNote
     );
     const copyLabel = $derived(
@@ -313,7 +308,7 @@
                 <Badge
                     variant="outline"
                     class="shrink-0 border-muted-foreground/45 px-1 py-0 font-heading text-[0.65rem] text-muted-foreground"
-                    title="This is a hardlink: one physical file also known by another name on this device. Not a duplicate -- deleting one name doesn't free any space until every name is gone."
+                    title="Hardlink -- another name for the same bytes. Deleting one name frees nothing."
                     >link</Badge>
             {:else if node.has_duplicate}
                 <Badge
@@ -322,8 +317,8 @@
                         node.cross_dup ? 'external' : 'internal'
                     ]}"
                     title={node.cross_dup
-                        ? 'This file also exists on another device -- deleting it here would not lose the only copy'
-                        : 'This file has a duplicate, but only on this device -- every copy is on this one shelf'}
+                        ? 'Also exists on another device.'
+                        : 'Duplicated, but only on this device.'}
                     >dup</Badge>
             {/if}
         </span>

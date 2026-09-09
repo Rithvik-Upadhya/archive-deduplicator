@@ -308,7 +308,7 @@
                                 <ul class="flex flex-col">
                                     {#each selectedGroup.members as m (m.node_id)}
                                         <li
-                                            class="group/row flex items-center gap-2 rounded-sm px-1 py-0.5 text-xs data-[self=true]:bg-brand/10"
+                                            class="flex items-center gap-2 rounded-sm px-1 py-0.5 text-xs data-[self=true]:bg-brand/10"
                                             data-self={m.node_id ===
                                                 selectedNode?.id}>
                                             <span
@@ -330,7 +330,7 @@
                                             <Button
                                                 variant="ghost"
                                                 size="icon"
-                                                class="size-5 shrink-0 opacity-0 transition-opacity group-hover/row:opacity-100"
+                                                class="size-5 shrink-0 text-muted-foreground hover:text-foreground"
                                                 title={memberCopyLabel}
                                                 onclick={() =>
                                                     copyPath(
@@ -413,7 +413,7 @@
                                         <ul class="flex flex-col py-0.5">
                                             {#each g.members as m (m.node_id)}
                                                 <li
-                                                    class="group/row flex items-center gap-2 px-2 py-0.5 text-xs">
+                                                    class="flex items-center gap-2 px-2 py-0.5 text-xs">
                                                     <span
                                                         class="shrink-0 font-medium whitespace-nowrap text-muted-foreground"
                                                         >{m.device_label}</span>
@@ -424,7 +424,7 @@
                                                     <Button
                                                         variant="ghost"
                                                         size="icon"
-                                                        class="size-5 shrink-0 opacity-0 transition-opacity group-hover/row:opacity-100"
+                                                        class="size-5 shrink-0 text-muted-foreground hover:text-foreground"
                                                         title={groupCopyLabel}
                                                         onclick={e => {
                                                             e.stopPropagation();
