@@ -858,10 +858,10 @@ fn load_files(
     let mut files = Vec::new();
     for row in rows {
         let mut f = row?;
-        if let Some(pid) = f.parent_id {
-            if let Some(name) = parent_names.get(&pid) {
-                f.parent_name = name.clone();
-            }
+        if let Some(pid) = f.parent_id
+            && let Some(name) = parent_names.get(&pid)
+        {
+            f.parent_name = name.clone();
         }
         files.push(f);
     }
@@ -1242,13 +1242,16 @@ mod tests {
         );
     }
 
+    /// One `setup_typed` fixture row: `(name, type, size, link_target, mtime)`.
+    type TypedRow<'a> = (&'a str, &'a str, i64, Option<&'a str>, Option<&'a str>);
+
     /// Two sources, each holding the rows given as
     /// `(name, type, size, link_target, mtime)`, all under a directory named
     /// `holder` so `parent_name` is non-empty and tier E is actually
     /// reachable. Needed because `setup_files` builds one source of plain
     /// files, while symlink matching and the zero-byte rules are both about
     /// cross-source pairs of non-plain nodes.
-    fn setup_typed(rows: &[(&str, &str, i64, Option<&str>, Option<&str>)]) -> Connection {
+    fn setup_typed(rows: &[TypedRow]) -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         db::init_schema(&conn).unwrap();
         conn.execute(
@@ -1390,8 +1393,7 @@ mod tests {
 
     #[test]
     fn zero_byte_files_match_on_exact_name_once_the_threshold_allows_them() {
-        let rows: &[(&str, &str, i64, Option<&str>, Option<&str>)] =
-            &[("stderr", "file", 0, None, Some("2024-01-01_10:00:00"))];
+        let rows: &[TypedRow] = &[("stderr", "file", 0, None, Some("2024-01-01_10:00:00"))];
         let mut conn = setup_typed(rows);
         run_with_progress(&mut conn, 1, params_min_size(0), |_, _, _| {}).unwrap();
         assert_eq!(
@@ -1846,7 +1848,10 @@ mod tests {
         for i in 0..(MAX_GROUP_SIZE + 1) {
             rows.push((
                 "clone.bin".to_string(),
-                42_000,
+                // Above `DedupParams::default().min_size_bytes` (64 KiB), or
+                // the size filter would drop these before any bucket forms
+                // and the cap under test would never be reached.
+                500_000,
                 Some(format!("2024-01-01_10:{:02}:00", i % 60)),
                 String::new(),
             ));
@@ -1882,9 +1887,12 @@ mod tests {
     fn a_group_within_the_cap_is_matched_and_not_marked_skipped() {
         // The complement of the test above, and the one that keeps the marker
         // meaningful: a cohort the matcher *can* judge must never carry it.
+        // 500_000 clears the default 64 KiB `min_size_bytes`; at 42_000 both
+        // files were filtered out before matching and this passed for the
+        // wrong reason.
         let mut conn = setup_files(&[
-            ("clone.bin", 42_000, Some("2024-01-01_10:00:00"), ""),
-            ("clone.bin", 42_000, Some("2024-01-01_10:00:00"), ""),
+            ("clone.bin", 500_000, Some("2024-01-01_10:00:00"), ""),
+            ("clone.bin", 500_000, Some("2024-01-01_10:00:00"), ""),
         ]);
         run_with_progress(&mut conn, 1, DedupParams::default(), |_, _, _| {}).unwrap();
 
@@ -1904,7 +1912,9 @@ mod tests {
         // "No partner found" is a finding -- the file really is unique. Only a
         // cap that declined to judge marks `skipped`; conflating the two would
         // badge every genuinely unique file and make the marker worthless.
-        let mut conn = setup_files(&[("alone.bin", 42_000, Some("2024-01-01_10:00:00"), "")]);
+        // Must clear the default 64 KiB `min_size_bytes`: a file the size
+        // filter drops is also unskipped, so at 42_000 this asserted nothing.
+        let mut conn = setup_files(&[("alone.bin", 500_000, Some("2024-01-01_10:00:00"), "")]);
         run_with_progress(&mut conn, 1, DedupParams::default(), |_, _, _| {}).unwrap();
 
         let skipped: i64 = conn
