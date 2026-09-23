@@ -469,7 +469,10 @@ mod tests {
         let filtered =
             materialize_subtree(&mut conn, consolidation_id, None, root_id, true).unwrap();
         let alias_row = row_for(&conn, &filtered, alias);
-        assert!(alias_row.struck, "an alias of a hidden canonical comes across struck");
+        assert!(
+            alias_row.struck,
+            "an alias of a hidden canonical comes across struck"
+        );
         assert!(alias_row.is_alias);
         assert!(row_for(&conn, &filtered, canonical).struck);
     }
