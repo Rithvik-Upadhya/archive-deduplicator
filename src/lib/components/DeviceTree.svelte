@@ -190,45 +190,48 @@
                     : 'transition-transform'} />
         </Button>
         <Icon icon="ph:hard-drive-fill" class="shrink-0 text-brand" />
-        <!-- Identity colour for the consolidated tree's source bars. The native
-             input is stretched invisibly over the swatch so a click on it opens
-             the OS picker. -->
-        <label
-            class="relative size-3.5 shrink-0 cursor-pointer rounded-full ring-1 ring-border"
-            style="background: {swatch}"
-            title="Source colour">
-            <input
-                type="color"
-                class="absolute inset-0 size-full cursor-pointer opacity-0"
-                aria-label="Source colour"
-                value={swatch}
-                oninput={e => (colorPreview = e.currentTarget.value)}
-                onchange={e => saveColor(e.currentTarget.value)} />
-        </label>
-
-        {#if editing}
-            <!-- svelte-ignore a11y_autofocus -->
-            <Input
-                autofocus
-                class="h-7 flex-1 text-sm"
-                bind:value={editValue}
-                onblur={saveLabel}
-                onkeydown={e => {
-                    if (e.key === 'Enter') saveLabel();
-                    if (e.key === 'Escape') editing = false;
-                }} />
-        {:else}
-            <button
-                type="button"
-                class="min-w-0 flex-1 truncate text-start text-sm font-semibold hover:text-brand"
-                title="Rename device"
-                onclick={() => {
-                    editing = true;
-                    editValue = source.device_label;
-                }}>
-                {source.device_label}
-            </button>
-        {/if}
+        <!-- Name and swatch share one flexible slot so the swatch sits right
+             after the name rather than at the far end of the row. -->
+        <div class="flex min-w-0 flex-1 items-center gap-1.5">
+            {#if editing}
+                <!-- svelte-ignore a11y_autofocus -->
+                <Input
+                    autofocus
+                    class="h-7 flex-1 text-sm"
+                    bind:value={editValue}
+                    onblur={saveLabel}
+                    onkeydown={e => {
+                        if (e.key === 'Enter') saveLabel();
+                        if (e.key === 'Escape') editing = false;
+                    }} />
+            {:else}
+                <button
+                    type="button"
+                    class="min-w-0 truncate text-start text-sm font-semibold hover:text-brand"
+                    title="Rename device"
+                    onclick={() => {
+                        editing = true;
+                        editValue = source.device_label;
+                    }}>
+                    {source.device_label}
+                </button>
+            {/if}
+            <!-- Identity colour for the consolidated tree's source bars. The native
+                 input is stretched invisibly over the swatch so a click on it opens
+                 the OS picker. -->
+            <label
+                class="relative size-3.5 shrink-0 cursor-pointer rounded-full ring-1 ring-border"
+                style="background: {swatch}"
+                title="Source colour">
+                <input
+                    type="color"
+                    class="absolute inset-0 size-full cursor-pointer opacity-0"
+                    aria-label="Source colour"
+                    value={swatch}
+                    oninput={e => (colorPreview = e.currentTarget.value)}
+                    onchange={e => saveColor(e.currentTarget.value)} />
+            </label>
+        </div>
 
         {#if !filterCrossDevice}
             <Badge
