@@ -1,5 +1,4 @@
 <script lang="ts">
-    import { untrack } from 'svelte';
     import type { PathTreeNode } from '$lib/types';
     import { type Relocation, type SourceBars } from '$lib/util';
     import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
@@ -80,19 +79,18 @@
     // measured (see pathfix.rs), so only these carry a path-length badge. A
     // live folder whose children are all struck is one.
     const isMeasuredLeaf = $derived(!node.struck && !hasLiveKids(node.id));
-    // Struck rows are never over-limit, so the two tones never compete.
-    const tone = $derived(
-        node.struck ? 'text-struck' : node.over_limit ? 'text-destructive' : ''
+    // Over-limit is marked by an icon after the name, not by tinting the row,
+    // so the only tone left is struck.
+    const tone = $derived(node.struck ? 'text-struck' : '');
+    // `over_limit` is set on an offending leaf *and* every ancestor of one
+    // (pathfix.rs), so each folder on the way down carries the icon too.
+    // Rows are never auto-expanded to show it: with thousands over the
+    // limit, opening them all at once hung the view.
+    const overTitle = $derived(
+        isMeasuredLeaf
+            ? `Path is ${node.path_length} characters, over the ${limit} limit`
+            : `Something inside is over the ${limit}-character limit`
     );
-
-    // Applied once, on this node's first-ever encounter, not a reactive
-    // re-sync: a branch that only becomes over-limit after the slider moves
-    // shouldn't retroactively snap open, and one the user collapsed
-    // shouldn't reopen just because this component remounted.
-    // `untrack` states that in code, not just in the comment: the initial
-    // values are exactly what we want here, so the warning about reading them
-    // locally is describing the intent rather than a mistake.
-    untrack(() => consolidationTreeExpanded.seedOnce(node.id, node.over_limit));
     const expanded = $derived(consolidationTreeExpanded.has(node.id));
     let editing = $state(false);
     let editValue = $state('');
@@ -139,8 +137,7 @@
 
 <div class="text-sm">
     <div
-        class="group/row flex items-center gap-1.5 border border-transparent px-1.5 py-0.5 select-none data-[over=true]:border-destructive/50 data-[drag=true]:border-brand data-[drag=true]:bg-brand/15 data-[selected=true]:bg-muted/50"
-        data-over={node.over_limit}
+        class="group/row flex items-center gap-1.5 border border-transparent px-1.5 py-0.5 select-none data-[drag=true]:border-brand data-[drag=true]:bg-brand/15 data-[selected=true]:bg-muted/50"
         data-drag={dragOver}
         data-selected={selection.isSelected(node.id)}
         draggable={!editing}
@@ -205,12 +202,20 @@
                     relocatedColor={reloc.color}
                     relocatedTitle={reloc.title}
                     movedBelow={reloc.movedBelow} />
+                {#if node.over_limit}
+                    <span
+                        class="inline-flex shrink-0 text-destructive"
+                        title={overTitle}
+                        aria-label={overTitle}>
+                        <Icon icon="ph:warning-circle-fill" class="size-3.5" />
+                    </span>
+                {/if}
             </span>
         {/if}
 
         {#if isMeasuredLeaf}
             <Badge
-                variant={node.path_length > limit ? 'destructive' : 'secondary'}
+                variant={node.over_limit ? 'destructive' : 'secondary'}
                 class="ms-auto shrink-0 px-1.5 py-0 text-[0.7rem]">
                 {node.path_length} chars
             </Badge>

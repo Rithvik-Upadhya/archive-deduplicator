@@ -9,6 +9,7 @@
     import {
         consolidationTreeExpanded,
         deviceFilterOn,
+        deviceTreeExpanded,
     } from '$lib/stores/treeExpansion.svelte';
     import { TreeSelection } from '$lib/stores/selection.svelte';
     import DeviceTree from './DeviceTree.svelte';
@@ -17,6 +18,7 @@
     import Icon from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button';
     import NewFolderDialog from './NewFolderDialog.svelte';
+    import CollapseAllButton from './CollapseAllButton.svelte';
     import RemoveNodesDialog from './RemoveNodesDialog.svelte';
     import * as Empty from '$lib/components/ui/empty';
     import * as Resizable from '$lib/components/ui/resizable/index.js';
@@ -525,9 +527,15 @@
     <!-- Source devices -->
     <Resizable.Pane>
         <section class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden pe-1">
-            <h2 class="section-label mb-2 shrink-0">
-                Source devices — drag files &amp; folders →
-            </h2>
+            <div class="mb-2 flex shrink-0 items-center justify-between gap-2">
+                <h2 class="section-label">
+                    Source devices — drag files &amp; folders →
+                </h2>
+                <CollapseAllButton
+                    set={search.active
+                        ? search.deviceExpanded
+                        : deviceTreeExpanded} />
+            </div>
             {#if app.visibleSources.length === 0}
                 <Empty.Root class="border border-dashed">
                     <Empty.Header>
@@ -602,6 +610,10 @@
                         <Icon icon="ph:folder-plus-fill" />
                         <span>Folder</span>
                     </Button>
+                    <CollapseAllButton
+                        set={search.active
+                            ? search.consExpanded
+                            : consolidationTreeExpanded} />
                 </div>
             </div>
             <div

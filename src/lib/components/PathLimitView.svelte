@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { untrack } from 'svelte';
     import * as api from '$lib/api';
     import { app } from '$lib/stores/app.svelte';
     import type { PathTreeNode } from '$lib/types';
@@ -15,14 +16,18 @@
         strikeToggle,
     } from '$lib/util';
     import { Button } from '$lib/components/ui/button';
-    import { Slider } from '$lib/components/ui/slider';
     import { Label } from '$lib/components/ui/label';
     import { ScrollArea } from '$lib/components/ui/scroll-area';
     import * as Empty from '$lib/components/ui/empty';
     import NewFolderDialog from './NewFolderDialog.svelte';
+    import NumberField from './NumberField.svelte';
+    import CollapseAllButton from './CollapseAllButton.svelte';
     import { taskTray } from '$lib/stores/tasks.svelte';
 
+    /** The limit in the field -- applied only by Rescan. */
     let limit = $state(260);
+    /** The limit the tree on screen was measured at. */
+    let scannedLimit = $state(260);
     let nodes = $state<PathTreeNode[]>([]);
     let loading = $state(false);
     let showNewFolderDialog = $state(false);
@@ -30,11 +35,18 @@
     let newFolderParent = $state<PathTreeNode | null>(null);
     const selection = new TreeSelection();
 
-    async function reload() {
+    /**
+     * Re-measure the tree. Every mutation (rename, move, strike, drop, new
+     * folder) calls this bare, at the *scanned* limit, so an edited row drops
+     * out of the red at once while an unrun edit to the field stays unrun --
+     * only Rescan passes the field's value.
+     */
+    async function reload(l = scannedLimit) {
         if (app.activeWorkspaceId == null) return;
         loading = true;
         try {
-            nodes = await api.pathfixTree(app.activeWorkspaceId, limit);
+            nodes = await api.pathfixTree(app.activeWorkspaceId, l);
+            scannedLimit = l;
         } catch (err) {
             taskTray.notify('Scan failed', 'error', String(err));
         } finally {
@@ -42,23 +54,16 @@
         }
     }
 
-    // Debounced: unlike the old over-limit-leaves-only endpoint, this one
-    // returns the whole tree, and the slider can fire ~32 distinct values
-    // while being dragged.
-    let debounceHandle: ReturnType<typeof setTimeout> | undefined;
-    // Plain (non-reactive) on purpose: it's only compared inside this same
-    // effect, never read elsewhere. Making it $state would cause writing to
-    // it here to re-trigger this very effect, and the cleanup below would
-    // then cancel the just-scheduled reload before it ever fires.
-    let loadedFor: string | null = null;
+    // Load on the first visit and on a workspace switch -- never on a limit
+    // edit, which waits for Rescan. Plain (non-reactive) on purpose: writing
+    // it here must not re-trigger this effect.
+    let loadedFor: number | null = null;
     $effect(() => {
-        const key = `${app.activeWorkspaceId}:${limit}`;
-        if (app.activeWorkspaceId != null && key !== loadedFor) {
-            loadedFor = key;
-            clearTimeout(debounceHandle);
-            debounceHandle = setTimeout(reload, 150);
+        const ws = app.activeWorkspaceId;
+        if (ws != null && ws !== loadedFor) {
+            loadedFor = ws;
+            untrack(() => reload());
         }
-        return () => clearTimeout(debounceHandle);
     });
 
     // Indexed view over the flat node list: parent -> children, folders first
@@ -90,7 +95,7 @@
 
     /**
      * A node's path within the end-state tree, root-first -- the same path
-     * pathfix.rs measures against the 260-char limit. `name` already reflects
+     * pathfix.rs measures against the scanned limit. `name` already reflects
      * any pending virtual rename.
      */
     const pathOf = (id: number) => pathSegments(index.byId, id);
@@ -233,24 +238,25 @@
     // children. Struck rows are never measured.
     const overCount = $derived(
         nodes.filter(
-            n => !n.struck && !hasLiveKids(n.id) && n.path_length > limit
+            n =>
+                !n.struck && !hasLiveKids(n.id) && n.path_length > scannedLimit
         ).length
     );
 </script>
 
 <div class="flex min-h-0 grow flex-col gap-3 overflow-hidden">
     <div class="flex flex-wrap items-end gap-6">
-        <div class="flex min-w-56 flex-col gap-1.5">
-            <Label for="limit" class="text-xs">
-                Path length limit: <strong>{limit}</strong>
+        <div class="flex flex-col gap-1.5">
+            <Label for="limit" class="text-xs text-muted-foreground">
+                Path length limit
             </Label>
-            <Slider
+            <NumberField
                 id="limit"
-                type="single"
-                min={80}
-                max={400}
-                step={10}
-                bind:value={limit} />
+                value={limit}
+                suffix="chars"
+                min={1}
+                max={32767}
+                oncommit={v => (limit = v)} />
         </div>
         <div class="flex items-baseline gap-2 text-sm text-muted-foreground">
             <span
@@ -259,12 +265,19 @@
                 class:text-ok={overCount === 0}>{overCount}</span>
             <span>branches over limit</span>
         </div>
-        <Button variant="outline" disabled={loading} onclick={reload}>
-            <Icon
-                icon={loading ? 'ph:spinner-gap-fill' : 'ph:scan-fill'}
-                class={loading ? 'animate-spin' : ''} />
-            <span>{loading ? 'Scanning…' : 'Rescan'}</span>
-        </Button>
+        <!-- Only offered once the field differs from what is on screen (and
+             while a scan is running, so its progress stays visible). -->
+        {#if limit !== scannedLimit || loading}
+            <Button
+                variant="outline"
+                disabled={loading}
+                onclick={() => reload(limit)}>
+                <Icon
+                    icon={loading ? 'ph:spinner-gap-fill' : 'ph:scan-fill'}
+                    class={loading ? 'animate-spin' : ''} />
+                <span>{loading ? 'Scanning…' : 'Rescan'}</span>
+            </Button>
+        {/if}
         <div class="ms-auto flex shrink-0 items-center gap-1.5">
             {#if hasSelection}
                 <Button
@@ -283,6 +296,8 @@
                 <Icon icon="ph:folder-plus-fill" />
                 <span>Folder</span>
             </Button>
+            <!-- No search set here: search is hidden in Fix Paths. -->
+            <CollapseAllButton set={consolidationTreeExpanded} />
         </div>
     </div>
 
@@ -338,7 +353,7 @@
                         {pathOf}
                         {barsOf}
                         {relocOf}
-                        {limit}
+                        limit={scannedLimit}
                         {selection}
                         onrename={handleRename}
                         renamedBelowOf={id => index.renamedBelow.get(id) ?? 0}

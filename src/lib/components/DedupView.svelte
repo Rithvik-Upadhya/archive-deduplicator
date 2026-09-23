@@ -17,6 +17,8 @@
         type MatchTier,
     } from '$lib/util';
     import DeviceTree from './DeviceTree.svelte';
+    import CollapseAllButton from './CollapseAllButton.svelte';
+    import { deviceTreeExpanded } from '$lib/stores/treeExpansion.svelte';
     import GroupDialog from './GroupDialog.svelte';
     import RevealButton from './RevealButton.svelte';
     import MemberPath from './MemberPath.svelte';
@@ -214,7 +216,14 @@
             class="grid min-h-0 grow grid-cols-2 overflow-hidden">
             <Resizable.Pane>
                 <div class="flex h-full min-w-0 flex-col overflow-hidden pe-1">
-                    <h2 class="section-label mb-2 shrink-0">Device trees</h2>
+                    <div
+                        class="mb-2 flex shrink-0 items-center justify-between gap-2">
+                        <h2 class="section-label">Device trees</h2>
+                        <CollapseAllButton
+                            set={search.active
+                                ? search.deviceExpanded
+                                : deviceTreeExpanded} />
+                    </div>
                     {#if app.visibleSources.length === 0}
                         <Empty.Root class="border border-dashed">
                             <Empty.Header>

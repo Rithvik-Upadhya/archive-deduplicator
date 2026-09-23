@@ -9,9 +9,6 @@ import { taskTray } from '$lib/stores/tasks.svelte';
 
 export class ToggleSet {
     #ids = $state<Set<number>>(new Set());
-    /** Plain (non-reactive) on purpose -- bookkeeping for `seedOnce` only,
-     *  never read by a template. */
-    #seeded = new Set<number>();
 
     has(id: number): boolean {
         return this.#ids.has(id);
@@ -31,21 +28,17 @@ export class ToggleSet {
         this.#ids = next;
     }
 
+    /** Forget every expanded id -- "collapse all". */
+    clear() {
+        if (this.#ids.size === 0) return;
+        this.#ids = new Set();
+    }
+
     toggle(id: number) {
         const next = new Set(this.#ids);
         if (next.has(id)) next.delete(id);
         else next.add(id);
         this.#ids = next;
-    }
-
-    /** Applies `value` once, on this id's first-ever encounter, without
-     *  clobbering a later explicit toggle -- e.g. auto-expanding an
-     *  over-limit path branch on first sight while still letting the user
-     *  collapse it and have that choice stick. */
-    seedOnce(id: number, value: boolean) {
-        if (this.#seeded.has(id)) return;
-        this.#seeded.add(id);
-        if (value) this.add(id);
     }
 }
 

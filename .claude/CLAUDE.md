@@ -304,8 +304,13 @@ hash_spec)` makes re-scanning an unchanged tree a no-op read-wise. Resumable: ca
     shared `NewFolderDialog`) plus the **Strikethrough** toggle. Both views' toggles use
     `util.strikeToggle`. It has no done marks and no trash.
   - **In both trees, a row background means *selected* and nothing else** (`bg-muted/50`).
-    Folders carry no tint and over-limit rows only a red border, so don't reintroduce either as
-    a fill.
+    Folders carry no tint, so don't reintroduce one as a fill. An over-limit row -- and, since
+    `pathfix.rs` propagates `over_limit`, every ancestor of one -- carries a red
+    `warning-circle` after its name, with no border, fill or text tint. Over-limit rows are
+    never auto-expanded: with thousands over the limit that hung the view.
+  - **The Fix Paths limit applies only on Rescan**, which is shown only while the field differs
+    from the scanned limit. Mutations reload at the *scanned* limit, so an edited row leaves
+    the red at once without applying an unrun field edit.
 - **Tree selection is hierarchical** (`stores/selection.svelte.ts`, shared by the device,
   consolidated and Fix Paths trees). `selected` holds only roots, and a row is selected when it or
   any ancestor is a root. Ctrl/cmd-click on a child of a selected folder does nothing, and adding a
@@ -395,7 +400,9 @@ UI-relevant conventions:
   reads C), and only the floor mapping agrees with `get_groups`' `confidence >= floor`, so a group
   is listed exactly when its tier is at or above the picked one.
 - Both end-state trees (Consolidate and Fix Paths) order siblings with `util.compareTreeRows`:
-  folders first, then natural, case-insensitive name order. `consolidation_nodes.sort_order` is
+  folders first, then natural, case-insensitive name order. Case is folded explicitly
+  (`toLowerCase()` before the collator), because the webview's `Intl.Collator` does not reliably
+  honour `sensitivity: 'base'`. `consolidation_nodes.sort_order` is
   no longer the display order; it survives only as the append position for moves and for
   `pathfix.rs`'s walk.
 - The "Locate duplicates" button on device-tree rows opens `GroupDialog` in both views; the
