@@ -254,14 +254,107 @@ export const DUP_TONE: Record<DupTone, string> = {
 };
 
 /**
- * Text colour for a match-confidence percentage. Certain matches read calm and
- * green — they're the safe ones to act on — while weak matches pick up the
- * warning tint, so the eye lands on what actually needs judgement.
+ * Text colour for a match confidence. Certain matches read calm and green —
+ * they're the safe ones to act on — while weak matches pick up the warning
+ * tint, so the eye lands on what actually needs judgement.
+ *
+ * Feed it a tier's floor (`matchTier(c).confidence`), never a raw folder
+ * score, so one tier letter always has one colour.
  */
 export function confidenceTone(percent: number): string {
     if (percent >= 95) return 'text-ok';
     if (percent >= 75) return 'text-foreground';
     return 'text-warn';
+}
+
+/* --- Match floor ------------------------------------------------------ */
+
+export type MatchTier = 'A' | 'B' | 'C' | 'D' | 'E';
+
+export interface MatchFloor {
+    /** How the UI names this level. Confidence is shown only as a tier;
+     *  percentages are reserved for duplication shares. */
+    tier: MatchTier;
+    /** The floor itself: groups at or above this confidence are kept. */
+    confidence: number;
+    label: string;
+    /** What this kind of match means, in plain words. */
+    description: string;
+}
+
+/**
+ * The match types the min-confidence floor can be set at, strictest first.
+ * Choosing one keeps it and every stricter type. The numbers mirror
+ * `Tier::confidence` in `dedup.rs` (and `LISTING_HASH_CONFIDENCE` in
+ * `rollup.rs`, which sits at the name-size-date level) — change them together.
+ */
+export const MATCH_FLOORS: readonly MatchFloor[] = [
+    {
+        tier: 'A',
+        confidence: 100,
+        label: 'Identical content',
+        description:
+            'Every byte was read on both copies and they are the same. Also hardlinks and identical symlinks.',
+    },
+    {
+        tier: 'B',
+        confidence: 99,
+        label: 'Sampled content',
+        description:
+            'The start, the end and several points in between were read and match. Nearly as sure as a full read.',
+    },
+    {
+        tier: 'C',
+        confidence: 70,
+        label: 'Same name, size and date',
+        description:
+            'The name, size, and modified time all match either at the file level or for entire directory listings.',
+    },
+    {
+        tier: 'D',
+        confidence: 55,
+        label: 'Same name and size',
+        description:
+            'Same name and size, but the modified time did not match. Note: when a file is copied, the copy sometimes gets the current time as its modified time.',
+    },
+    {
+        tier: 'E',
+        confidence: 45,
+        label: 'Same size, type, and parent name',
+        description:
+            'Different names, but the same size and file type, in folders with the same name and with close modified times. Worth checking by eye.',
+    },
+];
+
+/** The loosest floor, and the default: every match type is shown. */
+export const LOOSEST_MATCH_FLOOR = MATCH_FLOORS[MATCH_FLOORS.length - 1].confidence;
+
+/**
+ * Snap a stored min-confidence onto a floor in `MATCH_FLOORS`: the loosest one
+ * still at or above it, which admits exactly the same match types. Older
+ * workspaces stored any number (the control used to be a slider, then a
+ * number field), so e.g. 40 becomes 45 and 60 becomes 70.
+ */
+export function snapMatchFloor(confidence: number): number {
+    const admitted = MATCH_FLOORS.filter(f => f.confidence >= confidence);
+    return admitted.length > 0
+        ? admitted[admitted.length - 1].confidence
+        : MATCH_FLOORS[0].confidence;
+}
+
+/**
+ * The tier a group's confidence falls in: the strictest one whose floor it
+ * reaches. File, hardlink and listing groups sit exactly on a floor; a
+ * byte-overlap folder group's score is a byte-weighted mean between them, so
+ * e.g. 94.5 reads as C. That floor mapping is the only one consistent with
+ * the picker, which lists a group exactly when `confidence >= floor` -- no
+ * epsilon, for the same reason.
+ */
+export function matchTier(confidence: number): MatchFloor {
+    return (
+        MATCH_FLOORS.find(f => confidence >= f.confidence) ??
+        MATCH_FLOORS[MATCH_FLOORS.length - 1]
+    );
 }
 
 /* --- Task tray -------------------------------------------------------- */

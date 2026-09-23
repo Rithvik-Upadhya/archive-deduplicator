@@ -358,8 +358,31 @@ UI-relevant conventions:
   tuning fields, `dedup_stale`) instead go through `workspace_state_get`/`workspace_state_set`, keyed
   by `(workspace_id, key)`, so they don't bleed across workspaces.
 - Match groups are paged (50/page, infinite scroll). `refreshGroups` resets, `loadMoreGroups`
-  appends — filter changes must go through `refreshGroups`.
+  appends — list filter changes (kind, sort, search) must go through `refreshGroups`.
+- **Min size and the match floor are run parameters, not list filters.** The inputs are
+  `minSizeKb`/`minConfidence`; the group list queries with `appliedMinSizeKb`/
+  `appliedMinConfidence`, because the groups, trees and stats all describe the last run and
+  re-filtering them by an unrun value made the list disagree with everything beside it. The
+  applied pair is set only from storage (`loadWorkspace`), and only `runDedup` writes storage —
+  after the run succeeds, from a snapshot taken before its first `await`. `get_groups` still
+  filters by the applied pair, since folder, listing and hardlink groups aren't floor- or
+  size-filtered at run time. An unrun edit raises the nudge through the derived `tuningPending`
+  (not `dedupStale`) and is dropped on reload or workspace switch.
 - Any mutation that invalidates matching sets `dedupStale` so the UI nudges a re-run.
+- The min-confidence floor is picked by **match type**, not typed as a number
+  (`MatchFloorSelect.svelte`). `util.MATCH_FLOORS` lists each type's floor with a plain-language
+  explanation, strictest first, and choosing one keeps it and every stricter type. Those floors
+  mirror `dedup.rs::Tier::confidence` (and `rollup.rs::LISTING_HASH_CONFIDENCE` at the
+  name-size-date level) — change them together. The stored value is still a plain number, so the
+  backend is unchanged; an older workspace's arbitrary value is snapped on load by
+  `snapMatchFloor` to the loosest type it still admits.
+- **Confidence is shown only as a tier letter, A–E** — in the picker, the group list and the group
+  dialog, all via `MatchTierLabel.svelte` and `util.matchTier`. Percentages in the UI are reserved
+  for duplication shares (the device trees' folder `dup %`, the per-source `% dup`), so don't
+  reintroduce a confidence percentage. `matchTier` maps a score to the strictest tier whose floor it
+  reaches, with no epsilon: a byte-overlap folder's score is a weighted mean between floors (94.5
+  reads C), and only the floor mapping agrees with `get_groups`' `confidence >= floor`, so a group
+  is listed exactly when its tier is at or above the picked one.
 - Both end-state trees (Consolidate and Fix Paths) order siblings with `util.compareTreeRows`:
   folders first, then natural, case-insensitive name order. `consolidation_nodes.sort_order` is
   no longer the display order; it survives only as the append position for moves and for
@@ -430,7 +453,8 @@ hand-editing.
 `--brand` (crimson, for text/icons/borders — `--primary` is for solid fills only), and
 `--ok` / `--warn` which carry _data_ semantics: `--ok` = confident/within limits,
 `--warn` = uncertain/getting heavy. `confidenceTone` in `src/lib/util.ts` maps a match
-confidence onto those — reuse it rather than picking colors per component.
+confidence onto those — reuse it rather than picking colors per component, and feed it the tier's
+floor (`matchTier(c).confidence`), not a raw folder score, so one tier letter has one colour.
 
 **Duplicate markers are coloured by _where the other copies live_, never by how much.**
 `DUP_TONE` (`src/lib/util.ts`) is the only source of those classes: `external` (brand red) means

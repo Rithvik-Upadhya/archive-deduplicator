@@ -5,6 +5,7 @@
 import * as api from '../api';
 import { AUTO_EXPAND_LIMIT, search } from './search.svelte';
 import { taskTray } from './tasks.svelte';
+import { LOOSEST_MATCH_FLOOR, snapMatchFloor } from '../util';
 import type { IconName } from '../components/Icon.svelte';
 import type {
     GroupSort,
@@ -35,13 +36,27 @@ class AppState {
     sources = $state<Source[]>([]);
     view = $state<ViewName>('dedup');
 
-    // Dedup tuning parameters (persisted per-workspace in workspace_state).
+    // Dedup tuning parameters, as the inputs currently show them. They are run
+    // parameters, not list filters: nothing uses them until `runDedup`.
     // 64 KB matches the matcher's default `min_size_bytes` floor: the vast
     // majority of files below this are noise-generating size collisions
     // (thumbnail caches, tiny fixed-size files) that account for a
     // negligible share of actual bytes on a typical archive.
     minSizeKb = $state(64);
-    minConfidence = $state(40);
+    minConfidence = $state(LOOSEST_MATCH_FLOOR);
+
+    // The values the last run used, which the group list filters by: the
+    // groups, trees and stats all describe that run. Set only from storage
+    // (`loadWorkspace`), and only a successful `runDedup` writes storage, so
+    // an edit that was never run is dropped on reload or workspace switch.
+    appliedMinSizeKb = $state(64);
+    appliedMinConfidence = $state(LOOSEST_MATCH_FLOOR);
+
+    /** An input differs from what the last run used (nudges a re-run). */
+    tuningPending = $derived(
+        this.minSizeKb !== this.appliedMinSizeKb ||
+            this.minConfidence !== this.appliedMinConfidence,
+    );
 
     // Results (paged: `groups` holds all pages loaded so far).
     groups = $state<MatchGroup[]>([]);
@@ -126,8 +141,13 @@ class AppState {
             api.workspaceStateGet(ws, 'min_confidence'),
             api.workspaceStateGet(ws, 'dedup_stale'),
         ]);
-        this.minSizeKb = minSize ? Number(minSize) : 64;
-        this.minConfidence = minConf ? Number(minConf) : 40;
+        this.appliedMinSizeKb = minSize ? Number(minSize) : 64;
+        // Snapped onto a match type: older workspaces stored any number.
+        this.appliedMinConfidence = snapMatchFloor(
+            minConf ? Number(minConf) : LOOSEST_MATCH_FLOOR,
+        );
+        this.minSizeKb = this.appliedMinSizeKb;
+        this.minConfidence = this.appliedMinConfidence;
         this.dedupStale = stale === '1';
 
         await Promise.all([
@@ -136,13 +156,14 @@ class AppState {
         ]);
     }
 
-    /** Persist the current min-size/min-confidence tuning for the active
-     *  workspace. */
-    async saveTuning() {
+    /** Persist the tuning a run just used for the active workspace. Only
+     *  `runDedup` calls this, after the run succeeds, so the stored values are
+     *  always the applied ones. */
+    private async saveTuning(minSizeKb: number, minConfidence: number) {
         if (this.activeWorkspaceId == null) return;
         const ws = this.activeWorkspaceId;
-        await api.workspaceStateSet(ws, 'min_size_kb', String(this.minSizeKb));
-        await api.workspaceStateSet(ws, 'min_confidence', String(this.minConfidence));
+        await api.workspaceStateSet(ws, 'min_size_kb', String(minSizeKb));
+        await api.workspaceStateSet(ws, 'min_confidence', String(minConfidence));
     }
 
     async setDedupStale(stale: boolean) {
@@ -292,12 +313,13 @@ class AppState {
 
     async runDedup() {
         if (this.activeWorkspaceId == null) return;
-        await this.saveTuning();
-        await api.runDedup(
-            this.activeWorkspaceId,
-            this.minSizeKb * 1024,
-            this.minConfidence,
-        );
+        // Snapshot before the first await: a run can take a while and the
+        // inputs stay editable. Saved only once the run succeeds, so a failed
+        // run can't leave values stored as if they had been applied.
+        const minSizeKb = this.minSizeKb;
+        const minConfidence = this.minConfidence;
+        await api.runDedup(this.activeWorkspaceId, minSizeKb * 1024, minConfidence);
+        await this.saveTuning(minSizeKb, minConfidence);
         await this.setDedupStale(false);
         await this.loadWorkspace();
         this.treeVersion++;
@@ -355,8 +377,8 @@ class AppState {
         try {
             const page = await api.getGroups({
                 workspaceId: this.activeWorkspaceId,
-                minConfidence: this.minConfidence,
-                minSize: this.minSizeKb * 1024,
+                minConfidence: this.appliedMinConfidence,
+                minSize: this.appliedMinSizeKb * 1024,
                 kind: this.groupKind === 'all' ? undefined : this.groupKind,
                 sort: this.groupSort,
                 ...this.groupSearchArgs,
@@ -382,8 +404,8 @@ class AppState {
         try {
             const page = await api.getGroups({
                 workspaceId: this.activeWorkspaceId,
-                minConfidence: this.minConfidence,
-                minSize: this.minSizeKb * 1024,
+                minConfidence: this.appliedMinConfidence,
+                minSize: this.appliedMinSizeKb * 1024,
                 kind: this.groupKind === 'all' ? undefined : this.groupKind,
                 sort: this.groupSort,
                 ...this.groupSearchArgs,

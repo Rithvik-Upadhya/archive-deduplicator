@@ -1,17 +1,12 @@
-<!-- One match group's confidence line and member list. Shared by the
+<!-- One match group's tier line and member list. Shared by the
      Deduplicate view's "Duplicates of" card and the Consolidate view's
      GroupDialog, so the two cannot drift. -->
 <script lang="ts">
     import type { MatchGroup } from '$lib/types';
     import { app } from '$lib/stores/app.svelte';
-    import {
-        confidenceTone,
-        copyPath,
-        formatBytes,
-        formatTime,
-        pct,
-    } from '$lib/util';
+    import { copyPath, formatBytes, formatTime } from '$lib/util';
     import RevealButton from './RevealButton.svelte';
+    import MatchTierLabel from './MatchTierLabel.svelte';
     import MemberPath from './MemberPath.svelte';
     import { search } from '$lib/stores/search.svelte';
     import Icon from '$lib/components/Icon.svelte';
@@ -35,12 +30,7 @@
 </script>
 
 <p class="mb-2 text-xs text-muted-foreground">
-    <span
-        class="font-heading font-semibold tabular-nums {confidenceTone(
-            pct(group.confidence)
-        )}">
-        {pct(group.confidence)}%
-    </span>
+    <MatchTierLabel confidence={group.confidence} kind={group.kind} />
     · {group.primary_signal}
 </p>
 <ul class="flex flex-col">

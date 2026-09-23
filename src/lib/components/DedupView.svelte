@@ -7,12 +7,7 @@
         NodeType,
         TreeNode,
     } from '$lib/types';
-    import {
-        confidenceTone,
-        copyPath,
-        formatBytes,
-        pct,
-    } from '$lib/util';
+    import { copyPath, formatBytes } from '$lib/util';
     import DeviceTree from './DeviceTree.svelte';
     import GroupDialog from './GroupDialog.svelte';
     import RevealButton from './RevealButton.svelte';
@@ -24,6 +19,8 @@
     import { Button } from '$lib/components/ui/button';
     import { Badge } from '$lib/components/ui/badge';
     import NumberField from './NumberField.svelte';
+    import MatchFloorSelect from './MatchFloorSelect.svelte';
+    import MatchTierLabel from './MatchTierLabel.svelte';
     import { Label } from '$lib/components/ui/label';
     import * as Alert from '$lib/components/ui/alert';
     import * as Empty from '$lib/components/ui/empty';
@@ -52,21 +49,6 @@
         clearedFor = gen;
         deviceSelection.clear();
     });
-
-    // Re-query group filters when a tuning field commits, and persist the new
-    // tuning + flag results stale -- min_size in particular is a hard filter
-    // baked into the last `run_dedup` pass, so a lower value here can only
-    // be reflected in the results after a rerun. No debounce: the fields
-    // commit only on Enter or blur, never mid-typing.
-    function tuningChanged() {
-        Promise.all([
-            app.refreshGroups(),
-            app.saveTuning(),
-            app.setDedupStale(true),
-        ]).catch(err =>
-            taskTray.notify('Failed to update tuning', 'error', String(err))
-        );
-    }
 
     /** "Locate duplicates" from a tree row: show its group in a dialog. */
     function onlocate(node: TreeNode) {
@@ -119,6 +101,10 @@
         { id: 'confidence', label: 'Confidence' },
         { id: 'size', label: 'Size' },
     ];
+
+    // Sources changed since the last run, or a tuning field was edited and
+    // not yet run (the fields are run parameters, not list filters).
+    const resultsStale = $derived(app.dedupStale || app.tuningPending);
 </script>
 
 <!-- Top row: Source management -->
@@ -135,59 +121,53 @@
                     id="minsize"
                     value={app.minSizeKb}
                     suffix="KB"
-                    oncommit={v => {
-                        app.minSizeKb = v;
-                        tuningChanged();
-                    }} />
+                    oncommit={v => (app.minSizeKb = v)} />
                 <span class="text-[0.7rem] text-muted-foreground">
-                    Only files above this size are matched
+                    Only larger files are compared
                 </span>
             </div>
             <div class="flex min-w-48 flex-col gap-1.5">
                 <Label for="minconf" class="text-xs text-muted-foreground">
-                    Min confidence
+                    Weakest match type to include
                 </Label>
-                <NumberField
+                <MatchFloorSelect
                     id="minconf"
                     value={app.minConfidence}
-                    suffix="%"
-                    max={100}
-                    oncommit={v => {
-                        app.minConfidence = v;
-                        tuningChanged();
-                    }} />
+                    oncommit={v => (app.minConfidence = v)} />
                 <span class="text-[0.7rem] text-muted-foreground">
-                    Hide weaker matches
+                    Stricter types are always included
                 </span>
             </div>
-            {#if app.dedupStale}
-                <Alert.Root class="flex-row items-center gap-1.5 w-auto">
-                    <Alert.Description>
-                        <span class="flex flex-row items-center gap-2">
+            <!-- Always boxed, with the results' state above the button. A
+                 persistent status rather than an alert, hence the role. -->
+            <Alert.Root role="status" class="flex w-auto flex-col items-stretch gap-1.5">
+                <Alert.Description>
+                    <span class="flex flex-row items-center gap-2">
+                        {#if resultsStale}
                             <Icon icon="ph:warning-fill" class="text-warn" />
-                            Results may be out of date.
-                        </span>
-                    </Alert.Description>
-                    <Button
-                        size="sm"
-                        disabled={taskTray.hasActive('dedup')}
-                        onclick={runDedup}>
-                        {taskTray.hasActive('dedup')
-                            ? 'Analyzing…'
-                            : 'Re-run Analysis'}
-                    </Button>
-                </Alert.Root>
-            {:else}
+                            Results are out of date.
+                        {:else}
+                            <Icon icon="ph:check-circle-fill" class="text-ok" />
+                            Results are up to date.
+                        {/if}
+                    </span>
+                </Alert.Description>
                 <Button
+                    size="sm"
                     disabled={taskTray.hasActive('dedup')}
                     onclick={runDedup}>
-                    <Icon icon="ph:magnifying-glass-bold" />
+                    <Icon
+                        icon={resultsStale
+                            ? 'ph:arrow-counter-clockwise-bold'
+                            : 'ph:magnifying-glass-bold'} />
                     <span
                         >{taskTray.hasActive('dedup')
                             ? 'Analyzing…'
-                            : 'Find Duplicates'}</span>
+                            : resultsStale
+                              ? 'Re-run analysis'
+                              : 'Find duplicates'}</span>
                 </Button>
-            {/if}
+            </Alert.Root>
         </div>
 
         <!-- Work area: trees + duplicate review -->
@@ -284,8 +264,8 @@
                                         No group has a member whose name
                                         contains “{search.applied.query}”.
                                     {:else}
-                                        Adjust the sliders and run “Find
-                                        Duplicates”.
+                                        Adjust the settings and run “Find
+                                        duplicates”.
                                     {/if}
                                 </Empty.Description>
                             </Empty.Header>
@@ -313,10 +293,9 @@
                                                 'folder'
                                                     ? 'text-brand'
                                                     : 'text-muted-foreground'}" />
-                                            <span
-                                                class="font-heading font-semibold tabular-nums {confidenceTone(
-                                                    pct(g.confidence)
-                                                )}">{pct(g.confidence)}%</span>
+                                            <MatchTierLabel
+                                                confidence={g.confidence}
+                                                kind={g.kind} />
                                             <span
                                                 class="truncate text-muted-foreground"
                                                 >{g.primary_signal}</span>

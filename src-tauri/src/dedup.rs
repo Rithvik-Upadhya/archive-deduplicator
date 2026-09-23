@@ -102,6 +102,7 @@ enum Tier {
 }
 
 impl Tier {
+    /// Mirrored by `MATCH_FLOORS` in `src/lib/util.ts`, the UI's floor picker.
     fn confidence(self) -> f64 {
         match self {
             Tier::A => 100.0,
