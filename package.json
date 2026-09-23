@@ -1,6 +1,6 @@
 {
     "name": "archive-deduplicator",
-    "version": "1.0.3",
+    "version": "1.0.4",
     "description": "",
     "type": "module",
     "scripts": {
@@ -42,5 +42,5 @@
         "typescript": "~5.6.2",
         "vite": "^6.0.3"
     },
-    "packageManager": "pnpm@12.3.4"
+    "packageManager": "pnpm@12.5.1"
 }

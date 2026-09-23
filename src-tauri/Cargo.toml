@@ -1,6 +1,6 @@
 [package]
 name = "archive-deduplicator"
-version = "1.0.3"
+version = "1.0.4"
 description = "Deduplicate files asynchronously from different sources."
 authors = ["Rithvik Upadhya"]
 edition = "2024"
