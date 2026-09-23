@@ -23,7 +23,7 @@
     import Icon from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button';
     import { Badge } from '$lib/components/ui/badge';
-    import { Slider } from '$lib/components/ui/slider';
+    import NumberField from './NumberField.svelte';
     import { Label } from '$lib/components/ui/label';
     import * as Alert from '$lib/components/ui/alert';
     import * as Empty from '$lib/components/ui/empty';
@@ -53,22 +53,19 @@
         deviceSelection.clear();
     });
 
-    // Re-query group filters once the sliders settle, and persist the new
+    // Re-query group filters when a tuning field commits, and persist the new
     // tuning + flag results stale -- min_size in particular is a hard filter
     // baked into the last `run_dedup` pass, so a lower value here can only
-    // be reflected in the results after a rerun.
-    let sliderTimer: ReturnType<typeof setTimeout> | undefined;
-    function slidersChanged() {
-        clearTimeout(sliderTimer);
-        sliderTimer = setTimeout(() => {
-            Promise.all([
-                app.refreshGroups(),
-                app.saveTuning(),
-                app.setDedupStale(true),
-            ]).catch(err =>
-                taskTray.notify('Failed to update tuning', 'error', String(err))
-            );
-        }, 250);
+    // be reflected in the results after a rerun. No debounce: the fields
+    // commit only on Enter or blur, never mid-typing.
+    function tuningChanged() {
+        Promise.all([
+            app.refreshGroups(),
+            app.saveTuning(),
+            app.setDedupStale(true),
+        ]).catch(err =>
+            taskTray.notify('Failed to update tuning', 'error', String(err))
+        );
     }
 
     /** "Locate duplicates" from a tree row: show its group in a dialog. */
@@ -132,36 +129,33 @@
         <div class="flex flex-wrap items-end gap-6">
             <div class="flex min-w-48 flex-col gap-1.5">
                 <Label for="minsize" class="text-xs text-muted-foreground">
-                    Min file size:
-                    <strong class="font-heading text-foreground tabular-nums"
-                        >{app.minSizeKb} KB</strong>
+                    Min file size
                 </Label>
-                <Slider
+                <NumberField
                     id="minsize"
-                    type="single"
-                    min={0}
-                    max={10240}
-                    step={4}
-                    bind:value={app.minSizeKb}
-                    onValueChange={slidersChanged} />
+                    value={app.minSizeKb}
+                    suffix="KB"
+                    oncommit={v => {
+                        app.minSizeKb = v;
+                        tuningChanged();
+                    }} />
                 <span class="text-[0.7rem] text-muted-foreground">
-                    Matches below this size are hidden
+                    Only files above this size are matched
                 </span>
             </div>
             <div class="flex min-w-48 flex-col gap-1.5">
                 <Label for="minconf" class="text-xs text-muted-foreground">
-                    Min confidence:
-                    <strong class="font-heading text-foreground tabular-nums"
-                        >{app.minConfidence}%</strong>
+                    Min confidence
                 </Label>
-                <Slider
+                <NumberField
                     id="minconf"
-                    type="single"
-                    min={0}
+                    value={app.minConfidence}
+                    suffix="%"
                     max={100}
-                    step={5}
-                    bind:value={app.minConfidence}
-                    onValueChange={slidersChanged} />
+                    oncommit={v => {
+                        app.minConfidence = v;
+                        tuningChanged();
+                    }} />
                 <span class="text-[0.7rem] text-muted-foreground">
                     Hide weaker matches
                 </span>
