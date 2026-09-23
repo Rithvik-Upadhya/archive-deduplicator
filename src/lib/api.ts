@@ -12,6 +12,7 @@ import type {
     ImportSummary,
     MatchGroup,
     MediumInfoDto,
+    NodeLocation,
     NodeType,
     PathTreeNode,
     RenameResult,
@@ -131,6 +132,9 @@ export const getGroups = (args: {
     });
 export const getGroupForNode = (nodeId: number) =>
     invoke<MatchGroup | null>('get_group_for_node', { nodeId });
+
+export const nodeLocation = (nodeId: number) =>
+    invoke<NodeLocation>('node_location', { nodeId });
 
 // --- Consolidation ---
 

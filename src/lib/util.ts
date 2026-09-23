@@ -346,6 +346,26 @@ export async function copyPath(
     }
 }
 
+const NAME_COLLATOR = new Intl.Collator(undefined, {
+    numeric: true,
+    sensitivity: 'base',
+});
+
+/**
+ * Sibling order in both end-state trees (Consolidate and Fix Paths): folders
+ * first, then by name the way a file manager sorts it -- case-insensitive,
+ * "2" before "10". The id breaks ties so equal names never swap on re-render.
+ * Sorts on the current name, so a renamed row moves to its new place.
+ */
+export function compareTreeRows(
+    a: { id: number; type: NodeType; name: string },
+    b: { id: number; type: NodeType; name: string },
+): number {
+    const aDir = a.type === 'directory';
+    if (aDir !== (b.type === 'directory')) return aDir ? -1 : 1;
+    return NAME_COLLATOR.compare(a.name, b.name) || a.id - b.id;
+}
+
 /**
  * For every node matching `match`, adds 1 to the count of each of its
  * ancestors -- so a row can say "N such items anywhere beneath me", even

@@ -292,7 +292,9 @@ hash_spec)` makes re-scanning an unchanged tree a no-op read-wise. Resumable: ca
   consolidated and Fix Paths trees). `selected` holds only roots, and a row is selected when it or
   any ancestor is a root. Ctrl/cmd-click on a child of a selected folder does nothing, and adding a
   folder absorbs the roots beneath it. Operations consume `roots()` or `dragIds()`, so no item is
-  reached by two routes. Rows must pass `parentId` to `use:selectable`.
+  reached by two routes. Rows must pass `parentId` to `use:selectable`. The Deduplicate view's
+  device trees are selectable too (not draggable): a row click selects, and only the caret
+  expands.
 - **`consolidate.rs`** also owns `purge_source_files`, which `source_delete` must call **before**
   deleting the source row: `consolidation_nodes.source_node_id` is `ON DELETE SET NULL`, so once
   the `sources → nodes` cascade runs there is nothing left to say which consolidation rows came
@@ -344,6 +346,19 @@ UI-relevant conventions:
 - Match groups are paged (50/page, infinite scroll). `refreshGroups` resets, `loadMoreGroups`
   appends — filter changes must go through `refreshGroups`.
 - Any mutation that invalidates matching sets `dedupStale` so the UI nudges a re-run.
+- Both end-state trees (Consolidate and Fix Paths) order siblings with `util.compareTreeRows`:
+  folders first, then natural, case-insensitive name order. `consolidation_nodes.sort_order` is
+  no longer the display order; it survives only as the append position for moves and for
+  `pathfix.rs`'s walk.
+- The "Locate duplicates" button on device-tree rows opens `GroupDialog` in both views; the
+  dialog fetches the group itself and renders it through `GroupMembers.svelte`.
+- Every match-group member row (the dialog and the Deduplicate view's group list) ends with an
+  arrow, `RevealButton.svelte`, that selects the member in its device tree and scrolls to it
+  without switching views. It goes through `revealInDeviceTree` (`stores/treeExpansion`), which
+  asks the `node_location` command for the ancestor ids, clears the device's funnel **only** when
+  that command says the node is hidden by it, opens the device panel, expands the ancestors, and
+  sets `deviceReveal.target`. The target's `TreeItem` scrolls and selects itself when its row
+  mounts, which in a lazily loaded tree can be several fetches later.
 - **Icons go through `$lib/components/Icon.svelte`. Never import `@iconify/svelte`.** That package
   ships no icon data — it fetches every glyph from `api.iconify.design` at runtime, so all icons
   silently render empty offline, which is the one condition this app exists for. The wrapper maps a

@@ -281,6 +281,18 @@ pub struct ConsolidationNode {
     pub original_name: Option<String>,
 }
 
+/// Where a source node sits in its device tree, for revealing it there.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeLocation {
+    /// Ancestor ids, root-first, excluding the node itself -- the folders to
+    /// expand before the node's row can mount.
+    pub ancestors: Vec<i64>,
+    /// Whether the device's "exclusive to this device" funnel hides the node:
+    /// true when it or any ancestor is `dup_annot.cross_dup`, the same test the
+    /// funnel applies level by level to what `get_tree` returns.
+    pub hidden_by_filter: bool,
+}
+
 /// Outcome of `pathfix::rename`: the row's name afterwards, and its original
 /// if it is still renamed (`None` once reverted).
 #[derive(Debug, Clone, Serialize, Deserialize)]

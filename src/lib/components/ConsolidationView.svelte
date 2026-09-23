@@ -1,16 +1,22 @@
 <script lang="ts">
     import * as api from '$lib/api';
     import { app } from '$lib/stores/app.svelte';
-    import type { ConsolidationNode, NodeType } from '$lib/types';
+    import type {
+        ConsolidationNode,
+        NodeType,
+        TreeNode,
+    } from '$lib/types';
     import { deviceFilterOn } from '$lib/stores/treeExpansion.svelte';
     import { TreeSelection } from '$lib/stores/selection.svelte';
     import DeviceTree from './DeviceTree.svelte';
     import ConsolidationNodeItem from './ConsolidationNodeItem.svelte';
+    import GroupDialog from './GroupDialog.svelte';
     import Icon from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button';
     import NewFolderDialog from './NewFolderDialog.svelte';
     import RemoveNodesDialog from './RemoveNodesDialog.svelte';
     import * as Empty from '$lib/components/ui/empty';
+    import * as Resizable from '$lib/components/ui/resizable/index.js';
     import { taskTray } from '$lib/stores/tasks.svelte';
     import {
         formatBytes,
@@ -19,6 +25,7 @@
         strikeToggle,
         sourceBarsFor,
         relocationsFor,
+        compareTreeRows,
     } from '$lib/util';
 
     let consolidationId = $state<number | null>(null);
@@ -76,7 +83,8 @@
         }
     });
 
-    // Indexed view over the flat node list: parent -> sorted children, plus
+    // Indexed view over the flat node list: parent -> children (folders first,
+    // then by name -- `compareTreeRows`, shared with Fix Paths), plus
     // bottom-up folder stats (file count / total size) folded from every
     // descendant file. Recomputed only when `nodes` changes.
     const index = $derived.by(() => {
@@ -87,7 +95,7 @@
             byParent.set(n.parent_id, bucket);
         }
         for (const bucket of byParent.values()) {
-            bucket.sort((a, b) => a.sort_order - b.sort_order);
+            bucket.sort(compareTreeRows);
         }
 
         // Rows struck themselves or through an ancestor. `struck` is stored
@@ -259,6 +267,16 @@
             }
         }
         return closure;
+    }
+
+    // "Locate duplicates" on a device-tree row: show the node's match group in
+    // a dialog, rather than leaving for the Deduplicate view.
+    let groupOpen = $state(false);
+    let groupNode = $state<TreeNode | null>(null);
+
+    function onlocate(node: TreeNode) {
+        groupNode = node;
+        groupOpen = true;
     }
 
     async function handleMoveManyWithin(
@@ -436,125 +454,136 @@
     }
 </script>
 
-<div class="grid min-h-0 grow grid-cols-2 gap-4 overflow-hidden">
+<Resizable.PaneGroup
+    direction="horizontal"
+    class="min-h-0 grow overflow-hidden">
     <!-- Source devices -->
-    <section class="flex min-h-0 min-w-0 flex-col overflow-hidden pe-1">
-        <h2 class="section-label mb-2 shrink-0">
-            Source devices — drag files &amp; folders →
-        </h2>
-        {#if app.visibleSources.length === 0}
-            <Empty.Root class="border border-dashed">
-                <Empty.Header>
-                    <Empty.Media variant="icon">
-                        <Icon icon="ph:hard-drives-fill" />
-                    </Empty.Media>
-                    <Empty.Title>No devices</Empty.Title>
-                    <Empty.Description>
-                        Add devices first in the Deduplicate view.
-                    </Empty.Description>
-                </Empty.Header>
-            </Empty.Root>
-        {:else}
-            <div class="flex flex-col overflow-y-auto overflow-x-hidden">
-                {#each app.visibleSources as s (s.id)}
-                    <DeviceTree
-                        source={s}
-                        draggable
-                        selection={sourceSelection} />
-                {/each}
-            </div>
-        {/if}
-    </section>
-
-    <!-- Consolidated target tree -->
-    <section class="flex min-h-0 min-w-0 flex-col overflow-hidden">
-        <div class="mb-2 flex items-center justify-between gap-2">
-            <div class="flex min-w-0 items-baseline gap-2">
-                <h2 class="section-label">Consolidated tree</h2>
-                <span class="truncate text-xs text-muted-foreground">
-                    {index.total.fileCount.toLocaleString()}
-                    {index.total.fileCount === 1 ? 'file' : 'files'} ·
-                    {formatBytes(index.total.size)}
-                </span>
-            </div>
-            <div class="flex shrink-0 items-center gap-1.5">
-                {#if hasSelection}
-                    <Button
-                        variant="outline"
-                        size="sm"
-                        title="Remove selected items from the consolidated tree"
-                        aria-label="Remove selected"
-                        onclick={openDeleteDialog}>
-                        <Icon icon="ph:trash-fill" />
-                    </Button>
-                    <Button
-                        variant="outline"
-                        size="sm"
-                        title="Mark selected items to be deleted (toggle). An item struck through a folder above the selection stays struck."
-                        aria-label="Toggle to-delete mark"
-                        onclick={toggleStruck}>
-                        <Icon icon="ph:text-strikethrough-bold" />
-                    </Button>
-                    <Button
-                        variant="outline"
-                        size="sm"
-                        title="Mark selected items as done (toggle)"
-                        aria-label="Toggle done mark"
-                        onclick={toggleDone}>
-                        <Icon icon="ph:check-bold" />
-                    </Button>
-                {/if}
-                <Button
-                    variant="outline"
-                    size="sm"
-                    onclick={openNewFolderDialog}>
-                    <Icon icon="ph:folder-plus-fill" />
-                    <span>Folder</span>
-                </Button>
-            </div>
-        </div>
-        <div
-            class="min-h-32 grow overflow-y-auto rounded-md border-2 border-dashed p-2 transition-colors data-[drag=true]:border-brand data-[drag=true]:bg-brand/10"
-            data-drag={rootDragOver}
-            role="tree"
-            aria-label="Consolidated tree"
-            tabindex="0"
-            ondragover={e => {
-                e.preventDefault();
-                rootDragOver = true;
-            }}
-            ondragleave={() => (rootDragOver = false)}
-            ondrop={e => {
-                e.preventDefault();
-                rootDragOver = false;
-                handleDrop(null, e);
-            }}>
-            {#if childrenOf(null).length === 0}
-                <p class="p-4 text-center text-sm text-muted-foreground">
-                    Drop files or folders here to build your target tree.
-                </p>
+    <Resizable.Pane>
+        <section class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden pe-1">
+            <h2 class="section-label mb-2 shrink-0">
+                Source devices — drag files &amp; folders →
+            </h2>
+            {#if app.visibleSources.length === 0}
+                <Empty.Root class="border border-dashed">
+                    <Empty.Header>
+                        <Empty.Media variant="icon">
+                            <Icon icon="ph:hard-drives-fill" />
+                        </Empty.Media>
+                        <Empty.Title>No devices</Empty.Title>
+                        <Empty.Description>
+                            Add devices first in the Deduplicate view.
+                        </Empty.Description>
+                    </Empty.Header>
+                </Empty.Root>
             {:else}
-                {#each childrenOf(null) as node (node.id)}
-                    <ConsolidationNodeItem
-                        {node}
-                        {childrenOf}
-                        stats={index.stats}
-                        {barsOf}
-                        {relocOf}
-                        {pathOf}
-                        selection={consSelection}
-                        isStruck={id => index.struck.has(id)}
-                        isFullyDone={id => index.fullyDone.has(id)}
-                        renamedBelowOf={id => index.renamedBelow.get(id) ?? 0}
-                        struckBelowOf={id => index.struckBelow.get(id) ?? 0}
-                        onreset={handleReset}
-                        ondropInto={handleDrop}
-                        onrename={handleRename} />
-                {/each}
+                <div
+                    data-device-list
+                    class="flex flex-col overflow-y-auto overflow-x-hidden">
+                    {#each app.visibleSources as s (s.id)}
+                        <DeviceTree
+                            source={s}
+                            draggable
+                            selection={sourceSelection}
+                            {onlocate} />
+                    {/each}
+                </div>
             {/if}
-        </div>
-    </section>
-</div>
+        </section>
+    </Resizable.Pane>
+    <Resizable.Handle class="mx-3" />
+    <!-- Consolidated target tree -->
+    <Resizable.Pane>
+        <section class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
+            <div class="mb-2 flex items-center justify-between gap-2">
+                <div class="flex min-w-0 items-baseline gap-2">
+                    <h2 class="section-label">Consolidated tree</h2>
+                    <span class="truncate text-xs text-muted-foreground">
+                        {index.total.fileCount.toLocaleString()}
+                        {index.total.fileCount === 1 ? 'file' : 'files'} ·
+                        {formatBytes(index.total.size)}
+                    </span>
+                </div>
+                <div class="flex shrink-0 items-center gap-1.5">
+                    {#if hasSelection}
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            title="Remove selected items from the consolidated tree"
+                            aria-label="Remove selected"
+                            onclick={openDeleteDialog}>
+                            <Icon icon="ph:trash-fill" />
+                        </Button>
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            title="Mark selected items to be deleted (toggle). An item struck through a folder above the selection stays struck."
+                            aria-label="Toggle to-delete mark"
+                            onclick={toggleStruck}>
+                            <Icon icon="ph:text-strikethrough-bold" />
+                        </Button>
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            title="Mark selected items as done (toggle)"
+                            aria-label="Toggle done mark"
+                            onclick={toggleDone}>
+                            <Icon icon="ph:check-bold" />
+                        </Button>
+                    {/if}
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        onclick={openNewFolderDialog}>
+                        <Icon icon="ph:folder-plus-fill" />
+                        <span>Folder</span>
+                    </Button>
+                </div>
+            </div>
+            <div
+                class="min-h-32 grow overflow-y-auto rounded-md border-2 border-dashed p-2 transition-colors data-[drag=true]:border-brand data-[drag=true]:bg-brand/10"
+                data-drag={rootDragOver}
+                role="tree"
+                aria-label="Consolidated tree"
+                tabindex="0"
+                ondragover={e => {
+                    e.preventDefault();
+                    rootDragOver = true;
+                }}
+                ondragleave={() => (rootDragOver = false)}
+                ondrop={e => {
+                    e.preventDefault();
+                    rootDragOver = false;
+                    handleDrop(null, e);
+                }}>
+                {#if childrenOf(null).length === 0}
+                    <p class="p-4 text-center text-sm text-muted-foreground">
+                        Drop files or folders here to build your target tree.
+                    </p>
+                {:else}
+                    {#each childrenOf(null) as node (node.id)}
+                        <ConsolidationNodeItem
+                            {node}
+                            {childrenOf}
+                            stats={index.stats}
+                            {barsOf}
+                            {relocOf}
+                            {pathOf}
+                            selection={consSelection}
+                            isStruck={id => index.struck.has(id)}
+                            isFullyDone={id => index.fullyDone.has(id)}
+                            renamedBelowOf={id => index.renamedBelow.get(id) ?? 0}
+                            struckBelowOf={id => index.struckBelow.get(id) ?? 0}
+                            onreset={handleReset}
+                            ondropInto={handleDrop}
+                            onrename={handleRename} />
+                    {/each}
+                {/if}
+            </div>
+        </section>
+    </Resizable.Pane>
+</Resizable.PaneGroup>
+
+<GroupDialog bind:open={groupOpen} node={groupNode} />
 
 <NewFolderDialog bind:open={showNewFolderDialog} oncreate={createFolder} />
 

@@ -17,6 +17,7 @@
 <script lang="ts" module>
     import type { Component } from 'svelte';
     import ArrowCounterClockwise from 'phosphor-svelte/lib/ArrowCounterClockwise';
+    import ArrowRight from 'phosphor-svelte/lib/ArrowRight';
     import ArrowsOutCardinal from 'phosphor-svelte/lib/ArrowsOutCardinal';
     import CaretRight from 'phosphor-svelte/lib/CaretRight';
     import CaretUpDown from 'phosphor-svelte/lib/CaretUpDown';
@@ -63,6 +64,7 @@
     /** Phosphor base name (the icon name minus its weight suffix) -> component. */
     const BASE = {
         'arrow-counter-clockwise': ArrowCounterClockwise,
+        'arrow-right': ArrowRight,
         'arrows-out-cardinal': ArrowsOutCardinal,
         'caret-right': CaretRight,
         'caret-up-down': CaretUpDown,

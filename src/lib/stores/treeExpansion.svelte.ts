@@ -1,3 +1,6 @@
+import { nodeLocation } from '$lib/api';
+import { taskTray } from '$lib/stores/tasks.svelte';
+
 // Module-level singletons so expand/collapse state (and the per-device
 // filter toggle) survive component unmount -- switching views, or
 // collapsing/re-expanding a device panel, both destroy and recreate the
@@ -18,6 +21,13 @@ export class ToggleSet {
         if (this.#ids.has(id)) return;
         const next = new Set(this.#ids);
         next.add(id);
+        this.#ids = next;
+    }
+
+    delete(id: number) {
+        if (!this.#ids.has(id)) return;
+        const next = new Set(this.#ids);
+        next.delete(id);
         this.#ids = next;
     }
 
@@ -56,3 +66,29 @@ export const deviceFilterOn = new ToggleSet();
  *  (`consolidation_nodes.id`) -- shared between the Consolidate view and the
  *  Fix Paths view, since both render the same underlying tree. */
 export const consolidationTreeExpanded = new ToggleSet();
+
+/** A device-tree node waiting to be scrolled to and selected. Set by
+ *  `revealInDeviceTree`; the node's `TreeItem` picks it up whenever its row
+ *  mounts -- which, in a lazily loaded tree, may be several fetches later --
+ *  and clears it. */
+export const deviceReveal = new (class {
+    target = $state<number | null>(null);
+})();
+
+/**
+ * Show a source node in its device tree without leaving the current view:
+ * lift the device's funnel if (and only if) it hides the node, open the
+ * device panel, expand every ancestor, then hand the node to `deviceReveal`
+ * so its row scrolls into view and selects itself once it mounts.
+ */
+export async function revealInDeviceTree(m: { node_id: number; source_id: number }) {
+    try {
+        const loc = await nodeLocation(m.node_id);
+        if (loc.hidden_by_filter) deviceFilterOn.delete(m.source_id);
+        deviceCollapsed.delete(m.source_id);
+        for (const id of loc.ancestors) deviceTreeExpanded.add(id);
+        deviceReveal.target = m.node_id;
+    } catch (err) {
+        taskTray.notify('Could not show in device tree', 'error', String(err));
+    }
+}

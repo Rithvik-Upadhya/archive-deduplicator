@@ -1,7 +1,10 @@
 <script lang="ts">
     import { getTree } from '$lib/api';
     import { app } from '$lib/stores/app.svelte';
-    import { deviceTreeExpanded } from '$lib/stores/treeExpansion.svelte';
+    import {
+        deviceReveal,
+        deviceTreeExpanded,
+    } from '$lib/stores/treeExpansion.svelte';
     import type { NodeType, TreeNode } from '$lib/types';
     import {
         copyPath,
@@ -27,14 +30,11 @@
     interface Props {
         node: TreeNode;
         workspaceId: number;
-        /** Called when a node is picked for the duplicate review panel. */
-        onselect?: (node: TreeNode) => void;
-        /** Called by the "locate duplicate" button to reveal the match group. */
+        /** Called by the "locate duplicate" button to show the match group. */
         onlocate?: (node: TreeNode) => void;
         /** Enables HTML5 drag so nodes can be dropped into a consolidation tree. */
         draggable?: boolean;
-        /** Shared multi-select state, only used when `draggable` is set --
-         *  DedupView's browsing tree stays single-select via `onselect`. */
+        /** Shared multi-select state for every device tree in one view. */
         selection?: TreeSelection<DragMeta>;
         /** Hides nodes whose only duplicates live on another device. */
         filterCrossDevice?: boolean;
@@ -43,7 +43,6 @@
     let {
         node,
         workspaceId,
-        onselect,
         onlocate,
         draggable = false,
         selection,
@@ -148,19 +147,38 @@
         }
     });
 
+    // Both views pass a selection, so a row click selects; the caret expands.
+    // Without one (no caller today) a folder row falls back to toggling.
     function onRowActivate(e: MouseEvent | KeyboardEvent) {
         if (selection) {
             selection.click(node.id, e);
-            return;
-        }
-        // Unchanged DedupView behavior: a directory row toggles expand: a
-        // file row hands off to the duplicate review panel.
-        if (isDir) {
+        } else if (isDir) {
             toggleExpanded();
-        } else {
-            onselect?.(node);
         }
     }
+
+    // A match-group member's arrow asked for this node: `revealInDeviceTree`
+    // has already expanded every ancestor, so this row mounting is the signal
+    // that it can be shown. Scroll it into view and make it the selection.
+    let rowEl = $state<HTMLElement | null>(null);
+    $effect(() => {
+        if (deviceReveal.target !== node.id || !rowEl) return;
+        deviceReveal.target = null;
+        // Only the device list scrolls. Not `scrollIntoView`: it would also
+        // scroll the `overflow: hidden` layout wrappers above it.
+        const list = rowEl.closest<HTMLElement>('[data-device-list]');
+        if (list) {
+            const offset =
+                rowEl.getBoundingClientRect().top -
+                list.getBoundingClientRect().top;
+            list.scrollTop += offset - (list.clientHeight - rowEl.offsetHeight) / 2;
+        }
+        selection?.click(node.id, {
+            shiftKey: false,
+            metaKey: false,
+            ctrlKey: false,
+        });
+    });
 
     function onCaretClick(e: MouseEvent) {
         e.stopPropagation();
@@ -198,6 +216,7 @@
         class="group/row flex cursor-pointer items-center gap-1.5 px-1.5 py-0.5 select-none hover:bg-accent hover:text-accent-foreground data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground"
         data-dup={node.has_duplicate}
         data-selected={selection?.isSelected(node.id) ?? false}
+        bind:this={rowEl}
         {draggable}
         role="treeitem"
         aria-selected={selection?.isSelected(node.id) ?? false}
@@ -346,8 +365,10 @@
         </span>
 
         <!-- The whole column disappears in a tree that cannot locate at all
-             (the Consolidate view's source panel passes no `onlocate`), rather
-             than reserving 20px for a button that can never appear there.
+             (one that passes no `onlocate`), rather than reserving 20px for a
+             button that can never appear there. Both views pass one today: the
+             Deduplicate view reveals the group in its review pane, the
+             Consolidate view opens it in GroupDialog.
              Inside a tree that *can*, the slot stays reserved on every row so
              the rows that do have the button still line up -- `onlocate` is a
              per-tree constant, `showLocate` is per-row. -->
@@ -389,7 +410,6 @@
                     <Self
                         node={child}
                         {workspaceId}
-                        {onselect}
                         {onlocate}
                         {draggable}
                         {selection}

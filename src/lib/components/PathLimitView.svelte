@@ -10,6 +10,7 @@
         pathSegments,
         sourceBarsFor,
         relocationsFor,
+        compareTreeRows,
         strikeToggle,
     } from '$lib/util';
     import { Button } from '$lib/components/ui/button';
@@ -57,8 +58,9 @@
         return () => clearTimeout(debounceHandle);
     });
 
-    // Indexed view over the flat node list: parent -> children, in the
-    // order the backend already emitted them (its own sort_order walk).
+    // Indexed view over the flat node list: parent -> children, folders first
+    // then by name -- `compareTreeRows`, the same order the Consolidate tree
+    // uses. The backend's own `sort_order` walk is not the display order.
     const index = $derived.by(() => {
         const byParent = new Map<number | null, PathTreeNode[]>();
         for (const n of nodes) {
@@ -66,6 +68,7 @@
             bucket.push(n);
             byParent.set(n.parent_id, bucket);
         }
+        for (const bucket of byParent.values()) bucket.sort(compareTreeRows);
         const byId = new Map(nodes.map(n => [n.id, n]));
         // Renamed items anywhere beneath a row, for its after-name mark.
         const renamedBelow = countBelow(nodes, n => n.edited);

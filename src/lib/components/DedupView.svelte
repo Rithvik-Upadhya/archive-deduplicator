@@ -1,21 +1,22 @@
 <script lang="ts">
-    import { getGroupForNode } from '$lib/api';
     import { app } from '$lib/stores/app.svelte';
     import { taskTray } from '$lib/stores/tasks.svelte';
     import type {
         DedupProgress,
         GroupSort,
-        MatchGroup,
+        NodeType,
         TreeNode,
     } from '$lib/types';
     import {
         confidenceTone,
         copyPath,
         formatBytes,
-        formatTime,
         pct,
     } from '$lib/util';
     import DeviceTree from './DeviceTree.svelte';
+    import GroupDialog from './GroupDialog.svelte';
+    import RevealButton from './RevealButton.svelte';
+    import { TreeSelection } from '$lib/stores/selection.svelte';
     import SourceManager from './SourceManager.svelte';
     import Icon from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button';
@@ -23,21 +24,23 @@
     import { Slider } from '$lib/components/ui/slider';
     import { Label } from '$lib/components/ui/label';
     import * as Alert from '$lib/components/ui/alert';
-    import * as Card from '$lib/components/ui/card';
     import * as Empty from '$lib/components/ui/empty';
     import * as Resizable from '$lib/components/ui/resizable/index.js';
     import * as ToggleGroup from '$lib/components/ui/toggle-group';
     import { listen } from '@tauri-apps/api/event';
 
-    let selectedNode = $state<TreeNode | null>(null);
-    let selectedGroup = $state<MatchGroup | null>(null);
-    // A folder group's members are folders and a file group's are files, so one
-    // label per group covers every member row.
-    const memberCopyLabel = $derived(
-        selectedGroup?.kind === 'folder' ? 'Copy folder path' : 'Copy file path'
-    );
+    // Row clicks select, as in the Consolidate view's device trees; a member's
+    // arrow in the group list or the dialog selects its row here too.
+    const deviceSelection = new TreeSelection<{
+        name: string;
+        type: NodeType;
+        source_id: number;
+        cross_dup: boolean;
+    }>();
+    // The "locate duplicates" button's dialog.
+    let groupOpen = $state(false);
+    let groupNode = $state<TreeNode | null>(null);
     let sentinel = $state<HTMLElement | null>(null);
-    let reviewPane = $state<HTMLElement | null>(null);
 
     // Re-query group filters once the sliders settle, and persist the new
     // tuning + flag results stale -- min_size in particular is a hard filter
@@ -57,22 +60,10 @@
         }, 250);
     }
 
-    async function onselect(node: TreeNode) {
-        selectedNode = node;
-        try {
-            const group = await getGroupForNode(node.id);
-            if (selectedNode?.id === node.id) selectedGroup = group;
-        } catch (err) {
-            if (selectedNode?.id === node.id) {
-                taskTray.notify('Failed to load duplicates', 'error', String(err));
-            }
-        }
-    }
-
-    /** "Locate duplicate" from a tree row: select, then reveal the review panel. */
-    async function onlocate(node: TreeNode) {
-        await onselect(node);
-        reviewPane?.scrollTo({ top: 0, behavior: 'smooth' });
+    /** "Locate duplicates" from a tree row: show its group in a dialog. */
+    function onlocate(node: TreeNode) {
+        groupNode = node;
+        groupOpen = true;
     }
 
     async function runDedup() {
@@ -215,9 +206,13 @@
                         </Empty.Root>
                     {:else}
                         <div
+                            data-device-list
                             class="flex flex-col overflow-y-auto overflow-x-hidden">
                             {#each app.visibleSources as s (s.id)}
-                                <DeviceTree source={s} {onselect} {onlocate} />
+                                <DeviceTree
+                                    source={s}
+                                    selection={deviceSelection}
+                                    {onlocate} />
                             {/each}
                         </div>
                     {/if}
@@ -226,8 +221,7 @@
             <Resizable.Handle class="mx-3" />
             <Resizable.Pane>
                 <aside
-                    class="flex h-full min-w-0 flex-col overflow-hidden pe-1"
-                    bind:this={reviewPane}>
+                    class="flex h-full min-w-0 flex-col overflow-hidden pe-1">
                     <div class="mb-2 flex flex-wrap items-center gap-2">
                         <h2 class="section-label">
                             Duplicate groups
@@ -272,91 +266,6 @@
                             </ToggleGroup.Root>
                         </div>
                     </div>
-
-                    <!-- Focused selection from the tree -->
-                    {#if selectedGroup}
-                        <Card.Root class="mb-3 gap-2 border-brand/70 py-3">
-                            <Card.Header class="gap-1 px-3">
-                                <Card.Title
-                                    class="flex items-center gap-2 text-sm">
-                                    <span class="truncate">
-                                        Duplicates of: {selectedNode?.name}
-                                    </span>
-                                    <Button
-                                        variant="ghost"
-                                        size="icon"
-                                        class="ms-auto size-6"
-                                        aria-label="Close"
-                                        onclick={() => {
-                                            selectedGroup = null;
-                                            selectedNode = null;
-                                        }}>
-                                        <Icon icon="ph:x-bold" />
-                                    </Button>
-                                </Card.Title>
-                                <Card.Description class="text-xs">
-                                    <span
-                                        class="font-heading font-semibold tabular-nums {confidenceTone(
-                                            pct(selectedGroup.confidence)
-                                        )}">
-                                        {pct(selectedGroup.confidence)}%
-                                    </span>
-                                    · {selectedGroup.primary_signal}
-                                </Card.Description>
-                            </Card.Header>
-                            <Card.Content class="px-3">
-                                <ul class="flex flex-col">
-                                    {#each selectedGroup.members as m (m.node_id)}
-                                        <li
-                                            class="flex items-center gap-2 rounded-sm px-1 py-0.5 text-xs data-[self=true]:bg-brand/10"
-                                            data-self={m.node_id ===
-                                                selectedNode?.id}>
-                                            <span
-                                                class="shrink-0 font-medium whitespace-nowrap text-muted-foreground"
-                                                >{m.device_label}</span>
-                                            <span
-                                                class="flex-1 truncate"
-                                                title={m.rel_path}
-                                                >{m.rel_path}</span>
-                                            <span
-                                                class="shrink-0 whitespace-nowrap text-muted-foreground">
-                                                {formatBytes(
-                                                    selectedGroup.kind ===
-                                                        'folder'
-                                                        ? m.subtree_size
-                                                        : m.size
-                                                )} · {formatTime(m.mtime)}
-                                            </span>
-                                            <Button
-                                                variant="ghost"
-                                                size="icon"
-                                                class="size-5 shrink-0 text-muted-foreground hover:text-foreground"
-                                                title={memberCopyLabel}
-                                                onclick={() =>
-                                                    copyPath(
-                                                        m.rel_path,
-                                                        app.pathSep
-                                                    )}>
-                                                <Icon icon="ph:copy-fill" />
-                                                <span class="sr-only"
-                                                    >{memberCopyLabel}</span>
-                                            </Button>
-                                        </li>
-                                    {/each}
-                                </ul>
-                            </Card.Content>
-                        </Card.Root>
-                    {:else if selectedNode}
-                        <Card.Root class="mb-3 gap-1 py-3">
-                            <Card.Header class="gap-1 px-3">
-                                <Card.Title class="truncate text-sm"
-                                    >{selectedNode.name}</Card.Title>
-                                <Card.Description class="text-xs">
-                                    No duplicate group for this file.
-                                </Card.Description>
-                            </Card.Header>
-                        </Card.Root>
-                    {/if}
 
                     {#if app.groups.length === 0 && !app.groupsLoading}
                         <Empty.Root class="border border-dashed">
@@ -438,6 +347,7 @@
                                                         <span class="sr-only"
                                                             >{groupCopyLabel}</span>
                                                     </Button>
+                                                    <RevealButton member={m} />
                                                 </li>
                                             {/each}
                                         </ul>
@@ -462,3 +372,5 @@
         </Resizable.PaneGroup>
     </div>
 </div>
+
+<GroupDialog bind:open={groupOpen} node={groupNode} />

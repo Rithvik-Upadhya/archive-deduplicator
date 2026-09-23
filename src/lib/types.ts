@@ -231,6 +231,14 @@ export interface ConsolidationNode {
     original_name: string | null;
 }
 
+/** Where a source node sits in its device tree (`node_location`). */
+export interface NodeLocation {
+    /** Ancestor ids, root-first, excluding the node itself. */
+    ancestors: number[];
+    /** Whether the device's "exclusive to this device" funnel hides it. */
+    hidden_by_filter: boolean;
+}
+
 /** Outcome of `pathfix_rename`: the name afterwards, and the original while
  *  the row is still renamed (null once reverted). */
 export interface RenameResult {

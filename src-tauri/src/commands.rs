@@ -1046,6 +1046,44 @@ fn group_page(
     Ok(GroupPage { total, groups })
 }
 
+/// Ancestors of a node and whether the device funnel hides it, so the
+/// frontend can expand a lazily-loaded device tree down to the node and
+/// scroll it into view (the arrow on a match-group member).
+#[tauri::command]
+pub fn node_location(db: State<Db>, node_id: i64) -> CmdResult<NodeLocation> {
+    let conn = db.lock();
+    let mut stmt = conn
+        .prepare(
+            "WITH RECURSIVE chain(id, parent_id, depth) AS (
+                 SELECT id, parent_id, 0 FROM nodes WHERE id = ?1
+                 UNION ALL
+                 SELECT n.id, n.parent_id, c.depth + 1
+                 FROM nodes n JOIN chain c ON n.id = c.parent_id
+             )
+             SELECT c.id, COALESCE(d.cross_dup, 0)
+             FROM chain c LEFT JOIN dup_annot d ON d.node_id = c.id
+             ORDER BY c.depth DESC",
+        )
+        .map_err(map_err)?;
+    let chain = stmt
+        .query_map(params![node_id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? != 0))
+        })
+        .map_err(map_err)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(map_err)?;
+    let hidden_by_filter = chain.iter().any(|&(_, cross)| cross);
+    let ancestors = chain
+        .into_iter()
+        .map(|(id, _)| id)
+        .filter(|&id| id != node_id)
+        .collect();
+    Ok(NodeLocation {
+        ancestors,
+        hidden_by_filter,
+    })
+}
+
 /// Return the match group (with members) that a given node belongs to, if any.
 /// Used by the "locate duplicate" button in the device trees.
 #[tauri::command]

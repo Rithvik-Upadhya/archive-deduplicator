@@ -24,7 +24,6 @@
 
     interface Props {
         source: Source;
-        onselect?: (node: TreeNode) => void;
         onlocate?: (node: TreeNode) => void;
         draggable?: boolean;
         selection?: TreeSelection<DragMeta>;
@@ -32,7 +31,6 @@
 
     let {
         source,
-        onselect,
         onlocate,
         draggable = false,
         selection,
@@ -305,7 +303,7 @@
              the action columns need no label, but they must still be here or
              the labels land a column too far right -- and the locate cell must
              track `onlocate` exactly as TreeItem's does, or the labels shift by
-             20px in the Consolidate view, which has no locate column. -->
+             20px in any tree without a locate column. -->
         {#if expanded}
             <span class="w-(--col-count) shrink-0 text-right">files</span>
             <span class="w-(--col-size) shrink-0 text-right">size</span>
@@ -349,7 +347,6 @@
                         <TreeItem
                             {node}
                             workspaceId={app.activeWorkspaceId!}
-                            {onselect}
                             {onlocate}
                             {draggable}
                             {selection}
