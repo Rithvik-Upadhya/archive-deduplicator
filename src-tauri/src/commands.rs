@@ -1362,8 +1362,9 @@ pub fn consolidation_add_node(
 /// as real `consolidation_nodes` rows (root + every descendant), so every
 /// file/folder inside becomes individually movable/renamable/deletable.
 /// With `filter_cross_dup`, descendants hidden by the source's "exclusive to
-/// this device" funnel (`dup_annot.cross_dup`) are left out, matching what the
-/// user saw when they dragged.
+/// this device" funnel (`dup_annot.cross_dup`) still come across, but struck
+/// ("to be deleted on disk"), so the end-state tree records what the filter
+/// excluded rather than silently omitting it.
 #[tauri::command]
 pub fn consolidation_add_source_subtree(
     db: State<Db>,

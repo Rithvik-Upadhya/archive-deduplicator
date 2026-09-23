@@ -15,6 +15,8 @@ struct SNode {
     size: i64,
     rel_path: String,
     is_alias: bool,
+    /// `dup_annot.cross_dup`: the source's funnel hides this row.
+    cross_dup: bool,
 }
 
 /// Mirrors the normalization already applied to single-file drags: only
@@ -40,31 +42,28 @@ pub fn materialize_subtree(
     //    from `parent_id = ?1` and only fetches children), the base case here
     //    is `id = ?1` so the root's own row comes back too.
     //
-    //    When `filter_cross_dup` is set (the source's "exclusive to this
-    //    device" funnel is on for this drag), descendants whose only
-    //    duplicates live on another device (`dup_annot.cross_dup = 1`) are
-    //    dropped in the recursive step, so the materialized subtree carries
-    //    only what the user could see. The filter is applied per-row rather
-    //    than "skip the subtree if its root is cross_dup": a directory is only
-    //    ever marked `cross_dup` when *every* leaf beneath it is (see
-    //    rollup.rs), so a surviving directory always still has a non-cross
-    //    leaf and can never be stranded empty. The dragged root itself is
-    //    always kept (the user could only drag a visible row).
+    //    The whole subtree always comes across, filtered or not. When
+    //    `filter_cross_dup` is set (the source's "exclusive to this device"
+    //    funnel is on for this drag), what the funnel hides is carried over
+    //    *struck* rather than dropped: the consolidated tree is the blueprint
+    //    for rebuilding the end state on disk, so "this was here, and it goes"
+    //    is information the archivist needs, not noise to leave out. Each
+    //    row's own `dup_annot.cross_dup` is read here; step 4 applies it
+    //    level by level, as `get_tree` does.
     let snodes: Vec<SNode> = {
         let mut stmt = conn.prepare(
             "WITH RECURSIVE sub(id) AS (
                  SELECT ?1
                  UNION ALL
-                 SELECT n.id FROM nodes n
-                   JOIN sub ON n.parent_id = sub.id
-                   LEFT JOIN dup_annot d ON d.node_id = n.id
-                 WHERE ?2 = 0 OR COALESCE(d.cross_dup, 0) = 0
+                 SELECT n.id FROM nodes n JOIN sub ON n.parent_id = sub.id
              )
              SELECT n.id, n.parent_id, n.name, n.type, n.size, n.rel_path,
-                    n.alias_of IS NOT NULL
-             FROM nodes n WHERE n.id IN (SELECT id FROM sub)",
+                    n.alias_of IS NOT NULL, COALESCE(d.cross_dup, 0) != 0
+             FROM nodes n
+             LEFT JOIN dup_annot d ON d.node_id = n.id
+             WHERE n.id IN (SELECT id FROM sub)",
         )?;
-        stmt.query_map(params![source_node_id, filter_cross_dup], |r| {
+        stmt.query_map(params![source_node_id], |r| {
             Ok(SNode {
                 id: r.get(0)?,
                 parent_id: r.get(1)?,
@@ -73,6 +72,7 @@ pub fn materialize_subtree(
                 size: r.get(4)?,
                 rel_path: r.get(5)?,
                 is_alias: r.get(6)?,
+                cross_dup: r.get(7)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?
@@ -108,6 +108,13 @@ pub fn materialize_subtree(
     // 4. Insert root, then descendants in parent-before-child order (DFS via
     //    an explicit stack), tracking source id -> newly-inserted cons id so
     //    each descendant's parent_id resolves correctly.
+    //
+    //    Under the funnel a row is hidden when it or any ancestor below the
+    //    root is `cross_dup`. `struck` is stored only where it is applied and
+    //    inherited downward at read time, so only the *topmost* hidden row of
+    //    each hidden run gets the flag; its descendants inherit it, and
+    //    un-striking that one row brings the whole run back. The dragged root
+    //    is never struck: the user could only drag a visible row.
     let root_sort_order: i64 = conn.query_row(
         "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM consolidation_nodes
          WHERE consolidation_id = ?1 AND parent_id IS ?2",
@@ -121,8 +128,8 @@ pub fn materialize_subtree(
 
     {
         let mut insert = tx.prepare(
-            "INSERT INTO consolidation_nodes (consolidation_id, parent_id, name, type, source_node_id, sort_order)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO consolidation_nodes (consolidation_id, parent_id, name, type, source_node_id, sort_order, struck)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
 
         insert.execute(params![
@@ -132,6 +139,7 @@ pub fn materialize_subtree(
             normalize_type(&root.node_type),
             root.id,
             root_sort_order,
+            false,
         ])?;
         let root_new_id = tx.last_insert_rowid();
         id_map.insert(root.id, root_new_id);
@@ -153,13 +161,16 @@ pub fn materialize_subtree(
             original_name: None,
         });
 
-        let mut stack = vec![root.id];
-        while let Some(src_pid) = stack.pop() {
+        // (source id, whether the funnel hides it)
+        let mut stack = vec![(root.id, false)];
+        while let Some((src_pid, parent_hidden)) = stack.pop() {
             let new_pid = id_map[&src_pid];
             let Some(kids) = by_parent.get(&src_pid) else {
                 continue;
             };
             for (i, k) in kids.iter().enumerate() {
+                let own = filter_cross_dup && k.cross_dup;
+                let struck = own && !parent_hidden;
                 insert.execute(params![
                     consolidation_id,
                     new_pid,
@@ -167,6 +178,7 @@ pub fn materialize_subtree(
                     normalize_type(&k.node_type),
                     k.id,
                     (i as i64) + 1,
+                    struck,
                 ])?;
                 let new_id = tx.last_insert_rowid();
                 id_map.insert(k.id, new_id);
@@ -184,10 +196,10 @@ pub fn materialize_subtree(
                     origin_source_id: Some(source_id),
                     is_alias: k.is_alias,
                     done: false,
-                    struck: false,
+                    struck,
                     original_name: None,
                 });
-                stack.push(k.id);
+                stack.push((k.id, parent_hidden || own));
             }
         }
     } // `insert` (and its borrow of `tx`) dropped here, before commit
@@ -383,15 +395,37 @@ mod tests {
         .unwrap();
     }
 
+    /// The row's own stored `struck` flag, read back from the database so a
+    /// test checks what was persisted, not just what was returned.
+    fn stored_struck(conn: &Connection, cons_id: i64) -> bool {
+        conn.query_row(
+            "SELECT struck FROM consolidation_nodes WHERE id = ?1",
+            params![cons_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// The returned row for source node `src`, asserting its returned
+    /// `struck` agrees with the stored one.
+    fn row_for(conn: &Connection, out: &[ConsolidationNode], src: i64) -> ConsolidationNode {
+        let row = out
+            .iter()
+            .find(|n| n.source_node_id == Some(src))
+            .expect("every source row is materialized")
+            .clone();
+        assert_eq!(row.struck, stored_struck(conn, row.id));
+        row
+    }
+
     #[test]
-    fn materialize_skips_an_alias_whose_canonical_is_cross_dup() {
-        // The user-visible bug: dragging a filtered directory carried across a
-        // second *name* for content whose canonical the same filter had just
-        // hidden. `rebuild_annotations` now gives an alias its canonical's
-        // `cross_dup`, so the existing filter here drops it -- this test pins
-        // that the drag honours the annotation once it exists, and that a
-        // dragged alias is still flagged `is_alias` so its bytes are not
-        // double-counted in the pane's rollup.
+    fn materialize_strikes_an_alias_whose_canonical_is_cross_dup() {
+        // Dragging a filtered directory once carried across a second *name*
+        // for content whose canonical the same filter had just hidden.
+        // `rebuild_annotations` gives an alias its canonical's `cross_dup`, so
+        // both are hidden by the funnel -- and both must now come across
+        // struck, together. A dragged alias is still flagged `is_alias` so its
+        // bytes are not double-counted in the pane's rollup.
         let (mut conn, _ws, source_id, consolidation_id) = setup(NESTED_TREE);
         let canonical = node_id(&conn, source_id, "photos/2024/b.jpg");
         conn.execute(
@@ -434,55 +468,71 @@ mod tests {
         .unwrap();
         let filtered =
             materialize_subtree(&mut conn, consolidation_id, None, root_id, true).unwrap();
-        assert!(
-            filtered.iter().all(|n| n.source_node_id != Some(alias)),
-            "an alias of a hidden canonical must not be dragged across"
-        );
-        assert!(filtered.iter().all(|n| n.source_node_id != Some(canonical)));
+        let alias_row = row_for(&conn, &filtered, alias);
+        assert!(alias_row.struck, "an alias of a hidden canonical comes across struck");
+        assert!(alias_row.is_alias);
+        assert!(row_for(&conn, &filtered, canonical).struck);
     }
 
     #[test]
-    fn materialize_skips_cross_dup_descendants_when_filtering() {
+    fn materialize_strikes_cross_dup_descendants_when_filtering() {
+        // A filtered drag used to drop what the funnel hid, so the
+        // consolidated tree -- the blueprint for the end state on disk --
+        // lost every item the archivist had to delete. It now carries the
+        // whole subtree and strikes the hidden rows.
         let (mut conn, _ws, source_id, consolidation_id) = setup(NESTED_TREE);
         mark_cross_dup(&conn, source_id, "photos/2024/b.jpg");
         let root_id = node_id(&conn, source_id, "photos");
+        let year = node_id(&conn, source_id, "photos/2024");
+        let a = node_id(&conn, source_id, "photos/2024/a.jpg");
+        let b = node_id(&conn, source_id, "photos/2024/b.jpg");
 
         let filtered =
             materialize_subtree(&mut conn, consolidation_id, None, root_id, true).unwrap();
 
-        let b_src_id = node_id(&conn, source_id, "photos/2024/b.jpg");
-        assert!(
-            filtered.iter().all(|n| n.source_node_id != Some(b_src_id)),
-            "cross_dup file must not be materialized when filtering"
-        );
-        // photos, 2024, a.jpg survive.
-        assert_eq!(filtered.len(), 3);
+        assert_eq!(filtered.len(), 4, "hidden rows come across, not dropped");
+        assert!(row_for(&conn, &filtered, b).struck);
+        for live in [root_id, year, a] {
+            assert!(!row_for(&conn, &filtered, live).struck);
+        }
 
-        // Without the filter the whole subtree still comes across.
+        // Without the filter nothing is struck: the funnel was off, so the
+        // user saw (and chose) everything.
         let unfiltered =
             materialize_subtree(&mut conn, consolidation_id, None, root_id, false).unwrap();
         assert_eq!(unfiltered.len(), 4);
+        for n in &unfiltered {
+            assert!(!n.struck);
+            assert!(!stored_struck(&conn, n.id));
+        }
     }
 
     #[test]
-    fn materialize_prunes_a_fully_cross_dup_subdir_when_filtering() {
+    fn materialize_strikes_only_the_topmost_row_of_a_hidden_subdir() {
         let (mut conn, _ws, source_id, consolidation_id) = setup(NESTED_TREE);
         // Every leaf under photos/2024 is cross_dup, so the funnel hides the
-        // whole "2024" dir and the drag must drop it entirely. rollup.rs
-        // annotates the directory row itself in that case (cross_dup when
-        // *every* leaf beneath it is), so mark it here too -- the query keys
-        // off each row's own annotation, not a recomputed rollup.
+        // whole "2024" dir. rollup.rs annotates the directory row itself in
+        // that case (cross_dup when *every* leaf beneath it is), so mark it
+        // here too -- the drag keys off each row's own annotation, not a
+        // recomputed rollup.
         mark_cross_dup(&conn, source_id, "photos/2024/a.jpg");
         mark_cross_dup(&conn, source_id, "photos/2024/b.jpg");
         mark_cross_dup(&conn, source_id, "photos/2024");
         let root_id = node_id(&conn, source_id, "photos");
+        let year = node_id(&conn, source_id, "photos/2024");
 
         let filtered =
             materialize_subtree(&mut conn, consolidation_id, None, root_id, true).unwrap();
 
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].source_node_id, Some(root_id));
-        assert_eq!(filtered[0].name, "photos");
+        assert_eq!(filtered.len(), 4);
+        assert!(!row_for(&conn, &filtered, root_id).struck);
+        assert!(row_for(&conn, &filtered, year).struck);
+        // `struck` is inherited at read time, so the files beneath carry no
+        // flag of their own -- un-striking "2024" must bring them back.
+        for leaf in ["photos/2024/a.jpg", "photos/2024/b.jpg"] {
+            let id = node_id(&conn, source_id, leaf);
+            assert!(!row_for(&conn, &filtered, id).struck, "{leaf} inherits");
+        }
     }
 
     /// Adds a second source to an existing workspace, so a deletion test can

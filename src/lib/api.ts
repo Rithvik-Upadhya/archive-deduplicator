@@ -169,8 +169,8 @@ export const consolidationAddSourceSubtree = (args: {
     consolidationId: number;
     parentId: number | null;
     sourceNodeId: number;
-    /** Drop descendants hidden by this source's "exclusive to this device"
-     *  funnel, so the materialized subtree matches what the user saw. */
+    /** Strike descendants hidden by this source's "exclusive to this device"
+     *  funnel: they come across marked for deletion rather than left out. */
     filterCrossDup: boolean;
 }) => invoke<ConsolidationNode[]>('consolidation_add_source_subtree', args);
 export const consolidationMoveNode = (

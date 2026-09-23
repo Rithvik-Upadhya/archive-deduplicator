@@ -265,11 +265,12 @@
             // on the item's own source (a multi-select can span devices with
             // different funnel states).
             const filtered = deviceFilterOn.has(item.source_id);
-            // A hidden file that slipped into the payload (e.g. selected
-            // before the funnel was toggled on) -- skip it. Hidden files
-            // inside a dragged directory are dropped by the backend instead.
-            if (item.type !== 'directory' && filtered && item.cross_dup)
-                continue;
+            // A hidden row that slipped into the payload (e.g. selected
+            // before the funnel was toggled on) -- skip it: the user never
+            // saw it, so never chose to drag it. Hidden rows *inside* a
+            // dragged directory come across struck instead (the backend
+            // marks them), so the end state records what the funnel excluded.
+            if (filtered && item.cross_dup) continue;
             try {
                 if (item.type === 'directory') {
                     const created = await api.consolidationAddSourceSubtree({
