@@ -160,13 +160,6 @@ export function sourceBarsFor(
     };
 }
 
-/** `--col-src` for a tree container: one slot per source plus the grey
- *  no-source slot, so the bar column lines up on every row. A slot is a
- *  `w-1` bar plus a `gap-0.5`. */
-export function sourceColumnVar(sourceCount: number): string {
-    return `--col-src: calc(${sourceCount + 1} * 0.375rem)`;
-}
-
 /* --- Colour scales ---------------------------------------------------------
  *
  * Duplicate markers are coloured by *where the other copies live*, not by how

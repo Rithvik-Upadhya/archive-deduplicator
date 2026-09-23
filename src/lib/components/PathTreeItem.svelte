@@ -192,8 +192,6 @@
             </Badge>
         {/if}
 
-        <SourceBarsCell {bars} />
-
         {#if node.edited}
             <Button
                 variant="ghost"
@@ -208,6 +206,8 @@
                 <span class="sr-only">Revert</span>
             </Button>
         {/if}
+        <SourceBarsCell {bars} />
+
         <Button
             variant="ghost"
             size="icon"

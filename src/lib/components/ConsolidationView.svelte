@@ -18,7 +18,6 @@
         formatBytes,
         pathSegments,
         sourceBarsFor,
-        sourceColumnVar,
     } from '$lib/util';
 
     let consolidationId = $state<number | null>(null);
@@ -119,7 +118,6 @@
     });
 
     const barsOf = $derived(sourceBarsFor(nodes, app.sources));
-    const srcColVar = $derived(sourceColumnVar(app.sources.length));
 
     /** A node's path within the consolidated tree, root-first. */
     const pathOf = (id: number) => pathSegments(index.byId, id);
@@ -397,7 +395,6 @@
         <div
             class="min-h-32 grow overflow-y-auto rounded-md border-2 border-dashed p-2 transition-colors data-[drag=true]:border-brand data-[drag=true]:bg-brand/10"
             data-drag={rootDragOver}
-            style={srcColVar}
             role="tree"
             aria-label="Consolidated tree"
             tabindex="0"
