@@ -3,11 +3,19 @@
     import { taskTray } from '$lib/stores/tasks.svelte';
     import type {
         DedupProgress,
+        GroupKind,
         GroupSort,
         NodeType,
         TreeNode,
     } from '$lib/types';
-    import { copyPath, formatBytes } from '$lib/util';
+    import {
+        copyPath,
+        formatBytes,
+        GROUP_KINDS,
+        MATCH_FLOORS,
+        UNDERLINE_TRIGGER,
+        type MatchTier,
+    } from '$lib/util';
     import DeviceTree from './DeviceTree.svelte';
     import GroupDialog from './GroupDialog.svelte';
     import RevealButton from './RevealButton.svelte';
@@ -21,11 +29,12 @@
     import NumberField from './NumberField.svelte';
     import MatchFloorSelect from './MatchFloorSelect.svelte';
     import MatchTierLabel from './MatchTierLabel.svelte';
+    import FilterSelect from './FilterSelect.svelte';
+    import * as Select from '$lib/components/ui/select';
     import { Label } from '$lib/components/ui/label';
     import * as Alert from '$lib/components/ui/alert';
     import * as Empty from '$lib/components/ui/empty';
     import * as Resizable from '$lib/components/ui/resizable/index.js';
-    import * as ToggleGroup from '$lib/components/ui/toggle-group';
     import { listen } from '@tauri-apps/api/event';
 
     // Row clicks select, as in the Consolidate view's device trees; a member's
@@ -91,16 +100,45 @@
         return () => obs.disconnect();
     });
 
-    const kinds: { id: 'all' | 'file' | 'folder' | 'hardlink'; label: string }[] = [
-        { id: 'all', label: 'All' },
-        { id: 'file', label: 'Files' },
-        { id: 'folder', label: 'Folders' },
-        { id: 'hardlink', label: 'Hardlinks' },
-    ];
+    // Only the tiers the last run included: one below its floor can never
+    // have groups, so it isn't offered at all.
+    const tierOptions = $derived(
+        MATCH_FLOORS.filter(f => f.confidence >= app.appliedMinConfidence).map(
+            f => ({
+                value: f.tier,
+                label: `Tier ${f.tier}`,
+                short: f.tier,
+                hint: f.label,
+            })
+        )
+    );
+
+    // The menu only reports the tiers it shows, so a hidden tier keeps
+    // whatever selection it had -- it comes back as it was if a later run
+    // lowers the floor again.
+    function setShownTiers(shown: MatchTier[]) {
+        const offered = new Set(tierOptions.map(o => o.value));
+        const hidden = app.groupTiers.filter(t => !offered.has(t));
+        app.setGroupTiers(
+            MATCH_FLOORS.map(f => f.tier).filter(
+                t => shown.includes(t) || hidden.includes(t)
+            )
+        );
+    }
     const sorts: { id: GroupSort; label: string }[] = [
-        { id: 'confidence', label: 'Confidence' },
-        { id: 'size', label: 'Size' },
+        { id: 'tier-desc', label: 'Tier: A → E' },
+        { id: 'tier-asc', label: 'Tier: E → A' },
+        { id: 'size-desc', label: 'Size: largest first' },
+        { id: 'size-asc', label: 'Size: smallest first' },
     ];
+    const sortLabel = $derived(
+        sorts.find(s => s.id === app.groupSort)?.label ?? ''
+    );
+    // A type or tier filter is narrowing the list.
+    const listFiltered = $derived(
+        app.groupKinds.length < GROUP_KINDS.length ||
+            app.groupTiers.length < MATCH_FLOORS.length
+    );
 
     // Sources changed since the last run, or a tuning field was edited and
     // not yet run (the fields are run parameters, not list filters).
@@ -215,40 +253,42 @@
                                     >({app.groupTotal})</span>
                             {/if}
                         </h2>
-                        <div class="ms-auto flex items-center gap-3">
-                            <ToggleGroup.Root
+                        <div
+                            class="ms-auto flex flex-wrap items-center gap-3">
+                            <FilterSelect
+                                ariaLabel="Item types"
+                                options={GROUP_KINDS}
+                                selected={app.groupKinds}
+                                allText="All types"
+                                onchange={v =>
+                                    app.setGroupKinds(v as GroupKind[])} />
+                            <FilterSelect
+                                ariaLabel="Match tiers"
+                                options={tierOptions}
+                                selected={app.groupTiers}
+                                allText="All tiers"
+                                prefix="Tiers "
+                                onchange={v =>
+                                    setShownTiers(v as MatchTier[])} />
+                            <Select.Root
                                 type="single"
-                                size="sm"
-                                variant="outline"
-                                value={app.groupKind}
-                                onValueChange={v =>
-                                    v &&
-                                    app.setGroupKind(
-                                        v as 'all' | 'file' | 'folder' | 'hardlink'
-                                    )}>
-                                {#each kinds as k (k.id)}
-                                    <ToggleGroup.Item
-                                        value={k.id}
-                                        class="px-2 text-xs">
-                                        {k.label}
-                                    </ToggleGroup.Item>
-                                {/each}
-                            </ToggleGroup.Root>
-                            <ToggleGroup.Root
-                                type="single"
-                                size="sm"
-                                variant="outline"
                                 value={app.groupSort}
                                 onValueChange={v =>
                                     v && app.setGroupSort(v as GroupSort)}>
-                                {#each sorts as s (s.id)}
-                                    <ToggleGroup.Item
-                                        value={s.id}
-                                        class="px-2 text-xs">
-                                        {s.label}
-                                    </ToggleGroup.Item>
-                                {/each}
-                            </ToggleGroup.Root>
+                                <Select.Trigger
+                                    size="sm"
+                                    class="w-40 {UNDERLINE_TRIGGER}"
+                                    aria-label="Sort">
+                                    {sortLabel}
+                                </Select.Trigger>
+                                <Select.Content align="end">
+                                    {#each sorts as s (s.id)}
+                                        <Select.Item
+                                            value={s.id}
+                                            label={s.label} />
+                                    {/each}
+                                </Select.Content>
+                            </Select.Root>
                         </div>
                     </div>
 
@@ -263,6 +303,9 @@
                                     {#if search.applied}
                                         No group has a member whose name
                                         contains “{search.applied.query}”.
+                                    {:else if listFiltered}
+                                        No group matches the selected types
+                                        and tiers.
                                     {:else}
                                         Adjust the settings and run “Find
                                         duplicates”.

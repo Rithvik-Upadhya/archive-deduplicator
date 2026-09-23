@@ -1,6 +1,6 @@
 // Small formatting helpers shared across components.
 
-import type { NodeType, Source } from './types';
+import type { ConfidenceRange, GroupKind, NodeType, Source } from './types';
 
 /** Format a byte count into a human-readable string. */
 export function formatBytes(bytes: number): string {
@@ -356,6 +356,35 @@ export function matchTier(confidence: number): MatchFloor {
         MATCH_FLOORS[MATCH_FLOORS.length - 1]
     );
 }
+
+/**
+ * The confidence band a tier covers, for the group list's tier filter: from
+ * its own floor up to (not including) the next stricter one, unbounded for A.
+ * Same floors and the same `>=` boundary as `matchTier`, so the filter keeps
+ * exactly the groups labelled with the chosen letters.
+ */
+export function tierRange(tier: MatchTier): ConfidenceRange {
+    const i = MATCH_FLOORS.findIndex(f => f.tier === tier);
+    return {
+        min: MATCH_FLOORS[i].confidence,
+        max: i > 0 ? MATCH_FLOORS[i - 1].confidence : null,
+    };
+}
+
+/** The group list's item types, in filter-menu order. */
+export const GROUP_KINDS: readonly { value: GroupKind; label: string }[] = [
+    { value: 'file', label: 'Files' },
+    { value: 'folder', label: 'Folders' },
+    { value: 'hardlink', label: 'Hardlinks' },
+];
+
+/**
+ * Classes for a `Select` trigger styled like the top-bar search: no fill, no
+ * box, just a bottom rule that darkens while focused or open. Shared by every
+ * dropdown in the Deduplicate view so they read as one set of controls.
+ */
+export const UNDERLINE_TRIGGER =
+    'rounded-none border-x-0 border-t-0 border-border bg-transparent pr-0 pl-0.5 hover:bg-transparent focus-visible:border-foreground/60 focus-visible:ring-0 aria-expanded:border-foreground/60 data-[size=sm]:rounded-none dark:bg-transparent dark:hover:bg-transparent';
 
 /* --- Task tray -------------------------------------------------------- */
 

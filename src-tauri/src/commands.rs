@@ -6,7 +6,8 @@ use crate::dedup::DedupParams;
 use crate::model::*;
 use crate::{hashing, links, medium, parse, pathfix, rollup, scan, search};
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::types::Value;
+use rusqlite::{params, params_from_iter};
 use std::collections::HashMap;
 use std::path::Path;
 use tauri::{Emitter, Manager, State};
@@ -892,8 +893,8 @@ pub async fn run_dedup(
 }
 
 /// Return a page of match groups for a workspace, filtered by confidence,
-/// minimum size, kind and (optionally) a name search, sorted by confidence or
-/// size. Members are fetched
+/// minimum size, kinds, tiers and (optionally) a name search, sorted by tier or
+/// size in either direction. Members are fetched
 /// with a single batched query per page so pagination stays cheap even with
 /// hundreds of thousands of groups.
 #[tauri::command]
@@ -903,7 +904,8 @@ pub fn get_groups(
     workspace_id: i64,
     min_confidence: f64,
     min_size: i64,
-    kind: Option<String>,
+    kinds: Option<Vec<String>>,
+    tiers: Option<Vec<ConfidenceRange>>,
     sort: Option<String>,
     offset: i64,
     limit: i64,
@@ -916,7 +918,8 @@ pub fn get_groups(
         workspace_id,
         min_confidence,
         min_size,
-        kind,
+        kinds,
+        tiers,
         sort,
         offset,
         limit,
@@ -926,25 +929,42 @@ pub fn get_groups(
     .map_err(map_err)
 }
 
+/// Push a query parameter and return its numbered placeholder (`?N`), so a
+/// `WHERE` clause with a variable number of terms can be built up in order.
+fn bind(values: &mut Vec<Value>, value: impl Into<Value>) -> String {
+    values.push(value.into());
+    format!("?{}", values.len())
+}
+
 /// Query one page of match groups. Split out from the `get_groups` command so it
 /// can be unit-tested without a Tauri `State<Db>`.
+///
+/// `kinds` and `tiers` are each "any of": a group passes when its kind is one
+/// of `kinds` and its confidence falls in one of the `tiers` bands. `None` or
+/// empty means no filter.
 #[allow(clippy::too_many_arguments)]
 fn group_page(
     conn: &rusqlite::Connection,
     workspace_id: i64,
     min_confidence: f64,
     min_size: i64,
-    kind: Option<String>,
+    kinds: Option<Vec<String>>,
+    tiers: Option<Vec<ConfidenceRange>>,
     sort: Option<String>,
     offset: i64,
     limit: i64,
     search: Option<String>,
     case_sensitive: bool,
 ) -> rusqlite::Result<GroupPage> {
-    let kind_filter = kind.unwrap_or_default();
+    // Every order ends in `id`: rows tied on the sort keys otherwise have no
+    // fixed order, and LIMIT/OFFSET paging can repeat or skip them at page
+    // edges. Tier order uses the raw confidence, so within a tier the stronger
+    // folder groups still come first.
     let order = match sort.as_deref() {
-        Some("size") => "size DESC, confidence DESC",
-        _ => "confidence DESC, size DESC",
+        Some("tier-asc") => "confidence ASC, size DESC, id",
+        Some("size-desc") => "size DESC, confidence DESC, id",
+        Some("size-asc") => "size ASC, confidence DESC, id",
+        _ => "confidence DESC, size DESC, id",
     };
     let limit = if limit <= 0 { 100 } else { limit.min(500) };
 
@@ -970,75 +990,83 @@ fn group_page(
         ""
     };
 
+    // The WHERE clause is built term by term with numbered placeholders, and
+    // the count and page queries share its parameter list.
+    let mut values: Vec<Value> = Vec::new();
+    let ws = bind(&mut values, workspace_id);
+    let conf = bind(&mut values, min_confidence);
+    let size = bind(&mut values, min_size);
+    let mut where_sql = format!(
+        "workspace_id = {ws} AND confidence >= {conf} AND size >= {size} {live_member_guard}"
+    );
+    if let Some(kinds) = kinds.filter(|k| !k.is_empty()) {
+        let placeholders: Vec<String> = kinds.into_iter().map(|k| bind(&mut values, k)).collect();
+        where_sql += &format!(" AND kind IN ({})", placeholders.join(", "));
+    }
+    if let Some(tiers) = tiers.filter(|t| !t.is_empty()) {
+        let bands: Vec<String> = tiers
+            .into_iter()
+            .map(|t| {
+                let lo = bind(&mut values, t.min);
+                match t.max {
+                    Some(max) => {
+                        let hi = bind(&mut values, max);
+                        format!("(confidence >= {lo} AND confidence < {hi})")
+                    }
+                    None => format!("confidence >= {lo}"),
+                }
+            })
+            .collect();
+        where_sql += &format!(" AND ({})", bands.join(" OR "));
+    }
+
     // Name search: keep a group when at least one of its *displayed* members
     // matches. Excluded-source members are filtered here as they are in the
     // member query below -- a member the pane hides must not be the reason a
-    // group shows up in it.
-    // An empty needle means "no search"; the guard is always present (and
-    // short-circuits on `?7 = ''`) so both statements bind the same
-    // parameter list. The count leaves `?5`/`?6` unreferenced, which SQLite
-    // allows as long as a higher index is used.
+    // group shows up in it. An empty needle means "no search".
     search::register(conn)?;
     let needle = search
         .map(|q| search::fold_needle(&q, case_sensitive))
         .unwrap_or_default();
-    let search_guard = "AND (?7 = '' OR EXISTS (SELECT 1 FROM match_members mm
-              JOIN nodes n ON n.id = mm.node_id
-              JOIN sources s ON s.id = n.source_id
-              WHERE mm.group_id = match_groups.id AND s.excluded = 0
-                AND search_match(n.name, ?7, ?8)))";
+    if !needle.is_empty() {
+        let needle = bind(&mut values, needle);
+        let case_sensitive = bind(&mut values, case_sensitive as i64);
+        where_sql += &format!(
+            " AND EXISTS (SELECT 1 FROM match_members mm
+                  JOIN nodes n ON n.id = mm.node_id
+                  JOIN sources s ON s.id = n.source_id
+                  WHERE mm.group_id = match_groups.id AND s.excluded = 0
+                    AND search_match(n.name, {needle}, {case_sensitive}))"
+        );
+    }
 
     let total: i64 = conn.query_row(
-        &format!(
-            "SELECT COUNT(*) FROM match_groups
-                 WHERE workspace_id = ?1 AND confidence >= ?2 AND size >= ?3
-                   AND (?4 = '' OR kind = ?4) {live_member_guard} {search_guard}"
-        ),
-        params![
-            workspace_id,
-            min_confidence,
-            min_size,
-            kind_filter,
-            limit,
-            offset,
-            needle,
-            case_sensitive
-        ],
+        &format!("SELECT COUNT(*) FROM match_groups WHERE {where_sql}"),
+        params_from_iter(values.iter()),
         |r| r.get(0),
     )?;
 
+    let lim = bind(&mut values, limit);
+    let off = bind(&mut values, offset);
     let sql = format!(
         "SELECT id, workspace_id, kind, confidence, primary_signal, size
          FROM match_groups
-         WHERE workspace_id = ?1 AND confidence >= ?2 AND size >= ?3
-           AND (?4 = '' OR kind = ?4) {live_member_guard} {search_guard}
-         ORDER BY {order} LIMIT ?5 OFFSET ?6"
+         WHERE {where_sql}
+         ORDER BY {order} LIMIT {lim} OFFSET {off}"
     );
     let mut stmt = conn.prepare(&sql)?;
     let mut groups = stmt
-        .query_map(
-            params![
-                workspace_id,
-                min_confidence,
-                min_size,
-                kind_filter,
-                limit,
-                offset,
-                needle,
-                case_sensitive
-            ],
-            |r| {
-                Ok(MatchGroup {
-                    id: r.get(0)?,
-                    workspace_id: r.get(1)?,
-                    kind: r.get(2)?,
-                    confidence: r.get(3)?,
-                    primary_signal: r.get(4)?,
-                    size: r.get(5)?,
-                    members: Vec::new(),
-                })
-            },
-        )?
+        .query_map(params_from_iter(values.iter()), |r| {
+            Ok(MatchGroup {
+                id: r.get(0)?,
+                workspace_id: r.get(1)?,
+                kind: r.get(2)?,
+                confidence: r.get(3)?,
+                primary_signal: r.get(4)?,
+                size: r.get(5)?,
+                members: Vec::new(),
+            })
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     // Batch-load members for this page of groups.
@@ -1869,11 +1897,126 @@ mod tests {
     }
 
     fn page_all(conn: &Connection, ws: i64) -> GroupPage {
-        group_page(conn, ws, 0.0, 0, None, None, 0, 100, None, false).unwrap()
+        group_page(conn, ws, 0.0, 0, None, None, None, 0, 100, None, false).unwrap()
     }
 
     fn page_search(conn: &Connection, ws: i64, q: &str) -> GroupPage {
-        group_page(conn, ws, 0.0, 0, None, None, 0, 100, Some(q.into()), false).unwrap()
+        group_page(
+            conn,
+            ws,
+            0.0,
+            0,
+            None,
+            None,
+            None,
+            0,
+            100,
+            Some(q.into()),
+            false,
+        )
+        .unwrap()
+    }
+
+    fn page_with(
+        conn: &Connection,
+        ws: i64,
+        kinds: Option<&[&str]>,
+        tiers: Option<Vec<ConfidenceRange>>,
+        sort: Option<&str>,
+    ) -> GroupPage {
+        group_page(
+            conn,
+            ws,
+            0.0,
+            0,
+            kinds.map(|k| k.iter().map(|s| s.to_string()).collect()),
+            tiers,
+            sort.map(String::from),
+            0,
+            100,
+            None,
+            false,
+        )
+        .unwrap()
+    }
+
+    /// A member-less group: the list query never needs members unless a
+    /// source is excluded.
+    fn insert_group_at(conn: &Connection, ws: i64, kind: &str, confidence: f64, size: i64) -> i64 {
+        conn.execute(
+            "INSERT INTO match_groups (workspace_id, kind, confidence, primary_signal, size)
+             VALUES (?1, ?2, ?3, 'test', ?4)",
+            params![ws, kind, confidence, size],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn group_ids(page: &GroupPage) -> Vec<i64> {
+        page.groups.iter().map(|g| g.id).collect()
+    }
+
+    #[test]
+    fn get_groups_kinds_filter_keeps_any_of_the_listed_kinds() {
+        let (conn, ws) = seeded_conn();
+        let file = insert_group_at(&conn, ws, "file", 100.0, 10);
+        insert_group_at(&conn, ws, "folder", 100.0, 10);
+        let hardlink = insert_group_at(&conn, ws, "hardlink", 100.0, 10);
+
+        let page = page_with(&conn, ws, Some(&["file", "hardlink"]), None, None);
+        assert_eq!(page.total, 2, "the count must apply the same filter");
+        assert_eq!(group_ids(&page), vec![file, hardlink]);
+    }
+
+    #[test]
+    fn get_groups_tiers_filter_keeps_any_of_the_listed_bands() {
+        // Tiers A and D, not adjacent. 99 is B (below A's floor), 94.5 is a
+        // folder's weighted score that reads C, and 60 is D.
+        let (conn, ws) = seeded_conn();
+        let mut id_of = HashMap::new();
+        for c in [100.0, 99.0, 94.5, 70.0, 60.0, 55.0, 45.0] {
+            id_of.insert(c.to_string(), insert_group_at(&conn, ws, "file", c, 10));
+        }
+        let tiers = vec![
+            ConfidenceRange {
+                min: 100.0,
+                max: None,
+            },
+            ConfidenceRange {
+                min: 55.0,
+                max: Some(70.0),
+            },
+        ];
+
+        let page = page_with(&conn, ws, None, Some(tiers), None);
+        assert_eq!(page.total, 3);
+        assert_eq!(
+            group_ids(&page),
+            vec![id_of["100"], id_of["60"], id_of["55"]]
+        );
+    }
+
+    #[test]
+    fn get_groups_sorts_by_tier_or_size_in_either_direction() {
+        let (conn, ws) = seeded_conn();
+        let a = insert_group_at(&conn, ws, "file", 100.0, 10);
+        let d = insert_group_at(&conn, ws, "file", 55.0, 30);
+        let c_small = insert_group_at(&conn, ws, "file", 70.0, 20);
+        let c_big = insert_group_at(&conn, ws, "file", 70.0, 40);
+        // Tied on every sort key: only the trailing `id` orders these, which
+        // is what keeps LIMIT/OFFSET paging from repeating or skipping them.
+        let e1 = insert_group_at(&conn, ws, "file", 45.0, 5);
+        let e2 = insert_group_at(&conn, ws, "file", 45.0, 5);
+
+        let order = |sort: Option<&str>| group_ids(&page_with(&conn, ws, None, None, sort));
+        assert_eq!(
+            order(None),
+            vec![a, c_big, c_small, d, e1, e2],
+            "tier-desc is the default"
+        );
+        assert_eq!(order(Some("tier-asc")), vec![e1, e2, d, c_big, c_small, a]);
+        assert_eq!(order(Some("size-desc")), vec![c_big, d, c_small, a, e1, e2]);
+        assert_eq!(order(Some("size-asc")), vec![e1, e2, a, c_small, d, c_big]);
     }
 
     #[test]

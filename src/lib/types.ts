@@ -185,10 +185,12 @@ export interface MatchMember {
     mtime: string | null;
 }
 
+export type GroupKind = 'file' | 'folder' | 'hardlink';
+
 export interface MatchGroup {
     id: number;
     workspace_id: number;
-    kind: 'file' | 'folder' | 'hardlink';
+    kind: GroupKind;
     confidence: number;
     primary_signal: string;
     size: number;
@@ -200,7 +202,15 @@ export interface GroupPage {
     groups: MatchGroup[];
 }
 
-export type GroupSort = 'confidence' | 'size';
+export type GroupSort = 'tier-desc' | 'tier-asc' | 'size-desc' | 'size-asc';
+
+/** A `[min, max)` band of group confidence -- one tier, as the group list's
+ *  tier filter sends it (see `util.tierRange`). `max` is null for the top
+ *  tier. */
+export interface ConfidenceRange {
+    min: number;
+    max: number | null;
+}
 
 export interface ConsolidationNode {
     id: number;

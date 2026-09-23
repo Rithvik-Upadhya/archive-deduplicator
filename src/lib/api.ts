@@ -5,6 +5,8 @@ import { invoke } from '@tauri-apps/api/core';
 import type {
     ConsolidationNode,
     GroupPage,
+    ConfidenceRange,
+    GroupKind,
     GroupSort,
     HashScanReportDto,
     HashSettings,
@@ -117,7 +119,10 @@ export const getGroups = (args: {
     workspaceId: number;
     minConfidence: number;
     minSize: number;
-    kind?: 'file' | 'folder' | 'hardlink';
+    /** Keep only these kinds; absent means every kind. */
+    kinds?: GroupKind[];
+    /** Keep only groups in one of these bands; absent means every tier. */
+    tiers?: ConfidenceRange[];
     sort?: GroupSort;
     offset: number;
     limit: number;
@@ -129,8 +134,9 @@ export const getGroups = (args: {
         workspaceId: args.workspaceId,
         minConfidence: args.minConfidence,
         minSize: args.minSize,
-        kind: args.kind ?? null,
-        sort: args.sort ?? 'confidence',
+        kinds: args.kinds ?? null,
+        tiers: args.tiers ?? null,
+        sort: args.sort ?? 'tier-desc',
         offset: args.offset,
         limit: args.limit,
         search: args.search ?? null,

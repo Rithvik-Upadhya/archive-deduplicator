@@ -358,7 +358,14 @@ UI-relevant conventions:
   tuning fields, `dedup_stale`) instead go through `workspace_state_get`/`workspace_state_set`, keyed
   by `(workspace_id, key)`, so they don't bleed across workspaces.
 - Match groups are paged (50/page, infinite scroll). `refreshGroups` resets, `loadMoreGroups`
-  appends — list filter changes (kind, sort, search) must go through `refreshGroups`.
+  appends — list filter changes (types, tiers, sort, search) must go through `refreshGroups`.
+  Types and tiers are "any of" multi-selects (`FilterSelect.svelte`) that can't be emptied, and
+  every successful `runDedup` resets both to "all" (sort and search are kept). Tiers
+  reach `get_groups` as `[min, max)` confidence bands built by `util.tierRange` from
+  `MATCH_FLOORS` — the same floors and `>=` boundary as `matchTier`, so the filter keeps exactly
+  the groups wearing the chosen letters, and Rust never holds the floor list (`ConfidenceRange` in
+  `model.rs` ↔ `types.ts`). Every `ORDER BY` in `group_page` ends in `id`: rows tied on the sort
+  keys otherwise have no fixed order, and LIMIT/OFFSET paging repeats or skips them.
 - **Min size and the match floor are run parameters, not list filters.** The inputs are
   `minSizeKb`/`minConfidence`; the group list queries with `appliedMinSizeKb`/
   `appliedMinConfidence`, because the groups, trees and stats all describe the last run and

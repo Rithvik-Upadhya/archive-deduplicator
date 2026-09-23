@@ -41,7 +41,11 @@
 </script>
 
 <Dialog.Root bind:open>
-    <Dialog.Content class="sm:max-w-2xl">
+    <!-- `minmax(0, 1fr)`: the content is a grid with one implicit `auto`
+         column, which grows to its items' min-content width. A path has no
+         spaces, so it is one unbreakable word, and the column outgrew the
+         dialog before any `truncate` inside could clip it. -->
+    <Dialog.Content class="grid-cols-[minmax(0,1fr)] sm:max-w-2xl">
         <Dialog.Header>
             <Dialog.Title class="truncate">
                 Duplicates of: {node?.name}

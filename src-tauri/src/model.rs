@@ -209,6 +209,16 @@ pub struct MatchGroup {
     pub members: Vec<MatchMember>,
 }
 
+/// A `[min, max)` band of match-group confidence: one tier, as the group list's
+/// tier filter sends it. The frontend derives the bands from its floor list
+/// (`util.tierRange`), so this side never needs the tiers' numbers. `max` is
+/// `None` for the top tier, since JSON can't carry infinity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfidenceRange {
+    pub min: f64,
+    pub max: Option<f64>,
+}
+
 /// One page of match groups plus the total count matching the filters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupPage {

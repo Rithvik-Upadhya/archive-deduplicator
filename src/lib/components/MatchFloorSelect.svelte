@@ -3,7 +3,7 @@
      stricter type. The options come from `MATCH_FLOORS`. -->
 <script lang="ts">
     import * as Select from '$lib/components/ui/select';
-    import { MATCH_FLOORS, matchTier } from '$lib/util';
+    import { MATCH_FLOORS, UNDERLINE_TRIGGER, matchTier } from '$lib/util';
 
     interface Props {
         id: string;
@@ -25,12 +25,7 @@
         const next = Number(v);
         if (next !== value) oncommit(next);
     }}>
-    <!-- Styled like the top-bar search: no fill, no box, just a bottom rule
-         that darkens while focused or open. -->
-    <Select.Trigger
-        {id}
-        size="sm"
-        class="w-72 rounded-none border-x-0 border-t-0 border-border bg-transparent pr-0 pl-0.5 hover:bg-transparent focus-visible:border-foreground/60 focus-visible:ring-0 aria-expanded:border-foreground/60 data-[size=sm]:rounded-none dark:bg-transparent dark:hover:bg-transparent">
+    <Select.Trigger {id} size="sm" class="w-72 {UNDERLINE_TRIGGER}">
         {current?.label ?? matchTier(value).label}
     </Select.Trigger>
     <Select.Content class="w-96" align="start">

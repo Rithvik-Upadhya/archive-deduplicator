@@ -5,9 +5,17 @@
 import * as api from '../api';
 import { AUTO_EXPAND_LIMIT, search } from './search.svelte';
 import { taskTray } from './tasks.svelte';
-import { LOOSEST_MATCH_FLOOR, snapMatchFloor } from '../util';
+import {
+    GROUP_KINDS,
+    LOOSEST_MATCH_FLOOR,
+    MATCH_FLOORS,
+    snapMatchFloor,
+    tierRange,
+    type MatchTier,
+} from '../util';
 import type { IconName } from '../components/Icon.svelte';
 import type {
+    GroupKind,
     GroupSort,
     HashScanReportDto,
     ImportSummary,
@@ -61,8 +69,11 @@ class AppState {
     // Results (paged: `groups` holds all pages loaded so far).
     groups = $state<MatchGroup[]>([]);
     groupTotal = $state(0);
-    groupSort = $state<GroupSort>('confidence');
-    groupKind = $state<'all' | 'file' | 'folder' | 'hardlink'>('all');
+    groupSort = $state<GroupSort>('tier-desc');
+    // List filters, each "any of". Never empty: the setters refuse that, so
+    // unchecking the last item can't silently mean "show everything".
+    groupKinds = $state<GroupKind[]>(GROUP_KINDS.map(k => k.value));
+    groupTiers = $state<MatchTier[]>(MATCH_FLOORS.map(f => f.tier));
     groupsLoading = $state(false);
 
     /** True when sources changed after the last dedup run (nudges a re-run). */
@@ -321,6 +332,10 @@ class AppState {
         await api.runDedup(this.activeWorkspaceId, minSizeKb * 1024, minConfidence);
         await this.saveTuning(minSizeKb, minConfidence);
         await this.setDedupStale(false);
+        // A new run is a new set of groups: start the list unfiltered, before
+        // `loadWorkspace` fetches its first page.
+        this.groupKinds = GROUP_KINDS.map(k => k.value);
+        this.groupTiers = MATCH_FLOORS.map(f => f.tier);
         await this.loadWorkspace();
         this.treeVersion++;
     }
@@ -370,6 +385,21 @@ class AppState {
         return a ? { search: a.query, caseSensitive: a.caseSensitive } : {};
     }
 
+    /** Group-list arguments for the type and tier filters. Each is sent only
+     *  when it actually narrows the list. */
+    private get groupFilterArgs() {
+        return {
+            kinds:
+                this.groupKinds.length < GROUP_KINDS.length
+                    ? this.groupKinds
+                    : undefined,
+            tiers:
+                this.groupTiers.length < MATCH_FLOORS.length
+                    ? this.groupTiers.map(tierRange)
+                    : undefined,
+        };
+    }
+
     /** Reload the first page of groups using the current filters. */
     async refreshGroups() {
         if (this.activeWorkspaceId == null) return;
@@ -379,8 +409,8 @@ class AppState {
                 workspaceId: this.activeWorkspaceId,
                 minConfidence: this.appliedMinConfidence,
                 minSize: this.appliedMinSizeKb * 1024,
-                kind: this.groupKind === 'all' ? undefined : this.groupKind,
                 sort: this.groupSort,
+                ...this.groupFilterArgs,
                 ...this.groupSearchArgs,
                 offset: 0,
                 limit: GROUP_PAGE_SIZE,
@@ -406,8 +436,8 @@ class AppState {
                 workspaceId: this.activeWorkspaceId,
                 minConfidence: this.appliedMinConfidence,
                 minSize: this.appliedMinSizeKb * 1024,
-                kind: this.groupKind === 'all' ? undefined : this.groupKind,
                 sort: this.groupSort,
+                ...this.groupFilterArgs,
                 ...this.groupSearchArgs,
                 offset: this.groups.length,
                 limit: GROUP_PAGE_SIZE,
@@ -424,8 +454,15 @@ class AppState {
         await this.refreshGroups();
     }
 
-    async setGroupKind(kind: 'all' | 'file' | 'folder' | 'hardlink') {
-        this.groupKind = kind;
+    async setGroupKinds(kinds: GroupKind[]) {
+        if (kinds.length === 0) return;
+        this.groupKinds = kinds;
+        await this.refreshGroups();
+    }
+
+    async setGroupTiers(tiers: MatchTier[]) {
+        if (tiers.length === 0) return;
+        this.groupTiers = tiers;
         await this.refreshGroups();
     }
 
