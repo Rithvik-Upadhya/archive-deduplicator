@@ -211,8 +211,21 @@ hash_spec)` makes re-scanning an unchanged tree a no-op read-wise. Resumable: ca
   (BLAKE3 over each directory's sorted immediate children — `"file:{name}:{size}:{mtime_norm}"` or
   `"dir:{name}:{child.listing_hash}"` — so structurally identical subtrees hash equal even when
   renamed, or when dominated by small unhashed files). Directories sharing a `listing_hash` across
-  ≥2 sources get a `kind='folder', primary_signal='listing', confidence=60.0` group alongside (not
+  ≥2 sources get a `kind='folder', primary_signal='listing', confidence=70.0` group alongside (not
   replacing) the byte-heuristic's groups; both can legitimately fire on the same directory pair.
+
+  **Folder confidence measures evidence, not coverage.**
+  - The 80% byte test decides *whether* a folder is reported. The group's confidence is the
+    byte-weighted mean of each duplicated file's best cross-source confidence, so a folder resting
+    on tier-E matches reads about 45, not 100. Coverage lives in `dup_pct`. It used to be the score
+    (80–100), which put a tier-E-backed folder level with a hash match and made `min_confidence`
+    meaningless for folders.
+  - `listing` sits at tier C (70), because every file in a matching subtree meets C-grade evidence.
+    To keep trivial structure out, a folder only seeds a group when its subtree holds ≥ 2 names and
+    ≥ `min_size_bytes` of file data; otherwise every `desktop.ini`-only folder would match every
+    other.
+  - Both folder kinds store the largest member's subtree bytes as `size`. `listing` groups used to
+    store 0, which the group list's `size >= min_size` filter hid under the default 64 KB.
   `rebuild_annotations` then writes the `dup_annot` table (per-node `has_dup` / `dup_pct`) so
   `get_tree` is a plain query. Its byte/leaf rollup queries (`load_file_locs`, `load_leaf_locs`)
   also filter `alias_of IS NULL`.
@@ -222,7 +235,8 @@ hash_spec)` makes re-scanning an unchanged tree a no-op read-wise. Resumable: ca
   source report more duplication than it physically holds. And cross-source-ness must be read as
   "**any** of this file's groups spans >1 source" — hence `load_cross_source_files`, which the
   folder rollup, `dup_annot.cross_dup` and `cross_dup_size_by_source` all take rather than deriving
-  themselves. Never rebuild it from a `HashMap<node_id, group_id>`: collapsing a file to one
+  themselves. It returns a `CrossSource`: membership, plus each file's *highest* cross-source group
+  confidence (the folder rollup's weight), both from the same pass. Never rebuild it from a `HashMap<node_id, group_id>`: collapsing a file to one
   arbitrary group, and then deriving each group's source set from that collapsed map, silently
   loses cross-ness from both ends and marks genuine duplicates exclusive-to-this-device (it was
   mislabelling 2,562 of 30,696 files, with no false positives to make it visible).

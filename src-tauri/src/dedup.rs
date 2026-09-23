@@ -785,7 +785,8 @@ pub fn run_with_progress(
         &rollup_parent_of,
         &rollup_cross_source,
     )?;
-    let listing_groups = super::rollup::compute_listing_hashes(conn, workspace_id)?;
+    let listing_groups =
+        super::rollup::compute_listing_hashes(conn, workspace_id, params.min_size_bytes)?;
 
     // Rebuild the per-node duplicate annotation cache so tree browsing is fast.
     on_phase("annotating", 4, TOTAL_PHASES);
@@ -1181,9 +1182,13 @@ mod tests {
 
         let tree = r#"[{"type":"directory","name":"/vol","dev":10,"contents":[
             {"type":"directory","name":"photos","dev":10,"contents":[
-                {"type":"file","name":"p.jpg","inode":2,"dev":10,"size":500000,"time":"2024-01-01_10:00:00"}
+                {"type":"file","name":"p.jpg","inode":2,"dev":10,"size":500000,"time":"2024-01-01_10:00:00"},
+                {"type":"file","name":"q.jpg","inode":3,"dev":10,"size":500000,"time":"2024-01-01_10:00:00"}
             ]}
         ]}]"#;
+        // Two files, not one: the listing pass skips a folder holding a single
+        // name, so with one file the listing half of this test would pass
+        // whether or not the excluded source were filtered.
 
         let mut source_id = |label: &str, dev: i64| -> i64 {
             let flat =

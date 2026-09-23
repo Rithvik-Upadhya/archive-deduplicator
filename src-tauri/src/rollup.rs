@@ -37,20 +37,33 @@ pub(crate) fn build_folder_groups(
     build_folder_groups_with(conn, workspace_id, &files, &parent_of, &cross_source)
 }
 
+/// A directory that passed the folder rollup's 80% test.
+struct DupDir {
+    id: i64,
+    /// Subtree file bytes.
+    total: i64,
+    /// Of those, bytes in cross-source file groups.
+    dup: i64,
+    /// `dup`, each file's bytes weighted by its best cross-source confidence.
+    weighted: f64,
+}
+
 pub(crate) fn build_folder_groups_with(
     conn: &mut Connection,
     workspace_id: i64,
     files: &[FileLoc],
     parent_of: &HashMap<i64, Option<i64>>,
-    cross_source: &HashSet<i64>,
+    cross_source: &CrossSource,
 ) -> rusqlite::Result<usize> {
     let source_of = load_source_of(conn, workspace_id)?;
 
-    // For each directory: total subtree file bytes, and duplicated bytes (files
-    // whose match group also contains a file from a different source), plus the
-    // set of "partner" directories those matched files live in.
+    // For each directory: total subtree file bytes, duplicated bytes (files
+    // whose match group also contains a file from a different source), and
+    // those duplicated bytes weighted by each file's best cross-source
+    // confidence -- the numerator of the group's confidence below.
     let mut dir_total: HashMap<i64, i64> = HashMap::new();
     let mut dir_dup: HashMap<i64, i64> = HashMap::new();
+    let mut dir_dup_weighted: HashMap<i64, f64> = HashMap::new();
 
     for f in files {
         // Accumulate this file's size into every ancestor directory's total.
@@ -62,10 +75,11 @@ pub(crate) fn build_folder_groups_with(
         // Is this file duplicated across sources? See
         // `load_cross_source_files` for why this must consider *every* group
         // the file belongs to, not one of them.
-        if cross_source.contains(&f.node_id) {
+        if let Some(conf) = cross_source.confidence(f.node_id) {
             let mut cur = f.parent_id;
             while let Some(dir) = cur {
                 *dir_dup.entry(dir).or_insert(0) += f.size;
+                *dir_dup_weighted.entry(dir).or_insert(0.0) += f.size as f64 * conf;
                 cur = parent_of.get(&dir).copied().flatten();
             }
         }
@@ -73,23 +87,30 @@ pub(crate) fn build_folder_groups_with(
 
     // A directory qualifies as a "duplicated folder" when >= 80% of its subtree
     // bytes are cross-source duplicated and it holds a meaningful amount of data.
-    let mut dup_dirs: Vec<(i64, f64, i64)> = Vec::new(); // (dir_id, pct, total)
+    // That 80% decides *whether* a folder is reported; how *sure* the report is
+    // comes from the evidence beneath it (see the confidence below).
+    let mut dup_dirs: Vec<DupDir> = Vec::new();
     for (dir, total) in &dir_total {
         if *total <= 0 {
             continue;
         }
         let dup = *dir_dup.get(dir).unwrap_or(&0);
-        let pct = dup as f64 / *total as f64 * 100.0;
-        if pct >= 80.0 {
-            dup_dirs.push((*dir, pct, *total));
+        if dup as f64 / *total as f64 >= 0.8 {
+            dup_dirs.push(DupDir {
+                id: *dir,
+                total: *total,
+                dup,
+                weighted: *dir_dup_weighted.get(dir).unwrap_or(&0.0),
+            });
         }
     }
 
     // Cluster duplicated directories that share the same basename across
     // different sources into folder groups.
     let dir_names = load_dir_names(conn, workspace_id)?;
-    let mut by_name: HashMap<String, Vec<(i64, f64, i64)>> = HashMap::new();
-    for (dir, pct, total) in dup_dirs {
+    let mut by_name: HashMap<String, Vec<DupDir>> = HashMap::new();
+    for d in dup_dirs {
+        let dir = d.id;
         // Skip a directory if its own parent is also a fully-duplicated dir, to
         // report duplication at the highest folder level rather than every level.
         if let Some(Some(parent)) = parent_of.get(&dir).copied()
@@ -102,10 +123,7 @@ pub(crate) fn build_folder_groups_with(
             }
         }
         if let Some(name) = dir_names.get(&dir) {
-            by_name
-                .entry(name.to_lowercase())
-                .or_default()
-                .push((dir, pct, total));
+            by_name.entry(name.to_lowercase()).or_default().push(d);
         }
     }
 
@@ -115,27 +133,36 @@ pub(crate) fn build_folder_groups_with(
         // Need the same-named folder present in at least two different sources.
         let distinct_sources: HashSet<i64> = dirs
             .iter()
-            .filter_map(|(d, _, _)| source_of.get(d).copied())
+            .filter_map(|d| source_of.get(&d.id).copied())
             .collect();
         if dirs.len() < 2 || distinct_sources.len() < 2 {
             continue;
         }
-        dirs.sort_by_key(|d| std::cmp::Reverse(d.2));
-        let avg_pct = dirs.iter().map(|d| d.1).sum::<f64>() / dirs.len() as f64;
-        let max_total = dirs.iter().map(|d| d.2).max().unwrap_or(0);
+        dirs.sort_by_key(|d| std::cmp::Reverse(d.total));
+        // Confidence is the byte-weighted mean of the cross-source file
+        // matches beneath the member folders -- mostly hash-backed reads ~100,
+        // mostly tier-E reads ~45. It used to be the average *coverage*
+        // (80-100), which scored a folder backed only by 45% matches the same
+        // as a full-content hash and made the min-confidence cutoff meaningless
+        // for folders. Coverage is still shown, as `dup_annot.dup_pct`. Every
+        // member passed the 80% test with a positive total, so `dup > 0`.
+        let dup_bytes: i64 = dirs.iter().map(|d| d.dup).sum();
+        let weighted: f64 = dirs.iter().map(|d| d.weighted).sum();
+        let confidence = weighted / dup_bytes as f64;
+        let max_total = dirs.iter().map(|d| d.total).max().unwrap_or(0);
 
         tx.execute(
             "INSERT INTO match_groups (workspace_id, kind, confidence, primary_signal, size)
              VALUES (?1, 'folder', ?2, 'folder', ?3)",
-            params![workspace_id, avg_pct, max_total],
+            params![workspace_id, confidence, max_total],
         )?;
         let gid = tx.last_insert_rowid();
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO match_members (group_id, node_id, role) VALUES (?1, ?2, 'member')",
             )?;
-            for (dir, _, _) in &dirs {
-                stmt.execute(params![gid, dir])?;
+            for d in &dirs {
+                stmt.execute(params![gid, d.id])?;
             }
         }
         count += 1;
@@ -165,11 +192,14 @@ fn mtime_norm_secs(mtime: Option<&str>) -> i64 {
     secs - secs.rem_euclid(2)
 }
 
-/// Confidence assigned to a listing-hash folder match: structural-only
-/// evidence (no byte content verified), stronger than a bare `dup_pct`
-/// heuristic but never "Confirmed" -- placed between tier D (55) and tier C
-/// (70) in `dedup.rs`'s metadata scale.
-const LISTING_HASH_CONFIDENCE: f64 = 60.0;
+/// Confidence assigned to a listing-hash folder match: equal to tier C in
+/// `dedup.rs`'s metadata scale, because a match means *every* file in the
+/// subtree agrees on name, size and 2s-rounded mtime -- tier-C evidence for
+/// each one -- and the structure agrees too. Never "Confirmed": no byte
+/// content is verified. It was 60, below a single tier-C file, which
+/// undersold every real match; the trivial matches that 60 was hedging
+/// against are now kept out by the content guard in `compute_listing_hashes`.
+const LISTING_HASH_CONFIDENCE: f64 = 70.0;
 
 /// Compute a Merkle-style structural fingerprint for every directory in the
 /// workspace, then cluster directories sharing an identical fingerprint
@@ -186,7 +216,18 @@ const LISTING_HASH_CONFIDENCE: f64 = 60.0;
 /// (never-hashed) files, and renamed-but-otherwise-identical folders (the
 /// heuristic requires matching basenames; this doesn't care what a folder
 /// is named, only what it contains).
-pub fn compute_listing_hashes(conn: &mut Connection, workspace_id: i64) -> rusqlite::Result<usize> {
+///
+/// A folder only seeds a group when its subtree holds at least two names and
+/// at least `min_size_bytes` of file data. Structure alone is no evidence for
+/// a folder holding one tiny file: every `desktop.ini`-only folder in the
+/// workspace would otherwise match every other at tier-C confidence.
+/// `min_size_bytes` is the user's matching threshold, so a folder too small
+/// to hold one matchable file is not matched as a whole either.
+pub fn compute_listing_hashes(
+    conn: &mut Connection,
+    workspace_id: i64,
+    min_size_bytes: i64,
+) -> rusqlite::Result<usize> {
     struct DirNode {
         id: i64,
         parent_id: Option<i64>,
@@ -279,6 +320,10 @@ pub fn compute_listing_hashes(conn: &mut Connection, workspace_id: i64) -> rusql
 
     let mut listing_hash: Vec<[u8; 32]> = vec![[0u8; 32]; dirs.len()];
     let mut nonempty: Vec<bool> = vec![false; dirs.len()];
+    // Subtree totals over exactly what the hash reads (canonical files and
+    // symlinks), for the content guard and the group's size.
+    let mut sub_names: Vec<i64> = vec![0; dirs.len()];
+    let mut sub_bytes: Vec<i64> = vec![0; dirs.len()];
     for i in order {
         let dir_id = dirs[i].id;
         // (sort key, hash-input bytes) per immediate child, so the final
@@ -292,6 +337,8 @@ pub fn compute_listing_hashes(conn: &mut Connection, workspace_id: i64) -> rusql
                 bytes.extend_from_slice(&size.to_le_bytes());
                 bytes.extend_from_slice(&mtime_norm_secs(mtime.as_deref()).to_le_bytes());
                 entries.push((name.clone(), bytes));
+                sub_names[i] += 1;
+                sub_bytes[i] += size;
             }
         }
         if let Some(links) = links_by_parent.get(&dir_id) {
@@ -301,6 +348,7 @@ pub fn compute_listing_hashes(conn: &mut Connection, workspace_id: i64) -> rusql
                 bytes.extend_from_slice(name.as_bytes());
                 bytes.extend_from_slice(link_target.as_deref().unwrap_or_default().as_bytes());
                 entries.push((name.clone(), bytes));
+                sub_names[i] += 1;
             }
         }
         if let Some(child_idxs) = children_dirs.get(&dir_id) {
@@ -310,6 +358,9 @@ pub fn compute_listing_hashes(conn: &mut Connection, workspace_id: i64) -> rusql
                 bytes.extend_from_slice(dirs[ci].name.as_bytes());
                 bytes.extend_from_slice(&listing_hash[ci]);
                 entries.push((dirs[ci].name.clone(), bytes));
+                // Children sort deeper, so their totals are already final.
+                sub_names[i] += sub_names[ci];
+                sub_bytes[i] += sub_bytes[ci];
             }
         }
         nonempty[i] = !entries.is_empty();
@@ -345,10 +396,22 @@ pub fn compute_listing_hashes(conn: &mut Connection, workspace_id: i64) -> rusql
         if !nonempty[i] {
             continue;
         }
+        // Too little content for structure to mean anything (see the doc
+        // comment). A parent's totals are >= its child's, so a folder that
+        // passes this implies its parent does too, and the root-only
+        // emission below is unaffected.
+        if sub_names[i] < 2 || sub_bytes[i] < min_size_bytes {
+            continue;
+        }
         by_hash.entry(listing_hash[i]).or_default().push(d.id);
     }
 
     let dir_parent: HashMap<i64, Option<i64>> = dirs.iter().map(|d| (d.id, d.parent_id)).collect();
+    let dir_bytes: HashMap<i64, i64> = dirs
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (d.id, sub_bytes[i]))
+        .collect();
 
     // A parent directory's fingerprint folds in its children's fingerprints,
     // so a matched root also makes every directory beneath it match -- that
@@ -398,10 +461,18 @@ pub fn compute_listing_hashes(conn: &mut Connection, workspace_id: i64) -> rusql
         if distinct_sources.len() < 2 {
             continue;
         }
+        // Sized like the byte-overlap groups (largest member's subtree bytes)
+        // so the group list's min-size filter treats both kinds alike. It was
+        // 0, which hid every listing group under the default 64 KB filter.
+        let size = root_ids
+            .iter()
+            .filter_map(|d| dir_bytes.get(d).copied())
+            .max()
+            .unwrap_or(0);
         tx.execute(
             "INSERT INTO match_groups (workspace_id, kind, confidence, primary_signal, size)
-             VALUES (?1, 'folder', ?2, 'listing', 0)",
-            params![workspace_id, LISTING_HASH_CONFIDENCE],
+             VALUES (?1, 'folder', ?2, 'listing', ?3)",
+            params![workspace_id, LISTING_HASH_CONFIDENCE, size],
         )?;
         let gid = tx.last_insert_rowid();
         {
@@ -418,9 +489,13 @@ pub fn compute_listing_hashes(conn: &mut Connection, workspace_id: i64) -> rusql
     Ok(count)
 }
 
-/// Node ids of files sitting in at least one *cross-source* `kind='file'` match
-/// group -- the set backing both the folder rollup's 80%-overlap heuristic and
-/// `dup_annot.cross_dup` (the "exclusive to this device" funnel).
+/// Files sitting in at least one *cross-source* `kind='file'` match group --
+/// the set backing both the folder rollup's 80%-overlap heuristic and
+/// `dup_annot.cross_dup` (the "exclusive to this device" funnel) -- each with
+/// the highest confidence among those cross-source groups: how sure we are
+/// that the file exists elsewhere, which the folder rollup weights its
+/// confidence by. Membership and confidence come from the same pass, so the
+/// two can never disagree about which files count.
 ///
 /// Built from the raw `match_members` rows, and it must stay that way. A file
 /// can legitimately belong to several groups across tiers (a tier-C match with
@@ -434,14 +509,18 @@ pub fn compute_listing_hashes(conn: &mut Connection, workspace_id: i64) -> rusql
 /// was silent: 2,562 of 30,696 canonical files marked exclusive-to-this-device
 /// while sitting in a cross-source group, with no false positives to notice.
 ///
+/// The confidence is a maximum over **every** cross-source group the file is
+/// in, for the same reason: taking it from one arbitrary group would score a
+/// file hash-matched on another device by its weakest pairing instead.
+///
 /// `s.excluded = 0` mirrors `load_file_locs`: a hidden source must not be able
 /// to make a group look cross-source.
 pub(crate) fn load_cross_source_files(
     conn: &Connection,
     workspace_id: i64,
-) -> rusqlite::Result<HashSet<i64>> {
+) -> rusqlite::Result<CrossSource> {
     let mut stmt = conn.prepare(
-        "SELECT mm.node_id, mm.group_id, n.source_id FROM match_members mm
+        "SELECT mm.node_id, mm.group_id, n.source_id, mg.confidence FROM match_members mm
          JOIN match_groups mg ON mg.id = mm.group_id
          JOIN nodes n ON n.id = mm.node_id
          JOIN sources s ON s.id = n.source_id
@@ -452,22 +531,29 @@ pub(crate) fn load_cross_source_files(
             r.get::<_, i64>(0)?,
             r.get::<_, i64>(1)?,
             r.get::<_, i64>(2)?,
+            r.get::<_, f64>(3)?,
         ))
     })?;
     let mut group_sources: HashMap<i64, HashSet<i64>> = HashMap::new();
-    let mut node_groups: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut node_groups: HashMap<i64, Vec<(i64, f64)>> = HashMap::new();
     for row in rows {
-        let (node_id, group_id, source_id) = row?;
+        let (node_id, group_id, source_id, confidence) = row?;
         group_sources.entry(group_id).or_default().insert(source_id);
-        node_groups.entry(node_id).or_default().push(group_id);
+        node_groups
+            .entry(node_id)
+            .or_default()
+            .push((group_id, confidence));
     }
-    let mut cross: HashSet<i64> = node_groups
+    let mut cross: HashMap<i64, f64> = node_groups
         .into_iter()
-        .filter(|(_, gids)| {
-            gids.iter()
-                .any(|g| group_sources.get(g).map(|s| s.len() > 1).unwrap_or(false))
+        .filter_map(|(node_id, groups)| {
+            groups
+                .iter()
+                .filter(|(g, _)| group_sources.get(g).map(|s| s.len() > 1).unwrap_or(false))
+                .map(|&(_, confidence)| confidence)
+                .reduce(f64::max)
+                .map(|best| (node_id, best))
         })
-        .map(|(node_id, _)| node_id)
         .collect();
 
     // Hardlink aliases inherit their canonical's answer, *here*, so that every
@@ -487,11 +573,28 @@ pub(crate) fn load_cross_source_files(
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (alias_id, canonical_id) in &aliases {
-        if cross.contains(canonical_id) {
-            cross.insert(*alias_id);
+        if let Some(&confidence) = cross.get(canonical_id) {
+            cross.insert(*alias_id, confidence);
         }
     }
-    Ok(cross)
+    Ok(CrossSource(cross))
+}
+
+/// The answer of `load_cross_source_files`: which nodes have a duplicate on
+/// another source, and the best confidence for that.
+pub(crate) struct CrossSource(HashMap<i64, f64>);
+
+impl CrossSource {
+    /// Whether the node is duplicated on another source.
+    pub(crate) fn contains(&self, node_id: &i64) -> bool {
+        self.0.contains_key(node_id)
+    }
+
+    /// The highest confidence among the node's cross-source groups, or
+    /// `None` when it has none.
+    pub(crate) fn confidence(&self, node_id: i64) -> Option<f64> {
+        self.0.get(&node_id).copied()
+    }
 }
 
 pub(crate) fn load_file_locs(
@@ -838,7 +941,7 @@ pub(crate) fn rebuild_annotations_with(
     workspace_id: i64,
     files: &[FileLoc],
     parent_of: &HashMap<i64, Option<i64>>,
-    cross_source: &HashSet<i64>,
+    cross_source: &CrossSource,
     skipped: &HashSet<i64>,
 ) -> rusqlite::Result<()> {
     // A file is a duplicate when its group has >= 2 members anywhere (cross-
@@ -1881,6 +1984,19 @@ mod tests {
         conn.last_insert_rowid()
     }
 
+    /// A second file beside the `a.jpg` the listing fixtures insert, for tests
+    /// that need a folder past the content guard (>= 2 names).
+    fn insert_second_file(conn: &Connection, source_id: i64, parent_id: i64) {
+        insert_file_with_mtime(
+            conn,
+            source_id,
+            Some(parent_id),
+            "b.jpg",
+            200,
+            Some("2024-01-01_10:00:00"),
+        );
+    }
+
     fn listing_hash_of(conn: &Connection, node_id: i64) -> Vec<u8> {
         conn.query_row(
             "SELECT listing_hash FROM nodes WHERE id = ?1",
@@ -1911,8 +2027,12 @@ mod tests {
             100,
             Some("2024-01-01_10:00:00"),
         );
+        // A second file, so the content guard (>= 2 names) is not what
+        // decides this test.
+        insert_second_file(&conn, src_a, dir_a);
+        insert_second_file(&conn, src_b, dir_b);
 
-        compute_listing_hashes(&mut conn, ws).unwrap();
+        compute_listing_hashes(&mut conn, ws, 0).unwrap();
         assert_eq!(listing_hash_of(&conn, dir_a), listing_hash_of(&conn, dir_b));
 
         let listing_groups: i64 = conn
@@ -1950,8 +2070,12 @@ mod tests {
             100,
             Some("2024-01-01_10:00:00"),
         );
+        // A second file, so the content guard (>= 2 names) is not what
+        // decides this test.
+        insert_second_file(&conn, src_a, dir_a);
+        insert_second_file(&conn, src_b, dir_b);
 
-        compute_listing_hashes(&mut conn, ws).unwrap();
+        compute_listing_hashes(&mut conn, ws, 0).unwrap();
         assert_eq!(listing_hash_of(&conn, dir_a), listing_hash_of(&conn, dir_b));
 
         let listing_groups: i64 = conn
@@ -1989,7 +2113,7 @@ mod tests {
             Some("2024-01-01_10:00:00"),
         );
 
-        compute_listing_hashes(&mut conn, ws).unwrap();
+        compute_listing_hashes(&mut conn, ws, 0).unwrap();
         assert_ne!(listing_hash_of(&conn, dir_a), listing_hash_of(&conn, dir_b));
     }
 
@@ -2015,7 +2139,7 @@ mod tests {
             Some("2024-01-01_10:00:01"), // 1s -- within the same 2s bucket
         );
 
-        compute_listing_hashes(&mut conn, ws).unwrap();
+        compute_listing_hashes(&mut conn, ws, 0).unwrap();
         assert_eq!(
             listing_hash_of(&conn, dir_a),
             listing_hash_of(&conn, dir_b),
@@ -2048,7 +2172,7 @@ mod tests {
             Some("2024-01-01_11:00:00"),
         );
 
-        compute_listing_hashes(&mut conn, ws).unwrap();
+        compute_listing_hashes(&mut conn, ws, 0).unwrap();
         assert_ne!(listing_hash_of(&conn, dir_a), listing_hash_of(&conn, dir_b));
     }
 
@@ -2073,8 +2197,12 @@ mod tests {
             100,
             Some("2024-01-01_10:00:00"),
         );
+        // A second file, so the content guard (>= 2 names) is not what
+        // decides this test.
+        insert_second_file(&conn, src_a, dir1);
+        insert_second_file(&conn, src_a, dir2);
 
-        let count = compute_listing_hashes(&mut conn, ws).unwrap();
+        let count = compute_listing_hashes(&mut conn, ws, 0).unwrap();
         assert_eq!(
             count, 0,
             "two identical directories within a single source must not form a listing group"
@@ -2087,7 +2215,7 @@ mod tests {
         insert_node(&conn, src_a, None, "empty1", "directory", 0);
         insert_node(&conn, src_b, None, "empty2", "directory", 0);
 
-        let count = compute_listing_hashes(&mut conn, ws).unwrap();
+        let count = compute_listing_hashes(&mut conn, ws, 0).unwrap();
         assert_eq!(
             count, 0,
             "two unrelated empty directories must never be treated as a structural match"
@@ -2121,8 +2249,12 @@ mod tests {
             100,
             Some("2024-01-01_10:00:00"),
         );
+        // A second file, so the content guard (>= 2 names) is not what
+        // decides this test.
+        insert_second_file(&conn, src_a, year_a);
+        insert_second_file(&conn, src_b, year_b);
 
-        let count = compute_listing_hashes(&mut conn, ws).unwrap();
+        let count = compute_listing_hashes(&mut conn, ws, 0).unwrap();
         assert_eq!(
             count, 1,
             "a 2-level identical tree must emit exactly one listing group, not one per level"
@@ -2171,13 +2303,17 @@ mod tests {
             100,
             Some("2024-01-01_10:00:00"),
         );
+        // A second file, so the content guard (>= 2 names) is not what
+        // decides this test.
+        insert_second_file(&conn, src_a, dir_a);
+        insert_second_file(&conn, src_b, dir_b);
         conn.execute(
             "UPDATE sources SET excluded = 1 WHERE id = ?1",
             params![src_a],
         )
         .unwrap();
 
-        let count = compute_listing_hashes(&mut conn, ws).unwrap();
+        let count = compute_listing_hashes(&mut conn, ws, 0).unwrap();
         assert_eq!(
             count, 0,
             "the excluded source must not count toward the 2-source gate"
@@ -2233,11 +2369,151 @@ mod tests {
         // structurally different and must not cluster.
         insert_node(&conn, src_a, Some(dir_a), "link.jpg", "link", 0);
 
-        compute_listing_hashes(&mut conn, ws).unwrap();
+        compute_listing_hashes(&mut conn, ws, 0).unwrap();
         assert_ne!(
             listing_hash_of(&conn, dir_a),
             listing_hash_of(&conn, dir_b),
             "a directory with a symlink must not hash identically to one without"
         );
+    }
+
+    fn insert_file_group_at(conn: &Connection, ws: i64, confidence: f64, member_ids: &[i64]) {
+        conn.execute(
+            "INSERT INTO match_groups (workspace_id, kind, confidence, primary_signal, size)
+             VALUES (?1, 'file', ?2, 'test', 0)",
+            params![ws, confidence],
+        )
+        .unwrap();
+        let gid = conn.last_insert_rowid();
+        for id in member_ids {
+            conn.execute(
+                "INSERT INTO match_members (group_id, node_id, role) VALUES (?1, ?2, 'member')",
+                params![gid, id],
+            )
+            .unwrap();
+        }
+    }
+
+    /// `(confidence, size)` of the workspace's only group with this signal.
+    fn only_group(conn: &Connection, ws: i64, signal: &str) -> (f64, i64) {
+        conn.query_row(
+            "SELECT confidence, size FROM match_groups
+             WHERE workspace_id = ?1 AND primary_signal = ?2",
+            params![ws, signal],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn folder_group_confidence_is_byte_weighted_by_the_evidence_beneath_it() {
+        // Both folders are 100% duplicated, so the old coverage-based score
+        // read 100. But a tenth of the bytes rest on a 45% match, and the
+        // confidence must say so: (900*100 + 100*45) / 1000 = 94.5.
+        let (mut conn, ws, src_a, src_b) = setup();
+        let dir_a = insert_node(&conn, src_a, None, "photos", "directory", 0);
+        let dir_b = insert_node(&conn, src_b, None, "photos", "directory", 0);
+        let big_a = insert_node(&conn, src_a, Some(dir_a), "big.raw", "file", 900);
+        let big_b = insert_node(&conn, src_b, Some(dir_b), "big.raw", "file", 900);
+        let small_a = insert_node(&conn, src_a, Some(dir_a), "small.jpg", "file", 100);
+        let small_b = insert_node(&conn, src_b, Some(dir_b), "other.jpg", "file", 100);
+        insert_file_group_at(&conn, ws, 100.0, &[big_a, big_b]);
+        insert_file_group_at(&conn, ws, 45.0, &[small_a, small_b]);
+
+        build_folder_groups(&mut conn, ws).unwrap();
+        let (confidence, size) = only_group(&conn, ws, "folder");
+        assert!(
+            (confidence - 94.5).abs() < 1e-9,
+            "expected 94.5, got {confidence}"
+        );
+        assert_eq!(size, 1000);
+    }
+
+    #[test]
+    fn cross_source_confidence_is_the_best_cross_source_group_only() {
+        // `a` is in three groups: a cross-source one at 45, another
+        // cross-source one at 100, and an internal one at 100. Its answer is
+        // the best *cross-source* group -- the fixture shape the many-to-many
+        // bugs needed, a file in more than one group.
+        let (conn, ws, src_a, src_b) = setup();
+        let a = insert_node(&conn, src_a, None, "a.jpg", "file", 100);
+        let b = insert_node(&conn, src_b, None, "b.jpg", "file", 100);
+        let c = insert_node(&conn, src_b, None, "a.jpg", "file", 100);
+        let a2 = insert_node(&conn, src_a, None, "a_copy.jpg", "file", 100);
+        let d = insert_node(&conn, src_a, None, "d.jpg", "file", 100);
+        let e = insert_node(&conn, src_b, None, "e.jpg", "file", 100);
+        let d2 = insert_node(&conn, src_a, None, "d_copy.jpg", "file", 100);
+        insert_file_group_at(&conn, ws, 45.0, &[a, b]);
+        insert_file_group_at(&conn, ws, 100.0, &[a, c]);
+        insert_file_group_at(&conn, ws, 100.0, &[a, a2]);
+        // `d` is cross-source only at 45; its internal 100 must not lift it.
+        insert_file_group_at(&conn, ws, 45.0, &[d, e]);
+        insert_file_group_at(&conn, ws, 100.0, &[d, d2]);
+
+        let cross = load_cross_source_files(&conn, ws).unwrap();
+        assert_eq!(cross.confidence(a), Some(100.0));
+        assert_eq!(cross.confidence(b), Some(45.0));
+        assert_eq!(cross.confidence(d), Some(45.0));
+        assert_eq!(cross.confidence(a2), None, "internal-only is not cross-source");
+    }
+
+    #[test]
+    fn an_alias_inherits_its_canonicals_cross_source_confidence() {
+        let (conn, ws, src_a, src_b) = setup();
+        let canonical = insert_node(&conn, src_a, None, "shared.jpg", "file", 100);
+        let alias = insert_alias(&conn, src_a, None, "shared_link.jpg", 100, canonical);
+        let other = insert_node(&conn, src_b, None, "shared.jpg", "file", 100);
+        insert_file_group_at(&conn, ws, 55.0, &[canonical, other]);
+
+        let cross = load_cross_source_files(&conn, ws).unwrap();
+        assert_eq!(cross.confidence(alias), Some(55.0));
+    }
+
+    /// Two structurally identical folders on two sources, each holding
+    /// `files` (name, size) with one shared mtime.
+    fn listing_pair(files: &[(&str, i64)]) -> (Connection, i64) {
+        let (conn, ws, src_a, src_b) = setup();
+        for src in [src_a, src_b] {
+            let dir = insert_node(&conn, src, None, "folder", "directory", 0);
+            for (name, size) in files {
+                insert_file_with_mtime(
+                    &conn,
+                    src,
+                    Some(dir),
+                    name,
+                    *size,
+                    Some("2024-01-01_10:00:00"),
+                );
+            }
+        }
+        (conn, ws)
+    }
+
+    #[test]
+    fn a_single_file_folder_never_forms_a_listing_group() {
+        // Two folders each holding just a `desktop.ini`: structure says
+        // nothing here, and at tier-C confidence it would say it loudly.
+        let (mut conn, ws) = listing_pair(&[("desktop.ini", 282)]);
+        assert_eq!(compute_listing_hashes(&mut conn, ws, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_listing_group_needs_min_size_bytes_of_content() {
+        let (mut conn, ws) = listing_pair(&[("a.jpg", 100), ("b.jpg", 200)]);
+        assert_eq!(
+            compute_listing_hashes(&mut conn, ws, 301).unwrap(),
+            0,
+            "300 bytes is under a 301-byte threshold"
+        );
+        assert_eq!(compute_listing_hashes(&mut conn, ws, 300).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_listing_group_scores_tier_c_and_is_sized_by_its_subtree() {
+        // Sized 0, a listing group was hidden by the default 64 KB filter in
+        // the group list; it now carries its subtree's bytes.
+        let (mut conn, ws) = listing_pair(&[("a.jpg", 100), ("b.jpg", 200)]);
+        compute_listing_hashes(&mut conn, ws, 0).unwrap();
+        assert_eq!(only_group(&conn, ws, "listing"), (70.0, 300));
     }
 }
