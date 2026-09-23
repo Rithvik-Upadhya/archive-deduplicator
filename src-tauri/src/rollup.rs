@@ -2253,6 +2253,16 @@ mod tests {
         // decides this test.
         insert_second_file(&conn, src_a, year_a);
         insert_second_file(&conn, src_b, year_b);
+        // `insert_node` leaves `depth` at 0, but the hash pass visits
+        // directories deepest-first by that column, as real imports set it.
+        // Without this, `photos` was hashed before `2024` and folded in a
+        // zeroed child hash and zeroed totals -- equal on both sources, so
+        // the test used to pass without the nesting ever being exercised.
+        conn.execute(
+            "UPDATE nodes SET depth = 1 WHERE id IN (?1, ?2)",
+            params![year_a, year_b],
+        )
+        .unwrap();
 
         let count = compute_listing_hashes(&mut conn, ws, 0).unwrap();
         assert_eq!(
@@ -2454,7 +2464,11 @@ mod tests {
         assert_eq!(cross.confidence(a), Some(100.0));
         assert_eq!(cross.confidence(b), Some(45.0));
         assert_eq!(cross.confidence(d), Some(45.0));
-        assert_eq!(cross.confidence(a2), None, "internal-only is not cross-source");
+        assert_eq!(
+            cross.confidence(a2),
+            None,
+            "internal-only is not cross-source"
+        );
     }
 
     #[test]
