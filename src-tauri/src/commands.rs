@@ -1137,10 +1137,13 @@ pub fn consolidation_get(
         .prepare(
             "SELECT cn.id, cn.consolidation_id, cn.parent_id, cn.name, cn.type,
                     cn.source_node_id, cn.sort_order, n.size, s.device_label, n.rel_path,
-                    n.alias_of IS NOT NULL, s.id
+                    n.alias_of IS NOT NULL, s.id, cn.done, cn.struck, ps.original_name
              FROM consolidation_nodes cn
              LEFT JOIN nodes n ON n.id = cn.source_node_id
              LEFT JOIN sources s ON s.id = n.source_id
+             LEFT JOIN consolidations c ON c.id = cn.consolidation_id
+             LEFT JOIN pathfix_state ps ON ps.workspace_id = c.workspace_id
+                  AND ps.kind = 'cons' AND ps.ref_id = cn.id AND ps.new_name != ''
              WHERE cn.consolidation_id = ?1
              ORDER BY cn.parent_id, cn.sort_order",
         )
@@ -1165,6 +1168,9 @@ pub fn consolidation_get(
                 origin_path: r.get(9)?,
                 is_alias: r.get::<_, Option<bool>>(10)?.unwrap_or(false),
                 origin_source_id: r.get(11)?,
+                done: r.get(12)?,
+                struck: r.get(13)?,
+                original_name: r.get(14)?,
             })
         })
         .map_err(map_err)?
@@ -1201,10 +1207,13 @@ pub fn consolidation_add_node(
     conn.query_row(
         "SELECT cn.id, cn.consolidation_id, cn.parent_id, cn.name, cn.type,
                 cn.source_node_id, cn.sort_order, n.size, s.device_label, n.rel_path,
-                    n.alias_of IS NOT NULL, s.id
+                    n.alias_of IS NOT NULL, s.id, cn.done, cn.struck, ps.original_name
          FROM consolidation_nodes cn
          LEFT JOIN nodes n ON n.id = cn.source_node_id
          LEFT JOIN sources s ON s.id = n.source_id
+         LEFT JOIN consolidations c ON c.id = cn.consolidation_id
+         LEFT JOIN pathfix_state ps ON ps.workspace_id = c.workspace_id
+              AND ps.kind = 'cons' AND ps.ref_id = cn.id AND ps.new_name != ''
          WHERE cn.id = ?1",
         params![id],
         |r| {
@@ -1226,6 +1235,9 @@ pub fn consolidation_add_node(
                 origin_path: r.get(9)?,
                 is_alias: r.get::<_, Option<bool>>(10)?.unwrap_or(false),
                 origin_source_id: r.get(11)?,
+                done: r.get(12)?,
+                struck: r.get(13)?,
+                original_name: r.get(14)?,
             })
         },
     )
@@ -1273,34 +1285,58 @@ pub fn consolidation_move_node(
     Ok(())
 }
 
+/// Remove nodes (and, via `ON DELETE CASCADE`, everything beneath them) from
+/// the consolidated tree. Takes the selection's roots, so no id is reached by
+/// two routes.
 #[tauri::command]
-pub fn consolidation_rename_node(db: State<Db>, node_id: i64, name: String) -> CmdResult<()> {
-    let conn = db.lock();
-    conn.execute(
-        "UPDATE consolidation_nodes SET name = ?1 WHERE id = ?2",
-        params![name, node_id],
-    )
-    .map_err(map_err)?;
-    // Keep the Path-limits view in sync: it prefers pathfix_state.new_name
-    // over consolidation_nodes.name whenever a row exists (e.g. this node was
-    // already renamed once from that view). This UPDATE is a no-op when no
-    // such row exists yet, which is the common case.
-    conn.execute(
-        "UPDATE pathfix_state SET new_name = ?1 WHERE kind = 'cons' AND ref_id = ?2",
-        params![name, node_id],
-    )
-    .map_err(map_err)?;
+pub fn consolidation_delete_nodes(db: State<Db>, node_ids: Vec<i64>) -> CmdResult<()> {
+    let mut conn = db.lock();
+    let tx = conn.transaction().map_err(map_err)?;
+    {
+        let mut stmt = tx
+            .prepare("DELETE FROM consolidation_nodes WHERE id = ?1")
+            .map_err(map_err)?;
+        for id in node_ids {
+            stmt.execute(params![id]).map_err(map_err)?;
+        }
+    }
+    tx.commit().map_err(map_err)?;
     Ok(())
 }
 
+/// Set or clear the archivist's "done" mark on each of `node_ids`. Rows only
+/// -- `done` is not inherited, so the caller passes every row it means.
 #[tauri::command]
-pub fn consolidation_delete_node(db: State<Db>, node_id: i64) -> CmdResult<()> {
-    let conn = db.lock();
-    conn.execute(
-        "DELETE FROM consolidation_nodes WHERE id = ?1",
-        params![node_id],
-    )
-    .map_err(map_err)?;
+pub fn consolidation_set_done(db: State<Db>, node_ids: Vec<i64>, value: bool) -> CmdResult<()> {
+    let mut conn = db.lock();
+    let tx = conn.transaction().map_err(map_err)?;
+    {
+        let mut stmt = tx
+            .prepare("UPDATE consolidation_nodes SET done = ?1 WHERE id = ?2")
+            .map_err(map_err)?;
+        for id in node_ids {
+            stmt.execute(params![value, id]).map_err(map_err)?;
+        }
+    }
+    tx.commit().map_err(map_err)?;
+    Ok(())
+}
+
+/// Set or clear the "to delete" mark on each of `node_ids`. This writes the
+/// rows' own flag; descendants inherit it at read time.
+#[tauri::command]
+pub fn consolidation_set_struck(db: State<Db>, node_ids: Vec<i64>, value: bool) -> CmdResult<()> {
+    let mut conn = db.lock();
+    let tx = conn.transaction().map_err(map_err)?;
+    {
+        let mut stmt = tx
+            .prepare("UPDATE consolidation_nodes SET struck = ?1 WHERE id = ?2")
+            .map_err(map_err)?;
+        for id in node_ids {
+            stmt.execute(params![value, id]).map_err(map_err)?;
+        }
+    }
+    tx.commit().map_err(map_err)?;
     Ok(())
 }
 
@@ -1325,10 +1361,9 @@ pub fn pathfix_rename(
     workspace_id: i64,
     node_id: i64,
     new_name: String,
-) -> CmdResult<()> {
+) -> CmdResult<RenameResult> {
     let conn = db.lock();
-    pathfix::rename(&conn, workspace_id, node_id, &new_name).map_err(map_err)?;
-    Ok(())
+    pathfix::rename(&conn, workspace_id, node_id, &new_name).map_err(map_err)
 }
 
 // ---------------------------------------------------------------------------

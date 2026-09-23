@@ -206,6 +206,7 @@
         use:selectable={{
             selection,
             id: node.id,
+            parentId: node.parent_id,
             meta: {
                 name: node.name,
                 type: node.type,

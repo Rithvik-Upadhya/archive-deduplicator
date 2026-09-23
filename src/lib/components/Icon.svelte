@@ -10,12 +10,16 @@
     Adding an icon means adding its base name to `BASE` below; `IconName` is
     derived from that map, so `pnpm check` fails on any name that is used but not
     bundled.
+
+    The few glyphs Phosphor lacks live in `./icons/` as inline-SVG components
+    and are named `app:*` via `CUSTOM` below -- same compile-time check.
 -->
 <script lang="ts" module>
     import type { Component } from 'svelte';
     import ArrowCounterClockwise from 'phosphor-svelte/lib/ArrowCounterClockwise';
     import CaretRight from 'phosphor-svelte/lib/CaretRight';
     import CaretUpDown from 'phosphor-svelte/lib/CaretUpDown';
+    import Check from 'phosphor-svelte/lib/Check';
     import CheckCircle from 'phosphor-svelte/lib/CheckCircle';
     import CircleDashed from 'phosphor-svelte/lib/CircleDashed';
     import Copy from 'phosphor-svelte/lib/Copy';
@@ -44,18 +48,23 @@
     import Stack from 'phosphor-svelte/lib/Stack';
     import Sun from 'phosphor-svelte/lib/Sun';
     import Trash from 'phosphor-svelte/lib/Trash';
+    import Textbox from 'phosphor-svelte/lib/Textbox';
+    import TextStrikethrough from 'phosphor-svelte/lib/TextStrikethrough';
     import TreeStructure from 'phosphor-svelte/lib/TreeStructure';
     import TreeView from 'phosphor-svelte/lib/TreeView';
     import Warning from 'phosphor-svelte/lib/Warning';
     import WarningCircle from 'phosphor-svelte/lib/WarningCircle';
     import X from 'phosphor-svelte/lib/X';
     import XCircle from 'phosphor-svelte/lib/XCircle';
+    import FileCheck from './icons/FileCheck.svelte';
+    import FolderCheck from './icons/FolderCheck.svelte';
 
     /** Phosphor base name (the icon name minus its weight suffix) -> component. */
     const BASE = {
         'arrow-counter-clockwise': ArrowCounterClockwise,
         'caret-right': CaretRight,
         'caret-up-down': CaretUpDown,
+        check: Check,
         'check-circle': CheckCircle,
         'circle-dashed': CircleDashed,
         copy: Copy,
@@ -83,6 +92,8 @@
         'spinner-gap': SpinnerGap,
         stack: Stack,
         sun: Sun,
+        textbox: Textbox,
+        'text-strikethrough': TextStrikethrough,
         trash: Trash,
         'tree-structure': TreeStructure,
         'tree-view': TreeView,
@@ -94,6 +105,14 @@
 
     type BaseName = keyof typeof BASE;
 
+    /** Non-Phosphor glyphs (no weights), rendered with `class` only. */
+    const CUSTOM = {
+        'app:file-check': FileCheck,
+        'app:folder-check': FolderCheck,
+    };
+
+    type CustomName = keyof typeof CUSTOM;
+
     const WEIGHTS = ['thin', 'light', 'bold', 'fill', 'duotone'] as const;
     type Weight = (typeof WEIGHTS)[number];
 
@@ -101,7 +120,10 @@
      * Every icon name this app may use. Derived from `BASE`, so a name whose base
      * is not bundled is a type error rather than an icon that renders nothing.
      */
-    export type IconName = `ph:${BaseName}` | `ph:${BaseName}-${Weight}`;
+    export type IconName =
+        | `ph:${BaseName}`
+        | `ph:${BaseName}-${Weight}`
+        | CustomName;
 
     /**
      * The phosphor components all share one prop shape, but `BASE`'s inferred
@@ -115,6 +137,12 @@
     function resolve(
         name: IconName
     ): { Comp: IconComp; weight: string } | null {
+        if (name in CUSTOM) {
+            return {
+                Comp: CUSTOM[name as CustomName] as unknown as IconComp,
+                weight: 'regular',
+            };
+        }
         const raw: string = name.slice('ph:'.length);
         if (raw in BASE) {
             return { Comp: comp(raw as BaseName), weight: 'regular' };

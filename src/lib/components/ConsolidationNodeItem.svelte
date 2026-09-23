@@ -6,7 +6,8 @@
     import { consolidationTreeExpanded } from '$lib/stores/treeExpansion.svelte';
     import Self from './ConsolidationNodeItem.svelte';
     import SourceBarsCell from './SourceBarsCell.svelte';
-    import Icon from '$lib/components/Icon.svelte';
+    import NameMarks from './NameMarks.svelte';
+    import Icon, { type IconName } from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button';
     import { Input } from '$lib/components/ui/input';
 
@@ -20,9 +21,17 @@
         /** Path of a node within the consolidated tree, root-first. */
         pathOf: (id: number) => string[];
         selection: TreeSelection;
-        ondelete: (node: ConsolidationNode) => void;
+        /** Whether a row is struck itself or through an ancestor. */
+        isStruck: (id: number) => boolean;
+        /** Whether a row and every descendant are done. */
+        isFullyDone: (id: number) => boolean;
+        /** Renamed / struck items anywhere beneath a row. */
+        renamedBelowOf: (id: number) => number;
+        struckBelowOf: (id: number) => number;
         ondropInto: (parentId: number | null, e: DragEvent) => void;
         onrename: (node: ConsolidationNode, newName: string) => void;
+        /** Restore a renamed row's original name. */
+        onreset: (node: ConsolidationNode) => void;
     }
 
     let {
@@ -32,9 +41,13 @@
         barsOf,
         pathOf,
         selection,
-        ondelete,
+        isStruck,
+        isFullyDone,
+        renamedBelowOf,
+        struckBelowOf,
         ondropInto,
         onrename,
+        onreset,
     }: Props = $props();
 
     const isDir = $derived(node.type === 'directory');
@@ -48,6 +61,24 @@
         node.origin_device && node.origin_path
             ? `${node.origin_device}://${node.origin_path}`
             : node.name
+    );
+
+    const struck = $derived(isStruck(node.id));
+    const icon = $derived<IconName>(
+        node.done
+            ? isDir
+                ? 'app:folder-check'
+                : 'app:file-check'
+            : isDir
+              ? 'ph:folder-fill'
+              : 'ph:file-fill'
+    );
+    // Green only once the row *and* everything beneath it is done -- a ticked
+    // folder with outstanding contents keeps its tick icon but no tint. Fully
+    // done beats struck, so a to-delete row whose deletion is finished turns
+    // green (its strikethrough stays); otherwise struck is red.
+    const markTone = $derived(
+        isFullyDone(node.id) ? 'text-done' : struck ? 'text-struck' : ''
     );
 
     const expanded = $derived(consolidationTreeExpanded.has(node.id));
@@ -90,8 +121,7 @@
 
 <div class="text-sm">
     <div
-        class="group/row flex items-center gap-1.5 border border-transparent px-1.5 py-0.5 select-none data-[dir=true]:bg-muted/50 data-[drag=true]:border-brand data-[drag=true]:bg-brand/15 data-[selected=true]:bg-accent"
-        data-dir={isDir}
+        class="group/row flex items-center gap-1.5 border border-transparent px-1.5 py-0.5 select-none data-[drag=true]:border-brand data-[drag=true]:bg-brand/15 data-[selected=true]:bg-muted/50"
         data-drag={dragOver}
         data-selected={selection.isSelected(node.id)}
         draggable={!editing}
@@ -99,7 +129,7 @@
         aria-selected={selection.isSelected(node.id)}
         aria-expanded={isDir ? expanded : undefined}
         tabindex="0"
-        use:selectable={{ selection, id: node.id }}
+        use:selectable={{ selection, id: node.id, parentId: node.parent_id }}
         ondragstart={onDragStart}
         ondragover={e => {
             e.preventDefault();
@@ -126,8 +156,8 @@
             <Icon icon="ph:caret-right-bold" />
         </button>
         <Icon
-            icon={isDir ? 'ph:folder-fill' : 'ph:file-fill'}
-            class="shrink-0 text-muted-foreground" />
+            {icon}
+            class="shrink-0 {markTone || 'text-muted-foreground'}" />
 
         {#if editing}
             <!-- svelte-ignore a11y_autofocus -->
@@ -141,7 +171,17 @@
                     if (e.key === 'Escape') editing = false;
                 }} />
         {:else}
-            <span class="flex-1 truncate" title={origin}>{node.name}</span>
+            <span class="flex min-w-0 flex-1 items-center gap-1">
+                <span
+                    class="truncate {markTone}"
+                    class:line-through={struck}
+                    title={origin}>{node.name}</span>
+                <NameMarks
+                    original={node.original_name}
+                    renamedBelow={renamedBelowOf(node.id)}
+                    struckBelow={!struck && struckBelowOf(node.id) > 0}
+                    onreset={() => onreset(node)} />
+            </span>
         {/if}
 
         {#if isDir}
@@ -186,17 +226,6 @@
             }}>
             <Icon icon="ph:pencil-simple-fill" />
         </Button>
-        <Button
-            variant="ghost"
-            size="icon"
-            class="size-6 shrink-0 text-muted-foreground hover:text-destructive"
-            aria-label="Remove"
-            onclick={e => {
-                e.stopPropagation();
-                ondelete(node);
-            }}>
-            <Icon icon="ph:x-bold" />
-        </Button>
     </div>
 
     {#if isDir && expanded}
@@ -209,9 +238,13 @@
                     {barsOf}
                     {pathOf}
                     {selection}
-                    {ondelete}
+                    {isStruck}
+                    {isFullyDone}
+                    {renamedBelowOf}
+                    {struckBelowOf}
                     {ondropInto}
-                    {onrename} />
+                    {onrename}
+                    {onreset} />
             {/each}
         </div>
     {/if}

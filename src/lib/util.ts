@@ -274,3 +274,48 @@ export async function copyPath(
         return false;
     }
 }
+
+/**
+ * For every node matching `match`, adds 1 to the count of each of its
+ * ancestors -- so a row can say "N such items anywhere beneath me", even
+ * while collapsed. The one helper both consolidated trees use for their
+ * after-name indicators (renamed contents, struck contents). A node never
+ * counts toward itself.
+ */
+export function countBelow<T extends { id: number; parent_id: number | null }>(
+    nodes: T[],
+    match: (node: T) => boolean
+): Map<number, number> {
+    const parentOf = new Map(nodes.map(n => [n.id, n.parent_id]));
+    const counts = new Map<number, number>();
+    for (const n of nodes) {
+        if (!match(n)) continue;
+        let pid = n.parent_id;
+        // A malformed parent chain would otherwise spin forever inside a render.
+        const seen = new Set<number>();
+        while (pid != null && !seen.has(pid)) {
+            seen.add(pid);
+            counts.set(pid, (counts.get(pid) ?? 0) + 1);
+            pid = parentOf.get(pid) ?? null;
+        }
+    }
+    return counts;
+}
+
+/**
+ * The strikethrough toggle shared by the Consolidate and Fix Paths toolbars.
+ * `roots` are the selection's roots and `effective` is every row they select
+ * (roots plus descendants). If every root is already struck (by its own flag
+ * or an ancestor's), clear the flag on every selected row, so a descendant
+ * struck on its own doesn't survive the un-strike. Otherwise strike the roots
+ * alone; their descendants inherit it.
+ */
+export function strikeToggle(
+    roots: number[],
+    effective: number[],
+    isStruck: (id: number) => boolean
+): { ids: number[]; value: boolean } {
+    return roots.every(isStruck)
+        ? { ids: effective, value: false }
+        : { ids: roots, value: true };
+}

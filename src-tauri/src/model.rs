@@ -264,6 +264,29 @@ pub struct ConsolidationNode {
     /// which has no `source_node_id` to be an alias of.
     #[serde(default)]
     pub is_alias: bool,
+    /// Archivist progress mark: the action on this row has been carried out
+    /// on the real filesystem. Applies to this row only.
+    #[serde(default)]
+    pub done: bool,
+    /// Archivist mark: this row is to be deleted on the real filesystem. This
+    /// is the row's *own* flag; a row is effectively struck when it or any
+    /// ancestor carries it. Struck subtrees are not part of the end state, so
+    /// they are left out of the consolidated totals and of Fix Paths.
+    #[serde(default)]
+    pub struck: bool,
+    /// The name before the user renamed this row. `Some` iff the row carries
+    /// an active rename (a `pathfix_state` 'cons' row with a non-empty
+    /// `new_name`); `None` means "not renamed".
+    #[serde(default)]
+    pub original_name: Option<String>,
+}
+
+/// Outcome of `pathfix::rename`: the row's name afterwards, and its original
+/// if it is still renamed (`None` once reverted).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenameResult {
+    pub name: String,
+    pub original_name: Option<String>,
 }
 
 /// One node in the consolidated end-state tree, annotated with path-length
@@ -307,6 +330,12 @@ pub struct PathTreeNode {
     /// `None` exactly when `origin_device` is.
     #[serde(default)]
     pub origin_source_id: Option<i64>,
+    /// Whether this row is struck ("to be deleted on disk"), by its own flag
+    /// or an ancestor's. Struck rows are shown but not part of the end state,
+    /// so they are never measured: never `over_limit`, and never the reason
+    /// an ancestor is.
+    #[serde(default)]
+    pub struck: bool,
 }
 
 /// Progress payload emitted while a long-running dedup pass is executing.

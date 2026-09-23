@@ -152,7 +152,14 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             name TEXT NOT NULL,
             type TEXT NOT NULL,
             source_node_id INTEGER REFERENCES nodes(id) ON DELETE SET NULL,
-            sort_order INTEGER NOT NULL DEFAULT 0
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            -- Archivist progress marks. `done`: the action on this row has been
+            -- carried out on the real filesystem. `struck`: this row is to be
+            -- deleted there. `struck` is the row's own flag and is inherited
+            -- by every descendant at read time, so struck subtrees are not part
+            -- of the end state (excluded from totals and from Fix Paths).
+            done INTEGER NOT NULL DEFAULT 0,
+            struck INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_cnodes_consolidation ON consolidation_nodes(consolidation_id);
         CREATE INDEX IF NOT EXISTS idx_cnodes_parent ON consolidation_nodes(parent_id);
@@ -246,7 +253,8 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 
 /// Target schema version. Bump this and add an entry to `migrate`'s
 /// `alterations` list whenever a column is added to an already-shipped table.
-pub const SCHEMA_VERSION: i64 = 11;
+/// v12: `consolidation_nodes.done` / `struck` (archivist progress marks).
+pub const SCHEMA_VERSION: i64 = 12;
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
@@ -397,6 +405,16 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             "color",
             "ALTER TABLE sources ADD COLUMN color TEXT",
         ),
+        (
+            "consolidation_nodes",
+            "done",
+            "ALTER TABLE consolidation_nodes ADD COLUMN done INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "consolidation_nodes",
+            "struck",
+            "ALTER TABLE consolidation_nodes ADD COLUMN struck INTEGER NOT NULL DEFAULT 0",
+        ),
     ];
     for (table, column, ddl) in alterations {
         if !column_exists(conn, table, column)? {
@@ -535,7 +553,7 @@ mod tests {
     /// A stand-in for a pre-migration on-disk database: the baseline tables
     /// `migrate` needs to alter, deliberately missing every column added
     /// since (hardlink columns, then medium/hash/listing columns, then
-    /// `dup_annot`'s skip columns).
+    /// `dup_annot`'s skip columns, then `consolidation_nodes`' progress marks).
     ///
     /// **Every table `migrate` touches must appear here** -- both the targets
     /// of an `alterations` entry and the tables the version-gated backfills
@@ -597,6 +615,15 @@ mod tests {
             cross_dup_file_count INTEGER NOT NULL DEFAULT 0,
             in_folder_group INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE consolidation_nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            consolidation_id INTEGER NOT NULL,
+            parent_id INTEGER REFERENCES consolidation_nodes(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            type TEXT NOT NULL,
+            source_node_id INTEGER REFERENCES nodes(id) ON DELETE SET NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0
+        );
     "#;
 
     #[test]
@@ -644,6 +671,13 @@ mod tests {
             assert!(
                 column_exists(&conn, "dup_annot", col).unwrap(),
                 "dup_annot.{col}"
+            );
+        }
+        // v12: archivist progress marks on the consolidated tree.
+        for col in ["done", "struck"] {
+            assert!(
+                column_exists(&conn, "consolidation_nodes", col).unwrap(),
+                "consolidation_nodes.{col}"
             );
         }
         let v: i64 = conn

@@ -8,15 +8,15 @@
     import ConsolidationNodeItem from './ConsolidationNodeItem.svelte';
     import Icon from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button';
-    import { Input } from '$lib/components/ui/input';
-    import * as Dialog from '$lib/components/ui/dialog';
-    import * as AlertDialog from '$lib/components/ui/alert-dialog';
-    import * as Field from '$lib/components/ui/field';
+    import NewFolderDialog from './NewFolderDialog.svelte';
+    import RemoveNodesDialog from './RemoveNodesDialog.svelte';
     import * as Empty from '$lib/components/ui/empty';
     import { taskTray } from '$lib/stores/tasks.svelte';
     import {
         formatBytes,
+        countBelow,
         pathSegments,
+        strikeToggle,
         sourceBarsFor,
     } from '$lib/util';
 
@@ -36,8 +36,8 @@
     const consSelection = new TreeSelection();
 
     let showNewFolderDialog = $state(false);
-    let newFolderName = $state('New Folder');
-    let deleteTarget = $state<ConsolidationNode | null>(null);
+    /** Roots awaiting the remove confirmation, or null when it is closed. */
+    let deleteIds = $state<number[] | null>(null);
 
     async function load() {
         if (app.activeWorkspaceId == null) return;
@@ -89,6 +89,40 @@
             bucket.sort((a, b) => a.sort_order - b.sort_order);
         }
 
+        // Rows struck themselves or through an ancestor. `struck` is stored
+        // only where it was applied and inherited here, top-down.
+        const struck = new Set<number>();
+        const stack: [number | null, boolean][] = [[null, false]];
+        while (stack.length) {
+            const [pid, inherited] = stack.pop()!;
+            for (const n of byParent.get(pid) ?? []) {
+                const on = inherited || n.struck;
+                if (on) struck.add(n.id);
+                stack.push([n.id, on]);
+            }
+        }
+
+        // Rows that are done *and* have every descendant done -- the only
+        // rows shown green. A tick on a folder whose contents are still
+        // outstanding keeps its tick icon but is not "finished". Post-order:
+        // a node is decided once all its children are.
+        const fullyDone = new Set<number>();
+        const order: ConsolidationNode[] = [];
+        const walk = [...(byParent.get(null) ?? [])];
+        while (walk.length) {
+            const n = walk.pop()!;
+            order.push(n);
+            walk.push(...(byParent.get(n.id) ?? []));
+        }
+        for (let i = order.length - 1; i >= 0; i--) {
+            const n = order[i];
+            if (
+                n.done &&
+                (byParent.get(n.id) ?? []).every(c => fullyDone.has(c.id))
+            )
+                fullyDone.add(n.id);
+        }
+
         const stats = new Map<number, { size: number; fileCount: number }>();
         const byId = new Map(nodes.map(n => [n.id, n]));
         // Counts count names, sizes count bytes actually held -- the same
@@ -98,14 +132,24 @@
         // (node_modules read 7.6 MB where the content occupies 1.9 MB).
         // Symlinks arrive here as type 'file' via normalize_type and have no
         // content bytes of their own, so `size` is null and contributes 0.
+        //
+        // A struck file is to be deleted, not recreated, so it is not part of
+        // the end state: it counts only toward ancestors that are struck too
+        // (a struck folder still shows what it holds), never toward a live
+        // folder or the total. Struck-ness inherits downward, so once the
+        // walk up reaches a live ancestor every ancestor above is live too.
         const total = { size: 0, fileCount: 0 };
         for (const n of nodes) {
             if (n.type !== 'file') continue;
             const size = n.is_alias ? 0 : (n.size ?? 0);
-            total.size += size;
-            total.fileCount += 1;
+            const fileStruck = struck.has(n.id);
+            if (!fileStruck) {
+                total.size += size;
+                total.fileCount += 1;
+            }
             let pid = n.parent_id;
             while (pid != null) {
+                if (fileStruck && !struck.has(pid)) break;
                 const cur = stats.get(pid) ?? { size: 0, fileCount: 0 };
                 cur.size += size;
                 cur.fileCount += 1;
@@ -114,7 +158,21 @@
             }
         }
 
-        return { byParent, stats, byId, total };
+        // After-name indicators: renamed items and to-delete items anywhere
+        // beneath a row, so they stay findable with folders collapsed.
+        const renamedBelow = countBelow(nodes, n => n.original_name != null);
+        const struckBelow = countBelow(nodes, n => struck.has(n.id));
+
+        return {
+            byParent,
+            stats,
+            byId,
+            total,
+            struck,
+            fullyDone,
+            renamedBelow,
+            struckBelow,
+        };
     });
 
     const barsOf = $derived(sourceBarsFor(nodes, app.sources));
@@ -124,27 +182,6 @@
 
     function childrenOf(parentId: number | null): ConsolidationNode[] {
         return index.byParent.get(parentId) ?? [];
-    }
-
-    /** BFS descendant closure (including the node itself) — shared by
-     *  move-cycle prevention and delete. */
-    function descendantsOf(id: number): Set<number> {
-        const set = new Set<number>([id]);
-        let changed = true;
-        while (changed) {
-            changed = false;
-            for (const n of nodes) {
-                if (
-                    n.parent_id != null &&
-                    set.has(n.parent_id) &&
-                    !set.has(n.id)
-                ) {
-                    set.add(n.id);
-                    changed = true;
-                }
-            }
-        }
-        return set;
     }
 
     async function handleDropFromSource(parentId: number | null, e: DragEvent) {
@@ -204,27 +241,9 @@
         if (allOk) sourceSelection.clear();
     }
 
-    /** Ids in `ids` that lie under some other id also in `ids` -- moving the
-     *  ancestor already carries them along, so moving them again to the
-     *  same target would misplace them out of the just-moved folder. Walks
-     *  each id's own parent chain rather than a per-pair descendant
-     *  closure, to stay O(k*depth) instead of O(k^2). */
-    function topLevelOf(ids: number[]): number[] {
-        const idsSet = new Set(ids);
-        const byId = new Map(nodes.map(n => [n.id, n]));
-        return ids.filter(id => {
-            let pid = byId.get(id)?.parent_id ?? null;
-            while (pid != null) {
-                if (idsSet.has(pid)) return false;
-                pid = byId.get(pid)?.parent_id ?? null;
-            }
-            return true;
-        });
-    }
-
     /** Combined descendant closure (including the roots) of every id in
      *  `roots`, computed in one pass via `childrenOf` rather than one
-     *  descendantsOf() call per root. */
+     *  closure per root. */
     function descendantsOfAll(roots: number[]): Set<number> {
         const closure = new Set<number>(roots);
         const stack = [...roots];
@@ -244,10 +263,11 @@
         ids: number[],
         newParentId: number | null
     ) {
-        const topLevel = topLevelOf(ids);
+        // `ids` come from `selection.dragIds`, i.e. the selection's roots, so
+        // no id lies beneath another and each node is moved exactly once.
         if (
             newParentId != null &&
-            descendantsOfAll(topLevel).has(newParentId)
+            descendantsOfAll(ids).has(newParentId)
         ) {
             taskTray.notify(
                 'Move failed',
@@ -258,8 +278,8 @@
         }
         const base =
             Math.max(0, ...childrenOf(newParentId).map(n => n.sort_order)) + 1;
-        for (let i = 0; i < topLevel.length; i++) {
-            const nodeId = topLevel[i];
+        for (let i = 0; i < ids.length; i++) {
+            const nodeId = ids[i];
             const newSortOrder = base + i;
             try {
                 await api.consolidationMoveNode(
@@ -295,25 +315,98 @@
         handleDropFromSource(parentId, e);
     }
 
-    async function handleRename(node: ConsolidationNode, newName: string) {
-        const name = newName.trim();
-        if (!name || name === node.name) return;
+    /** Renames go through `pathfixRename`, the same path Fix Paths uses, so
+     *  every rename records its original and can be reset from either view.
+     *  `''` resets. */
+    async function applyRename(node: ConsolidationNode, name: string) {
+        if (app.activeWorkspaceId == null) return;
         try {
-            await api.consolidationRenameNode(node.id, name);
-            nodes = nodes.map(n => (n.id === node.id ? { ...n, name } : n));
+            const r = await api.pathfixRename(
+                app.activeWorkspaceId,
+                node.id,
+                name
+            );
+            nodes = nodes.map(n =>
+                n.id === node.id
+                    ? { ...n, name: r.name, original_name: r.original_name }
+                    : n
+            );
         } catch (err) {
             taskTray.notify('Rename failed', 'error', String(err));
         }
     }
 
-    async function confirmDelete() {
-        const target = deleteTarget;
-        deleteTarget = null;
-        if (!target) return;
-        const toRemove = descendantsOf(target.id);
+    function handleRename(node: ConsolidationNode, newName: string) {
+        const name = newName.trim();
+        if (!name || name === node.name) return;
+        applyRename(node, name);
+    }
+
+    function handleReset(node: ConsolidationNode) {
+        applyRename(node, '');
+    }
+
+    // --- Archivist marks & removal, acting on the consolidated selection ---
+    //
+    // Everything starts from `consSelection.roots()`: a selected folder
+    // selects its contents too, and roots never nest, so no row is reached
+    // twice. `effective` widens the roots back out to every selected row.
+
+    const hasSelection = $derived(consSelection.selected.size > 0);
+
+    function selectionScope() {
+        const roots = consSelection.roots();
+        return { roots, effective: [...descendantsOfAll(roots)] };
+    }
+
+    /** Toggle: if every selected row is already done, clear them all. */
+    async function toggleDone() {
+        const { effective } = selectionScope();
+        if (effective.length === 0) return;
+        const value = !effective.every(id => index.byId.get(id)?.done);
         try {
-            await api.consolidationDeleteNode(target.id);
+            await api.consolidationSetDone(effective, value);
+            const hit = new Set(effective);
+            nodes = nodes.map(n => (hit.has(n.id) ? { ...n, done: value } : n));
+        } catch (err) {
+            taskTray.notify('Update failed', 'error', String(err));
+        }
+    }
+
+    /** Toggle: strike the roots (their contents inherit), or -- if every
+     *  root is already struck -- clear the flag on every selected row, so a
+     *  descendant struck on its own does not survive the un-strike. A root
+     *  struck only through an unselected ancestor stays struck. */
+    async function toggleStruck() {
+        const { roots, effective } = selectionScope();
+        if (roots.length === 0) return;
+        const { ids, value } = strikeToggle(roots, effective, id =>
+            index.struck.has(id)
+        );
+        try {
+            await api.consolidationSetStruck(ids, value);
+            const hit = new Set(ids);
+            nodes = nodes.map(n =>
+                hit.has(n.id) ? { ...n, struck: value } : n
+            );
+        } catch (err) {
+            taskTray.notify('Update failed', 'error', String(err));
+        }
+    }
+
+    function openDeleteDialog() {
+        const roots = consSelection.roots();
+        if (roots.length > 0) deleteIds = roots;
+    }
+
+    async function confirmDelete(roots: number[]) {
+        deleteIds = null;
+        if (roots.length === 0) return;
+        const toRemove = descendantsOfAll(roots);
+        try {
+            await api.consolidationDeleteNodes(roots);
             nodes = nodes.filter(n => !toRemove.has(n.id));
+            consSelection.clear();
         } catch (err) {
             taskTray.notify('Remove failed', 'error', String(err));
         }
@@ -321,16 +414,11 @@
 
     function openNewFolderDialog() {
         if (consolidationId == null || app.activeWorkspaceId == null) return;
-        newFolderName = 'New Folder';
         showNewFolderDialog = true;
     }
 
-    async function submitNewFolder(e: SubmitEvent) {
-        e.preventDefault();
+    async function createFolder(name: string) {
         if (consolidationId == null || app.activeWorkspaceId == null) return;
-        const name = newFolderName.trim();
-        if (!name) return;
-        showNewFolderDialog = false;
         try {
             const created = await api.consolidationAddNode({
                 consolidationId,
@@ -387,10 +475,41 @@
                     {formatBytes(index.total.size)}
                 </span>
             </div>
-            <Button variant="outline" size="sm" onclick={openNewFolderDialog}>
-                <Icon icon="ph:folder-plus-fill" />
-                <span>Folder</span>
-            </Button>
+            <div class="flex shrink-0 items-center gap-1.5">
+                {#if hasSelection}
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        title="Remove selected items from the consolidated tree"
+                        aria-label="Remove selected"
+                        onclick={openDeleteDialog}>
+                        <Icon icon="ph:trash-fill" />
+                    </Button>
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        title="Mark selected items to be deleted (toggle). An item struck through a folder above the selection stays struck."
+                        aria-label="Toggle to-delete mark"
+                        onclick={toggleStruck}>
+                        <Icon icon="ph:text-strikethrough-bold" />
+                    </Button>
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        title="Mark selected items as done (toggle)"
+                        aria-label="Toggle done mark"
+                        onclick={toggleDone}>
+                        <Icon icon="ph:check-bold" />
+                    </Button>
+                {/if}
+                <Button
+                    variant="outline"
+                    size="sm"
+                    onclick={openNewFolderDialog}>
+                    <Icon icon="ph:folder-plus-fill" />
+                    <span>Folder</span>
+                </Button>
+            </div>
         </div>
         <div
             class="min-h-32 grow overflow-y-auto rounded-md border-2 border-dashed p-2 transition-colors data-[drag=true]:border-brand data-[drag=true]:bg-brand/10"
@@ -421,7 +540,11 @@
                         {barsOf}
                         {pathOf}
                         selection={consSelection}
-                        ondelete={n => (deleteTarget = n)}
+                        isStruck={id => index.struck.has(id)}
+                        isFullyDone={id => index.fullyDone.has(id)}
+                        renamedBelowOf={id => index.renamedBelow.get(id) ?? 0}
+                        struckBelowOf={id => index.struckBelow.get(id) ?? 0}
+                        onreset={handleReset}
                         ondropInto={handleDrop}
                         onrename={handleRename} />
                 {/each}
@@ -430,61 +553,11 @@
     </section>
 </div>
 
-<Dialog.Root bind:open={showNewFolderDialog}>
-    <Dialog.Content class="sm:max-w-sm">
-        <form onsubmit={submitNewFolder}>
-            <Dialog.Header>
-                <Dialog.Title>New folder</Dialog.Title>
-                <Dialog.Description>
-                    Adds an empty folder at the root of the consolidated tree.
-                </Dialog.Description>
-            </Dialog.Header>
-            <Field.FieldGroup class="py-4">
-                <Field.Field>
-                    <Field.FieldLabel for="folder-name">Name</Field.FieldLabel>
-                    <!-- svelte-ignore a11y_autofocus -->
-                    <Input
-                        id="folder-name"
-                        autofocus
-                        bind:value={newFolderName} />
-                </Field.Field>
-            </Field.FieldGroup>
-            <Dialog.Footer>
-                <Button
-                    type="button"
-                    variant="outline"
-                    onclick={() => (showNewFolderDialog = false)}
-                    >Cancel</Button>
-                <Button type="submit" disabled={!newFolderName.trim()}>
-                    Create
-                </Button>
-            </Dialog.Footer>
-        </form>
-    </Dialog.Content>
-</Dialog.Root>
+<NewFolderDialog bind:open={showNewFolderDialog} oncreate={createFolder} />
 
-<AlertDialog.Root
-    open={deleteTarget !== null}
-    onOpenChange={o => {
-        if (!o) deleteTarget = null;
-    }}>
-    <AlertDialog.Content>
-        <AlertDialog.Header>
-            <AlertDialog.Title>Remove from the plan?</AlertDialog.Title>
-            <AlertDialog.Description>
-                “{deleteTarget?.name}”{deleteTarget?.type === 'directory'
-                    ? ' and everything inside it'
-                    : ''} will be removed from the consolidated tree. Your source
-                devices are not touched.
-            </AlertDialog.Description>
-        </AlertDialog.Header>
-        <AlertDialog.Footer>
-            <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
-            <AlertDialog.Action
-                onclick={confirmDelete}
-                class="bg-destructive text-white hover:bg-destructive/90">
-                Remove
-            </AlertDialog.Action>
-        </AlertDialog.Footer>
-    </AlertDialog.Content>
-</AlertDialog.Root>
+<RemoveNodesDialog
+    ids={deleteIds}
+    nodeOf={id => index.byId.get(id)}
+    note="To keep a note that something must be deleted on disk, strike it through instead."
+    onconfirm={confirmDelete}
+    oncancel={() => (deleteIds = null)} />

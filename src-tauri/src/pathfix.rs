@@ -15,7 +15,7 @@
 //! the true original name is recorded once in `pathfix_state` so it can be
 //! reverted.
 
-use crate::model::PathTreeNode;
+use crate::model::{PathTreeNode, RenameResult};
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
 
@@ -31,6 +31,10 @@ struct CNode {
     origin_device: Option<String>,
     origin_path: Option<String>,
     origin_source_id: Option<i64>,
+    /// The row's own "to delete" mark. Inherited downward by `walk_cons`: a
+    /// struck subtree is shown but never measured, since none of it is in
+    /// the end state.
+    struck: bool,
 }
 
 /// Stored rename edit for a consolidation node.
@@ -47,7 +51,7 @@ fn load_cnodes(conn: &Connection, workspace_id: i64) -> rusqlite::Result<Vec<CNo
     // worse bug than a missing tooltip.
     let mut stmt = conn.prepare(
         "SELECT cn.id, cn.parent_id, cn.name, cn.type, cn.sort_order,
-                s.device_label, n.rel_path, s.id
+                s.device_label, n.rel_path, s.id, cn.struck
          FROM consolidation_nodes cn
          JOIN consolidations c ON c.id = cn.consolidation_id
          LEFT JOIN nodes n ON n.id = cn.source_node_id
@@ -64,6 +68,7 @@ fn load_cnodes(conn: &Connection, workspace_id: i64) -> rusqlite::Result<Vec<CNo
             origin_device: r.get(5)?,
             origin_path: r.get(6)?,
             origin_source_id: r.get(7)?,
+            struck: r.get(8)?,
         })
     })?;
     rows.collect()
@@ -129,6 +134,7 @@ impl<'a> Walker<'a> {
         origin_device: Option<String>,
         origin_path: Option<String>,
         origin_source_id: Option<i64>,
+        struck: bool,
     ) {
         let idx = self.out.len();
         self.out.push(PathTreeNode {
@@ -144,6 +150,7 @@ impl<'a> Walker<'a> {
             origin_device,
             origin_path,
             origin_source_id,
+            struck,
         });
         self.stack.push(idx);
     }
@@ -165,12 +172,18 @@ impl<'a> Walker<'a> {
     /// Walk the consolidation tree. `sort_order` (applied once, in
     /// `build_tree`, to the `children` map) is emission order, which is also
     /// the tree's display order on the frontend.
-    fn walk_cons(&mut self, parent: Option<i64>, prefix: &str) {
+    ///
+    /// `struck_above` is whether an ancestor is struck. A struck row (its own
+    /// flag or inherited) is emitted for display but never measured. A live
+    /// folder whose children are *all* struck is a leaf of the end state, so
+    /// it is measured itself.
+    fn walk_cons(&mut self, parent: Option<i64>, prefix: &str, struck_above: bool) {
         let Some(list) = self.children.get(&parent).cloned() else {
             return;
         };
         for i in list {
             let c = &self.cnodes[i];
+            let struck = struck_above || c.struck;
             let (name, original_name, edited) = self.effective(c.id, &c.name);
             let path = if prefix.is_empty() {
                 name.clone()
@@ -178,7 +191,9 @@ impl<'a> Walker<'a> {
                 format!("{prefix}\\{name}")
             };
             let path_length = path.chars().count() as i64;
-            let has_kids = self.children.contains_key(&Some(c.id));
+            let kids = self.children.get(&Some(c.id));
+            let has_kids = kids.is_some_and(|k| !k.is_empty());
+            let has_live_kids = kids.is_some_and(|k| k.iter().any(|&j| !self.cnodes[j].struck));
             let node_type = c.node_type.clone();
             self.push_node(
                 parent,
@@ -192,11 +207,15 @@ impl<'a> Walker<'a> {
                 c.origin_device.clone(),
                 c.origin_path.clone(),
                 c.origin_source_id,
+                struck,
             );
 
-            if node_type == "directory" && has_kids {
-                self.walk_cons(Some(c.id), &path);
-            } else {
+            let is_dir = node_type == "directory";
+            if is_dir && has_kids {
+                self.walk_cons(Some(c.id), &path, struck);
+            }
+            // Only live leaves of the end state are measured.
+            if !struck && !(is_dir && has_live_kids) {
                 self.mark_if_over(path_length);
             }
             self.pop_node();
@@ -234,58 +253,75 @@ pub fn build_tree(
         out: Vec::new(),
         stack: Vec::new(),
     };
-    walker.walk_cons(None, "");
+    walker.walk_cons(None, "", false);
     Ok(walker.out)
 }
 
 /// Rename a node in the consolidated end-state tree, recording the original
-/// name once in `pathfix_state`. Passing an empty name reverts the edit.
+/// name once in `pathfix_state`. Passing an empty name reverts the edit, and
+/// so does renaming a node back to its recorded original -- otherwise a
+/// no-op edit would linger and offer to "reset" to the name already shown.
+///
+/// This is the only rename path for both the Consolidate and Fix Paths trees,
+/// so a rename made in either is tracked (and resettable) in both.
 pub fn rename(
     conn: &Connection,
     workspace_id: i64,
     ref_id: i64,
     new_name: &str,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<RenameResult> {
     let current: String = conn.query_row(
         "SELECT name FROM consolidation_nodes WHERE id = ?1",
         params![ref_id],
         |r| r.get(0),
     )?;
-    if new_name.is_empty() {
-        // Revert to original if we have one recorded.
-        let orig: Option<String> = conn
-            .query_row(
-                "SELECT original_name FROM pathfix_state
-                 WHERE workspace_id = ?1 AND kind = 'cons' AND ref_id = ?2",
-                params![workspace_id, ref_id],
-                |r| r.get(0),
-            )
-            .ok();
-        if let Some(orig) = orig.filter(|o| !o.is_empty()) {
-            conn.execute(
-                "UPDATE consolidation_nodes SET name = ?1 WHERE id = ?2",
-                params![orig, ref_id],
-            )?;
-        }
+    let recorded: Option<String> = conn
+        .query_row(
+            "SELECT original_name FROM pathfix_state
+             WHERE workspace_id = ?1 AND kind = 'cons' AND ref_id = ?2",
+            params![workspace_id, ref_id],
+            |r| r.get(0),
+        )
+        .ok()
+        .filter(|o: &String| !o.is_empty());
+    if new_name.is_empty() || recorded.as_deref() == Some(new_name) {
+        // Revert to the original, if we have one recorded.
+        let name = recorded.unwrap_or(current);
+        conn.execute(
+            "UPDATE consolidation_nodes SET name = ?1 WHERE id = ?2",
+            params![name, ref_id],
+        )?;
         conn.execute(
             "DELETE FROM pathfix_state
              WHERE workspace_id = ?1 AND kind = 'cons' AND ref_id = ?2",
             params![workspace_id, ref_id],
         )?;
-    } else {
-        conn.execute(
-            "INSERT INTO pathfix_state (workspace_id, kind, ref_id, new_name, original_name)
-             VALUES (?1, 'cons', ?2, ?3, ?4)
-             ON CONFLICT(workspace_id, kind, ref_id)
-             DO UPDATE SET new_name = excluded.new_name",
-            params![workspace_id, ref_id, new_name, current],
-        )?;
-        conn.execute(
-            "UPDATE consolidation_nodes SET name = ?1 WHERE id = ?2",
-            params![new_name, ref_id],
-        )?;
+        return Ok(RenameResult {
+            name,
+            original_name: None,
+        });
     }
-    Ok(())
+    conn.execute(
+        "INSERT INTO pathfix_state (workspace_id, kind, ref_id, new_name, original_name)
+         VALUES (?1, 'cons', ?2, ?3, ?4)
+         ON CONFLICT(workspace_id, kind, ref_id)
+         DO UPDATE SET new_name = excluded.new_name",
+        params![workspace_id, ref_id, new_name, current],
+    )?;
+    conn.execute(
+        "UPDATE consolidation_nodes SET name = ?1 WHERE id = ?2",
+        params![new_name, ref_id],
+    )?;
+    let original: String = conn.query_row(
+        "SELECT original_name FROM pathfix_state
+         WHERE workspace_id = ?1 AND kind = 'cons' AND ref_id = ?2",
+        params![workspace_id, ref_id],
+        |r| r.get(0),
+    )?;
+    Ok(RenameResult {
+        name: new_name.to_string(),
+        original_name: Some(original),
+    })
 }
 
 #[cfg(test)]
@@ -329,6 +365,77 @@ mod tests {
         )
         .unwrap();
         conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn renaming_twice_keeps_the_first_original() {
+        let (conn, ws, cid) = setup();
+        let id = insert_cnode(&conn, cid, None, "a", "file");
+        rename(&conn, ws, id, "b").unwrap();
+        let r = rename(&conn, ws, id, "c").unwrap();
+        assert_eq!(r.name, "c");
+        assert_eq!(r.original_name.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn renaming_back_to_the_original_is_a_revert() {
+        let (conn, ws, cid) = setup();
+        let id = insert_cnode(&conn, cid, None, "a", "file");
+        rename(&conn, ws, id, "b").unwrap();
+        let r = rename(&conn, ws, id, "a").unwrap();
+        assert_eq!(r.name, "a");
+        assert_eq!(r.original_name, None);
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pathfix_state", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "a no-op edit must not linger");
+    }
+
+    #[test]
+    fn struck_subtree_is_shown_but_not_measured() {
+        let (conn, ws, cid) = setup();
+        let root = insert_cnode(&conn, cid, None, "root", "directory");
+        let keep = insert_cnode(&conn, cid, Some(root), "keep.txt", "file");
+        let doomed = insert_cnode(&conn, cid, Some(root), "doomed", "directory");
+        // Only the folder carries the flag; its over-limit leaf must be
+        // excluded by inheritance, not by a flag of its own.
+        let long_leaf = insert_cnode(&conn, cid, Some(doomed), &"x".repeat(300), "file");
+        conn.execute(
+            "UPDATE consolidation_nodes SET struck = 1 WHERE id = ?1",
+            params![doomed],
+        )
+        .unwrap();
+
+        let nodes = build_tree(&conn, ws, 260).unwrap();
+        assert_eq!(nodes.len(), 4, "struck rows are still shown");
+        let by_id: HashMap<i64, &PathTreeNode> = nodes.iter().map(|n| (n.id, n)).collect();
+        assert!(by_id[&doomed].struck);
+        assert!(by_id[&long_leaf].struck, "struck is inherited");
+        assert!(!by_id[&root].struck && !by_id[&keep].struck);
+        assert!(
+            nodes.iter().all(|n| !n.over_limit),
+            "struck rows are never measured"
+        );
+    }
+
+    #[test]
+    fn live_folder_with_only_struck_children_is_measured_as_a_leaf() {
+        let (conn, ws, cid) = setup();
+        let long_dir = insert_cnode(&conn, cid, None, &"d".repeat(300), "directory");
+        let gone = insert_cnode(&conn, cid, Some(long_dir), "gone.txt", "file");
+        conn.execute(
+            "UPDATE consolidation_nodes SET struck = 1 WHERE id = ?1",
+            params![gone],
+        )
+        .unwrap();
+
+        let nodes = build_tree(&conn, ws, 260).unwrap();
+        let by_id: HashMap<i64, &PathTreeNode> = nodes.iter().map(|n| (n.id, n)).collect();
+        assert!(
+            by_id[&long_dir].over_limit,
+            "an end-state leaf, so measured"
+        );
+        assert!(!by_id[&gone].over_limit);
     }
 
     #[test]

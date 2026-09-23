@@ -5,19 +5,24 @@
     import { TreeSelection } from '$lib/stores/selection.svelte';
     import PathTreeItem from './PathTreeItem.svelte';
     import Icon from '$lib/components/Icon.svelte';
-    import { pathSegments, sourceBarsFor } from '$lib/util';
+    import {
+        countBelow,
+        pathSegments,
+        sourceBarsFor,
+        strikeToggle,
+    } from '$lib/util';
     import { Button } from '$lib/components/ui/button';
     import { Slider } from '$lib/components/ui/slider';
     import { Label } from '$lib/components/ui/label';
     import { ScrollArea } from '$lib/components/ui/scroll-area';
     import * as Empty from '$lib/components/ui/empty';
-    import * as AlertDialog from '$lib/components/ui/alert-dialog';
+    import NewFolderDialog from './NewFolderDialog.svelte';
     import { taskTray } from '$lib/stores/tasks.svelte';
 
     let limit = $state(260);
     let nodes = $state<PathTreeNode[]>([]);
     let loading = $state(false);
-    let deleteTarget = $state<PathTreeNode | null>(null);
+    let showNewFolderDialog = $state(false);
     const selection = new TreeSelection();
 
     async function reload() {
@@ -61,7 +66,12 @@
             byParent.set(n.parent_id, bucket);
         }
         const byId = new Map(nodes.map(n => [n.id, n]));
-        return { byParent, byId };
+        // Renamed items anywhere beneath a row, for its after-name mark.
+        const renamedBelow = countBelow(nodes, n => n.edited);
+        // Struck rows are shown but not part of the end state; their
+        // unstruck ancestors carry an after-name mark instead.
+        const struckBelow = countBelow(nodes, n => n.struck);
+        return { byParent, byId, renamedBelow, struckBelow };
     });
 
     const barsOf = $derived(sourceBarsFor(nodes, app.sources));
@@ -76,24 +86,6 @@
      * any pending virtual rename.
      */
     const pathOf = (id: number) => pathSegments(index.byId, id);
-
-    /** Ids in `ids` that lie under some other id also in `ids` -- moving the
-     *  ancestor already carries them along, so moving them again to the
-     *  same target would misplace them out of the just-moved folder. Walks
-     *  each id's own parent chain rather than a per-pair descendant
-     *  closure, to stay O(k*depth) instead of O(k^2). */
-    function topLevelOf(ids: number[]): number[] {
-        const idsSet = new Set(ids);
-        const byId = index.byId;
-        return ids.filter(id => {
-            let pid = byId.get(id)?.parent_id ?? null;
-            while (pid != null) {
-                if (idsSet.has(pid)) return false;
-                pid = byId.get(pid)?.parent_id ?? null;
-            }
-            return true;
-        });
-    }
 
     /** Combined descendant closure (including the roots) of every id in
      *  `roots`, computed in one pass via `childrenOf` rather than one
@@ -118,10 +110,11 @@
         newParentId: number | null
     ) {
         if (app.activeWorkspaceId == null) return;
-        const topLevel = topLevelOf(ids);
+        // `ids` come from `selection.dragIds`, i.e. the selection's roots, so
+        // no id lies beneath another and each node is moved exactly once.
         if (
             newParentId != null &&
-            descendantsOfAll(topLevel).has(newParentId)
+            descendantsOfAll(ids).has(newParentId)
         ) {
             taskTray.notify(
                 'Move failed',
@@ -132,8 +125,8 @@
         }
         const base = Math.max(0, ...childrenOf(newParentId).map(n => n.sort_order)) + 1;
         try {
-            for (let i = 0; i < topLevel.length; i++) {
-                await api.consolidationMoveNode(topLevel[i], newParentId, base + i);
+            for (let i = 0; i < ids.length; i++) {
+                await api.consolidationMoveNode(ids[i], newParentId, base + i);
             }
             await reload();
         } catch (err) {
@@ -172,21 +165,58 @@
         }
     }
 
-    async function confirmDelete() {
-        const target = deleteTarget;
-        deleteTarget = null;
-        if (!target) return;
+    const hasSelection = $derived(selection.selected.size > 0);
+
+    /** Same toggle as the Consolidate toolbar (`strikeToggle`). Reloads
+     *  rather than patching locally: striking changes what is measured, and
+     *  `struck` here is the backend's inherited value. */
+    async function toggleStruck() {
+        const roots = selection.roots();
+        if (roots.length === 0) return;
+        const effective = [...descendantsOfAll(roots)];
+        const { ids, value } = strikeToggle(
+            roots,
+            effective,
+            id => index.byId.get(id)?.struck ?? false
+        );
         try {
-            await api.consolidationDeleteNode(target.id);
+            await api.consolidationSetStruck(ids, value);
             await reload();
         } catch (err) {
-            taskTray.notify('Remove failed', 'error', String(err));
+            taskTray.notify('Update failed', 'error', String(err));
         }
     }
 
+    async function createFolder(name: string) {
+        if (app.activeWorkspaceId == null) return;
+        try {
+            // Also creates the workspace's consolidation if none exists yet,
+            // so a first folder can be made from this view.
+            const [consolidationId] = await api.consolidationGet(
+                app.activeWorkspaceId
+            );
+            await api.consolidationAddNode({
+                consolidationId,
+                parentId: null,
+                name,
+                nodeType: 'directory',
+                sourceNodeId: null,
+            });
+            await reload();
+        } catch (err) {
+            taskTray.notify('Create failed', 'error', String(err));
+        }
+    }
+
+    /** Whether a row has a child that is still part of the end state. */
+    const hasLiveKids = (id: number) => childrenOf(id).some(c => !c.struck);
+
+    // Measured leaves only, mirroring pathfix.rs: a live row with no live
+    // children. Struck rows are never measured.
     const overCount = $derived(
-        nodes.filter(n => childrenOf(n.id).length === 0 && n.path_length > limit)
-            .length
+        nodes.filter(
+            n => !n.struck && !hasLiveKids(n.id) && n.path_length > limit
+        ).length
     );
 </script>
 
@@ -217,6 +247,25 @@
                 class={loading ? 'animate-spin' : ''} />
             <span>{loading ? 'Scanning…' : 'Rescan'}</span>
         </Button>
+        <div class="ms-auto flex shrink-0 items-center gap-1.5">
+            {#if hasSelection}
+                <Button
+                    variant="outline"
+                    size="sm"
+                    title="Mark selected items to be deleted (toggle). Struck items are not measured. An item struck through a folder above the selection stays struck."
+                    aria-label="Toggle to-delete mark"
+                    onclick={toggleStruck}>
+                    <Icon icon="ph:text-strikethrough-bold" />
+                </Button>
+            {/if}
+            <Button
+                variant="outline"
+                size="sm"
+                onclick={() => (showNewFolderDialog = true)}>
+                <Icon icon="ph:folder-plus-fill" />
+                <span>Folder</span>
+            </Button>
+        </div>
     </div>
 
     {#if nodes.length === 0}
@@ -273,37 +322,15 @@
                         {limit}
                         {selection}
                         onrename={handleRename}
+                        renamedBelowOf={id => index.renamedBelow.get(id) ?? 0}
+                        struckBelowOf={id => index.struckBelow.get(id) ?? 0}
+                        {hasLiveKids}
                         onrevert={handleRevert}
-                        ondropInto={handleDrop}
-                        ondelete={n => (deleteTarget = n)} />
+                        ondropInto={handleDrop} />
                 {/each}
             </div>
         </ScrollArea>
     {/if}
 </div>
 
-<AlertDialog.Root
-    open={deleteTarget !== null}
-    onOpenChange={o => {
-        if (!o) deleteTarget = null;
-    }}>
-    <AlertDialog.Content>
-        <AlertDialog.Header>
-            <AlertDialog.Title>Remove from the plan?</AlertDialog.Title>
-            <AlertDialog.Description>
-                “{deleteTarget?.name}”{deleteTarget?.type === 'directory'
-                    ? ' and everything inside it'
-                    : ''} will be removed from the consolidated tree. Your source
-                devices are not touched.
-            </AlertDialog.Description>
-        </AlertDialog.Header>
-        <AlertDialog.Footer>
-            <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
-            <AlertDialog.Action
-                onclick={confirmDelete}
-                class="bg-destructive text-white hover:bg-destructive/90">
-                Remove
-            </AlertDialog.Action>
-        </AlertDialog.Footer>
-    </AlertDialog.Content>
-</AlertDialog.Root>
+<NewFolderDialog bind:open={showNewFolderDialog} oncreate={createFolder} />

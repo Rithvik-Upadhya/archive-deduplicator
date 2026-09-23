@@ -7,6 +7,7 @@
     import { consolidationTreeExpanded } from '$lib/stores/treeExpansion.svelte';
     import Self from './PathTreeItem.svelte';
     import SourceBarsCell from './SourceBarsCell.svelte';
+    import NameMarks from './NameMarks.svelte';
     import Icon from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button';
     import { Input } from '$lib/components/ui/input';
@@ -22,10 +23,15 @@
         barsOf: (node: PathTreeNode) => SourceBars;
         limit: number;
         selection: TreeSelection;
+        /** Renamed items anywhere beneath a row. */
+        renamedBelowOf: (id: number) => number;
+        /** Struck items anywhere beneath a row. */
+        struckBelowOf: (id: number) => number;
+        /** Whether a row has a child still in the end state (not struck). */
+        hasLiveKids: (id: number) => boolean;
         onrename: (node: PathTreeNode, newName: string) => void;
         onrevert: (node: PathTreeNode) => void;
         ondropInto: (parentId: number | null, e: DragEvent) => void;
-        ondelete: (node: PathTreeNode) => void;
     }
 
     let {
@@ -35,10 +41,12 @@
         barsOf,
         limit,
         selection,
+        renamedBelowOf,
+        struckBelowOf,
+        hasLiveKids,
         onrename,
         onrevert,
         ondropInto,
-        ondelete,
     }: Props = $props();
 
     const isDir = $derived(node.type === 'directory');
@@ -65,7 +73,14 @@
     );
     const kids = $derived(childrenOf(node.id));
     const bars = $derived(barsOf(node));
-    const isLeaf = $derived(kids.length === 0);
+    // A leaf of the *end state*: live, with no live children. Only these are
+    // measured (see pathfix.rs), so only these carry a path-length badge. A
+    // live folder whose children are all struck is one.
+    const isMeasuredLeaf = $derived(!node.struck && !hasLiveKids(node.id));
+    // Struck rows are never over-limit, so the two tones never compete.
+    const tone = $derived(
+        node.struck ? 'text-struck' : node.over_limit ? 'text-destructive' : ''
+    );
 
     // Applied once, on this node's first-ever encounter, not a reactive
     // re-sync: a branch that only becomes over-limit after the slider moves
@@ -121,8 +136,7 @@
 
 <div class="text-sm">
     <div
-        class="group/row flex items-center gap-1.5 border border-transparent px-1.5 py-0.5 select-none data-[dir=true]:bg-muted/50 data-[over=true]:border-destructive/50 data-[over=true]:bg-destructive/[0.06] data-[drag=true]:border-brand data-[drag=true]:bg-brand/15 data-[selected=true]:bg-accent"
-        data-dir={isDir}
+        class="group/row flex items-center gap-1.5 border border-transparent px-1.5 py-0.5 select-none data-[over=true]:border-destructive/50 data-[drag=true]:border-brand data-[drag=true]:bg-brand/15 data-[selected=true]:bg-muted/50"
         data-over={node.over_limit}
         data-drag={dragOver}
         data-selected={selection.isSelected(node.id)}
@@ -131,7 +145,7 @@
         aria-selected={selection.isSelected(node.id)}
         aria-expanded={isDir ? expanded : undefined}
         tabindex="0"
-        use:selectable={{ selection, id: node.id }}
+        use:selectable={{ selection, id: node.id, parentId: node.parent_id }}
         ondragstart={onDragStart}
         ondragover={e => {
             e.preventDefault();
@@ -159,9 +173,7 @@
         </button>
         <Icon
             icon={isDir ? 'ph:folder-fill' : 'ph:file-fill'}
-            class="shrink-0 {node.over_limit
-                ? 'text-destructive'
-                : 'text-muted-foreground'}" />
+            class="shrink-0 {tone || 'text-muted-foreground'}" />
 
         {#if editing}
             <!-- svelte-ignore a11y_autofocus -->
@@ -175,16 +187,22 @@
                     if (e.key === 'Escape') editing = false;
                 }} />
         {:else}
-            <span
-                class="flex-1 truncate {node.over_limit
-                    ? 'text-destructive'
-                    : ''}"
-                title={nameTitle}>
-                {node.name}
+            <span class="flex min-w-0 flex-1 items-center gap-1">
+                <span
+                    class="truncate {tone}"
+                    class:line-through={node.struck}
+                    title={nameTitle}>
+                    {node.name}
+                </span>
+                <NameMarks
+                    original={node.edited ? node.original_name : null}
+                    renamedBelow={renamedBelowOf(node.id)}
+                    struckBelow={!node.struck && struckBelowOf(node.id) > 0}
+                    onreset={() => onrevert(node)} />
             </span>
         {/if}
 
-        {#if isLeaf}
+        {#if isMeasuredLeaf}
             <Badge
                 variant={node.path_length > limit ? 'destructive' : 'secondary'}
                 class="ms-auto shrink-0 px-1.5 py-0 text-[0.7rem]">
@@ -192,20 +210,6 @@
             </Badge>
         {/if}
 
-        {#if node.edited}
-            <Button
-                variant="ghost"
-                size="icon"
-                class="size-6 shrink-0 text-muted-foreground hover:text-foreground"
-                title="Revert to original name"
-                onclick={e => {
-                    e.stopPropagation();
-                    onrevert(node);
-                }}>
-                <Icon icon="ph:arrow-counter-clockwise-bold" />
-                <span class="sr-only">Revert</span>
-            </Button>
-        {/if}
         <SourceBarsCell {bars} />
 
         <Button
@@ -234,17 +238,6 @@
             }}>
             <Icon icon="ph:pencil-simple-fill" />
         </Button>
-        <Button
-            variant="ghost"
-            size="icon"
-            class="size-6 shrink-0 text-muted-foreground hover:text-destructive"
-            aria-label="Remove"
-            onclick={e => {
-                e.stopPropagation();
-                ondelete(node);
-            }}>
-            <Icon icon="ph:x-bold" />
-        </Button>
     </div>
 
     {#if isDir && expanded}
@@ -257,10 +250,12 @@
                     {barsOf}
                     {limit}
                     {selection}
+                    {renamedBelowOf}
+                    {struckBelowOf}
+                    {hasLiveKids}
                     {onrename}
                     {onrevert}
-                    {ondropInto}
-                    {ondelete} />
+                    {ondropInto} />
             {/each}
         </div>
     {/if}

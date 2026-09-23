@@ -24,8 +24,17 @@ use std::time::Duration;
 type DupAnnotRow = (i64, i64, f64, i64, i64, i64, i64, i64, i64);
 
 /// One `ext.consolidation_nodes` row, in `SELECT` order:
-/// `(id, parent_id, name, type, source_node_id, sort_order)`.
-type ConsolidationNodeRow = (i64, Option<i64>, String, String, Option<i64>, i64);
+/// `(id, parent_id, name, type, source_node_id, sort_order, done, struck)`.
+type ConsolidationNodeRow = (
+    i64,
+    Option<i64>,
+    String,
+    String,
+    Option<i64>,
+    i64,
+    bool,
+    bool,
+);
 
 /// Checkpoint the WAL and copy the database file to `dest`.
 pub fn export_to(conn: &Connection, dest: &Path) -> rusqlite::Result<()> {
@@ -493,12 +502,25 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                     cons_id_map.insert(old_id, tx.last_insert_rowid());
                 }
             }
+            // `done` / `struck` arrived in v12; an older export has neither,
+            // and its rows carry no marks, so read a literal 0 in their place.
+            let cnode_sql = format!(
+                "SELECT id, parent_id, name, type, source_node_id, sort_order, {}, {}
+                 FROM ext.consolidation_nodes WHERE consolidation_id = ?1 ORDER BY id",
+                if ext_has_column(&tx, "consolidation_nodes", "done")? {
+                    "done"
+                } else {
+                    "0"
+                },
+                if ext_has_column(&tx, "consolidation_nodes", "struck")? {
+                    "struck"
+                } else {
+                    "0"
+                },
+            );
             for (&old_cons_id, &new_cons_id) in cons_id_map.iter() {
                 let mut cnode_id_map: HashMap<i64, i64> = HashMap::new();
-                let mut stmt = tx.prepare(
-                    "SELECT id, parent_id, name, type, source_node_id, sort_order
-                     FROM ext.consolidation_nodes WHERE consolidation_id = ?1 ORDER BY id",
-                )?;
+                let mut stmt = tx.prepare(&cnode_sql)?;
                 let rows: Vec<ConsolidationNodeRow> = stmt
                     .query_map(params![old_cons_id], |r| {
                         Ok((
@@ -508,17 +530,21 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                             r.get(3)?,
                             r.get(4)?,
                             r.get(5)?,
+                            r.get(6)?,
+                            r.get(7)?,
                         ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
-                for (old_id, parent_id, name, ntype, source_node_id, sort_order) in rows {
+                for (old_id, parent_id, name, ntype, source_node_id, sort_order, done, struck) in
+                    rows
+                {
                     let new_parent_id = parent_id.and_then(|p| cnode_id_map.get(&p).copied());
                     let new_source_node_id =
                         source_node_id.and_then(|s| node_id_map.get(&s).copied());
                     tx.execute(
-                        "INSERT INTO consolidation_nodes (consolidation_id, parent_id, name, type, source_node_id, sort_order)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        params![new_cons_id, new_parent_id, name, ntype, new_source_node_id, sort_order],
+                        "INSERT INTO consolidation_nodes (consolidation_id, parent_id, name, type, source_node_id, sort_order, done, struck)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        params![new_cons_id, new_parent_id, name, ntype, new_source_node_id, sort_order, done, struck],
                     )?;
                     cnode_id_map.insert(old_id, tx.last_insert_rowid());
                 }

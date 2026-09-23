@@ -148,6 +148,9 @@ pub fn materialize_subtree(
             origin_path: Some(root.rel_path.clone()),
             origin_source_id: Some(source_id),
             is_alias: root.is_alias,
+            done: false,
+            struck: false,
+            original_name: None,
         });
 
         let mut stack = vec![root.id];
@@ -180,6 +183,9 @@ pub fn materialize_subtree(
                     origin_path: Some(k.rel_path.clone()),
                     origin_source_id: Some(source_id),
                     is_alias: k.is_alias,
+                    done: false,
+                    struck: false,
+                    original_name: None,
                 });
                 stack.push(k.id);
             }

@@ -247,6 +247,46 @@ hash_spec)` makes re-scanning an unchanged tree a no-op read-wise. Resumable: ca
   subtrees dragged in wholesale. Renames of consolidation nodes are written straight to
   `consolidation_nodes.name`; renames of files inside a dragged-in source directory are stored as
   virtual edits in `pathfix_state` and folded in at path-computation and export time.
+  **`pathfix::rename` (the `pathfix_rename` command) is the only rename path for both the
+  Consolidate and Fix Paths trees.** It records the original once in `pathfix_state`, so a rename
+  made in either view can be reset from either. Renaming a row back to its recorded original
+  counts as a revert: it deletes the row instead of leaving an edit that changes nothing.
+  `ConsolidationNode.original_name` is read from that table, and `Some` means "renamed".
+- **After-name indicators** (`NameMarks.svelte`, shared by both tree rows):
+  - a reset button when the row itself is renamed;
+  - a `textbox` mark with a count when something beneath it is renamed;
+  - a strikethrough mark when something beneath the row is struck but the row isn't.
+
+  The "beneath" counts cover every descendant and come from `util.countBelow`; don't derive them
+  separately per view.
+- **Consolidated-tree marks.** `consolidation_nodes.done` ("carried out on disk") and `struck`
+  ("to be deleted on disk") are independent flags. `done` applies to one row only. `struck` is
+  stored only where it was applied and **inherited downward at read time**: a row is struck when it
+  or any ancestor is. A struck subtree is not part of the end state, so the consolidated totals
+  count it only toward struck ancestors. `pathfix.rs::walk_cons` **shows it but never measures
+  it**:
+  - `PathTreeNode.struck` is the inherited value;
+  - a struck row is never `over_limit` and never makes an ancestor so;
+  - a live folder whose children are all struck is an end-state leaf, so it is measured itself.
+    The frontend's badge and `overCount` use the same "live, with no live children" rule.
+
+  A hard removal goes through `consolidation_delete_nodes`, which takes the selection's roots, and
+  **Trash exists only in the Consolidate tree**.
+  - **Colour.** A row is green (`--done`) only when it **and every descendant** is done; a
+    ticked folder with outstanding contents keeps the tick icon but has no tint. Otherwise a
+    struck row is red (`--struck`). "Fully done" beats struck, so a finished deletion is green
+    and keeps its strikethrough.
+  - **Fix Paths** does not share the Consolidate tree's UI. Its toolbar is **Folder** (the
+    shared `NewFolderDialog`) plus the **Strikethrough** toggle. Both views' toggles use
+    `util.strikeToggle`. It has no done marks and no trash.
+  - **In both trees, a row background means *selected* and nothing else** (`bg-muted/50`).
+    Folders carry no tint and over-limit rows only a red border, so don't reintroduce either as
+    a fill.
+- **Tree selection is hierarchical** (`stores/selection.svelte.ts`, shared by the device,
+  consolidated and Fix Paths trees). `selected` holds only roots, and a row is selected when it or
+  any ancestor is a root. Ctrl/cmd-click on a child of a selected folder does nothing, and adding a
+  folder absorbs the roots beneath it. Operations consume `roots()` or `dragIds()`, so no item is
+  reached by two routes. Rows must pass `parentId` to `use:selectable`.
 - **`consolidate.rs`** also owns `purge_source_files`, which `source_delete` must call **before**
   deleting the source row: `consolidation_nodes.source_node_id` is `ON DELETE SET NULL`, so once
   the `sources → nodes` cascade runs there is nothing left to say which consolidation rows came
@@ -267,7 +307,7 @@ hash_spec)` makes re-scanning an unchanged tree a no-op read-wise. Resumable: ca
   there would reintroduce lock contention with `run_dedup`'s dedicated connection). Adding a column
   to an already-shipped table needs an entry in _both_ `init_schema`'s DDL (for fresh databases) and
   `migrate`'s `alterations` list (for existing ones) — `CREATE TABLE IF NOT EXISTS` alone only ever
-  helps the former. `SCHEMA_VERSION` is **11** (v11: `sources.color`, the user-picked source colour); version 3 added the hashing/medium columns to `nodes`
+  helps the former. `SCHEMA_VERSION` is **12** (v11: `sources.color`, the user-picked source colour; v12: `consolidation_nodes.done`/`struck`, the archivist's progress marks); version 3 added the hashing/medium columns to `nodes`
   and `sources` plus two brand-new tables, `hash_cache` and `scan_progress` (new tables need only the
   `CREATE TABLE IF NOT EXISTS` in `init_schema`, not a `migrate` entry). Note that a column added
   by `migrate` is **not backfilled** — existing rows get the `DEFAULT`. `sources.physical_size`

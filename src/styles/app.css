@@ -40,6 +40,12 @@
  *                  --warn for "uncertain / getting heavy". These carry the
  *                  duplicate-severity and match-confidence ramps so those
  *                  numbers encode magnitude instead of all shouting at once.
+ *   --done / --struck  Archivist progress marks on the consolidated tree:
+ *                  --done (pastel green) = "already carried out on disk",
+ *                  --struck (muted pastel red) = "to be deleted on disk".
+ *                  Kept apart from --ok / --destructive on purpose: a tick is
+ *                  not a confidence reading, and a to-delete mark is a note
+ *                  for later, not an irreversible action.
  *
  * NOTE: `--accent` (the hover/active surface token) is deliberately a plain
  * neutral step, NOT a tinted primary.
@@ -82,6 +88,10 @@
     --ok: oklch(0.525 0.115 168);
 
     --warn: oklch(0.6 0.135 68);
+
+    --done: oklch(0.6 0.09 150);
+
+    --struck: oklch(0.56 0.1 22);
 
     --border: oklch(0.906 0.006 17);
 
@@ -156,6 +166,10 @@
     --ok: oklch(0.735 0.131 168);
 
     --warn: oklch(0.79 0.145 72);
+
+    --done: oklch(0.8 0.09 150);
+
+    --struck: oklch(0.68 0.09 22);
 
     --border: oklch(1 0 0 / 11%);
 
@@ -236,6 +250,10 @@
     --color-ok: var(--ok);
 
     --color-warn: var(--warn);
+
+    --color-done: var(--done);
+
+    --color-struck: var(--struck);
 
     --color-accent-foreground: var(--accent-foreground);
 

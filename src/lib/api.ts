@@ -14,6 +14,7 @@ import type {
     MediumInfoDto,
     NodeType,
     PathTreeNode,
+    RenameResult,
     ScanPreview,
     ScanProgressInfo,
     SizeBucket,
@@ -155,20 +156,28 @@ export const consolidationMoveNode = (
     parentId: number | null,
     sortOrder: number,
 ) => invoke<void>('consolidation_move_node', { nodeId, parentId, sortOrder });
-export const consolidationRenameNode = (nodeId: number, name: string) =>
-    invoke<void>('consolidation_rename_node', { nodeId, name });
-export const consolidationDeleteNode = (nodeId: number) =>
-    invoke<void>('consolidation_delete_node', { nodeId });
+/** Removes each node and, by cascade, everything beneath it. Pass the
+ *  selection's roots, so no node is reached twice. */
+export const consolidationDeleteNodes = (nodeIds: number[]) =>
+    invoke<void>('consolidation_delete_nodes', { nodeIds });
+export const consolidationSetDone = (nodeIds: number[], value: boolean) =>
+    invoke<void>('consolidation_set_done', { nodeIds, value });
+/** Sets each node's own flag; descendants inherit it when read. */
+export const consolidationSetStruck = (nodeIds: number[], value: boolean) =>
+    invoke<void>('consolidation_set_struck', { nodeIds, value });
 
 // --- Path limits (on the consolidated end-state tree) ---
 
 export const pathfixTree = (workspaceId: number, limit: number) =>
     invoke<PathTreeNode[]>('pathfix_tree', { workspaceId, limit });
+/** The one rename path for both the Consolidate and Fix Paths trees, so every
+ *  rename records its original. `''` -- or the original itself -- reverts. */
 export const pathfixRename = (
     workspaceId: number,
     nodeId: number,
     newName: string,
-) => invoke<void>('pathfix_rename', { workspaceId, nodeId, newName });
+) =>
+    invoke<RenameResult>('pathfix_rename', { workspaceId, nodeId, newName });
 
 // --- App state ---
 

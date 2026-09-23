@@ -220,6 +220,22 @@ export interface ConsolidationNode {
      *  it is a name someone has to recreate -- but its bytes belong to the
      *  canonical, so size rollups must skip them. */
     is_alias: boolean;
+    /** Archivist progress mark: this row has been dealt with on the real
+     *  filesystem. Applies to this row only. */
+    done: boolean;
+    /** "To delete" mark -- the row's *own* flag. A row is effectively struck
+     *  when it or any ancestor carries it; struck subtrees are left out of the
+     *  consolidated totals and of Fix Paths. */
+    struck: boolean;
+    /** Name before the user renamed this row; null when it isn't renamed. */
+    original_name: string | null;
+}
+
+/** Outcome of `pathfix_rename`: the name afterwards, and the original while
+ *  the row is still renamed (null once reverted). */
+export interface RenameResult {
+    name: string;
+    original_name: string | null;
 }
 
 export interface PathTreeNode {
@@ -240,6 +256,9 @@ export interface PathTreeNode {
     origin_path: string | null;
     /** `sources.id` of the origin device, for the per-source colour bars. */
     origin_source_id: number | null;
+    /** Struck by its own flag or an ancestor's. Shown, but never measured:
+     *  a struck row is never `over_limit` and never makes an ancestor so. */
+    struck: boolean;
 }
 
 export interface DedupProgress {
