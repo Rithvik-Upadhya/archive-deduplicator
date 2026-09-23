@@ -31,7 +31,7 @@ pnpm check                 # svelte-kit sync + svelte-check (the TS typecheck)
 pnpm tauri build           # production bundle
 
 cd src-tauri
-cargo test                 # Rust tests (db.rs, dedup.rs, links.rs, rollup.rs, dbio.rs, consolidate.rs, pathfix.rs, medium.rs, hashing.rs)
+cargo test                 # Rust tests (db.rs, dedup.rs, links.rs, rollup.rs, dbio.rs, consolidate.rs, pathfix.rs, medium.rs, hashing.rs, search.rs)
 cargo test detects_cross_source_file_duplicates    # single test
 cargo clippy && cargo fmt
 ```
@@ -359,6 +359,27 @@ UI-relevant conventions:
   that command says the node is hidden by it, opens the device panel, expands the ancestors, and
   sets `deviceReveal.target`. The target's `TreeItem` scrolls and selects itself when its row
   mounts, which in a lazily loaded tree can be several fetches later.
+- **Name search** (`SearchBar.svelte` in the top bar, hidden in Fix Paths; state in
+  `stores/search.svelte.ts`, driven by `app.runSearch`/`app.clearSearch`). A substring match on a
+  node's *name*, never its path, and it runs only on Enter or the search button. `*` (any run,
+  including none) and `?` (one character) are wildcards *inside* that substring match — unanchored,
+  so `IMG_*.jpg` also matches `old-IMG_1.jpg.bak` — with no escape for a literal `*`/`?`. `search.applied`
+  is the search in effect, and `query`/`caseSensitive` are only what the input holds until then.
+  Switching views or workspaces clears it.
+  - The device trees and the group list load lazily, so the backend matches: `search_nodes` returns
+    matches plus ancestors, and `get_groups` takes `search`/`caseSensitive`. A group is kept when any
+    member on a non-excluded source matches. The consolidated tree is filtered in
+    `ConsolidationView` from memory; its unfiltered `childrenOf` still drives drops and sort orders.
+  - The comparison is `search.rs::contains_folded`/`glob_contains`, exposed to SQL as `search_match`
+    (SQLite's `lower()`/`LIKE` fold ASCII only), and `util.compileNameQuery` on the frontend. The
+    store compiles it once as `search.compiled`, and the highlight, the matched-member label and the
+    consolidated tree's filter (`search.matches`) all go through it. Both sides lowercase in full
+    Unicode (never the regex `i` flag), and `?` takes one `char` / one code point (`u` flag). Change
+    them together.
+  - While searching, trees expand from `search.deviceExpanded`/`consExpanded`, not the normal sets,
+    so clearing restores the old expansion. Ancestors are auto-opened only up to
+    `AUTO_EXPAND_LIMIT` matches; the filter itself is never capped. Reveal arrows are disabled,
+    and view selections clear on every search change.
 - **Icons go through `$lib/components/Icon.svelte`. Never import `@iconify/svelte`.** That package
   ships no icon data — it fetches every glyph from `api.iconify.design` at runtime, so all icons
   silently render empty offline, which is the one condition this app exists for. The wrapper maps a
@@ -427,6 +448,10 @@ whether deleting something would lose their only copy. So:
   "Locate duplicates" button, which needs a real folder-kind match group to open. Do not remove it
   as dead.
 - per-source `% dup` badges carry no tint at all; the split bar beneath them does that job.
+
+`--hit` / `--hit-text` are the search-match yellows. The highlighted text keeps its own colour, so
+`--hit` is chosen per theme for that text: bright under near-black, dark mustard under near-white.
+They are not `--warn`.
 
 `--warn` is deliberately **not** used for duplication, so a yellow mark always means "not judged"
 (skipped) rather than "somewhat duplicated". The older magnitude scale (`dupLevel`/`DUP_BADGE`/

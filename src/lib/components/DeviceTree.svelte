@@ -13,6 +13,7 @@
     import { ScrollArea } from '$lib/components/ui/scroll-area';
     import * as AlertDialog from '$lib/components/ui/alert-dialog';
     import { taskTray } from '$lib/stores/tasks.svelte';
+    import { search } from '$lib/stores/search.svelte';
 
     // Kept in lockstep with TreeItem.svelte's DragMeta.
     type DragMeta = {
@@ -47,8 +48,14 @@
     /** Hides nodes whose only duplicates live on another device. */
     const filterCrossDevice = $derived(deviceFilterOn.has(source.id));
 
+    // The funnel and the search are both the user's own filters, so both
+    // apply: a match the funnel hides stays hidden.
     const visibleRoots = $derived(
-        roots?.filter(n => !filterCrossDevice || !n.cross_dup) ?? null
+        roots?.filter(
+            n =>
+                (!filterCrossDevice || !n.cross_dup) &&
+                (!search.active || search.deviceVisible.has(n.id))
+        ) ?? null
     );
     // A count counts *names* -- canonical files, hardlink aliases and symlinks
     // alike -- so it matches what the user would find inspecting the source by
@@ -343,7 +350,9 @@
                     </div>
                 {:else if visibleRoots && visibleRoots.length === 0}
                     <div class="px-2 py-1.5 text-xs text-muted-foreground">
-                        All files on this device have duplicates elsewhere
+                        {search.active
+                            ? 'No matches on this device'
+                            : 'All files on this device have duplicates elsewhere'}
                     </div>
                 {:else}
                     {#each visibleRoots ?? [] as node (node.id)}

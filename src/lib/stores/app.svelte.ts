@@ -3,6 +3,8 @@
 // mutations that matter to persistence are pushed to the Rust/SQLite backend.
 
 import * as api from '../api';
+import { AUTO_EXPAND_LIMIT, search } from './search.svelte';
+import { taskTray } from './tasks.svelte';
 import type { IconName } from '../components/Icon.svelte';
 import type {
     GroupSort,
@@ -154,11 +156,15 @@ class AppState {
     }
 
     async setView(view: ViewName) {
+        // Search state is per view: switching starts from a clean slate.
+        if (view !== this.view) await this.clearSearch();
         this.view = view;
         await api.appStateSet('view', view);
     }
 
     async selectWorkspace(id: number) {
+        // The applied search's node ids belong to the old workspace.
+        search.reset();
         this.activeWorkspaceId = id;
         await api.appStateSet('active_workspace', String(id));
         await this.loadWorkspace();
@@ -297,6 +303,51 @@ class AppState {
         this.treeVersion++;
     }
 
+    /**
+     * Run the top-bar search with the input's current text and case toggle.
+     * The device trees filter by the result; the Deduplicate view's group
+     * list is re-queried with it. The consolidated tree filters itself from
+     * `search.applied`. An empty query clears the search instead.
+     */
+    async runSearch(query = search.query, caseSensitive = search.caseSensitive) {
+        if (this.activeWorkspaceId == null) return;
+        if (query === '') return this.clearSearch();
+        search.busy = true;
+        try {
+            const res = await api.searchNodes(
+                this.activeWorkspaceId,
+                query,
+                caseSensitive,
+            );
+            search.apply(query, caseSensitive, res);
+            if (res.matched.length > AUTO_EXPAND_LIMIT) {
+                taskTray.notify(
+                    `${res.matched.length} matches`,
+                    'success',
+                    'Too many to open every folder at once -- expand folders to browse them.',
+                );
+            }
+            if (this.view === 'dedup') await this.refreshGroups();
+        } catch (err) {
+            taskTray.notify('Search failed', 'error', String(err));
+        } finally {
+            search.busy = false;
+        }
+    }
+
+    /** Leave the searching state, restoring the unfiltered group list. */
+    async clearSearch() {
+        const wasSearching = search.active;
+        search.reset();
+        if (wasSearching && this.view === 'dedup') await this.refreshGroups();
+    }
+
+    /** Group-list arguments for the applied search, if any. */
+    private get groupSearchArgs() {
+        const a = search.applied;
+        return a ? { search: a.query, caseSensitive: a.caseSensitive } : {};
+    }
+
     /** Reload the first page of groups using the current filters. */
     async refreshGroups() {
         if (this.activeWorkspaceId == null) return;
@@ -308,6 +359,7 @@ class AppState {
                 minSize: this.minSizeKb * 1024,
                 kind: this.groupKind === 'all' ? undefined : this.groupKind,
                 sort: this.groupSort,
+                ...this.groupSearchArgs,
                 offset: 0,
                 limit: GROUP_PAGE_SIZE,
             });
@@ -334,6 +386,7 @@ class AppState {
                 minSize: this.minSizeKb * 1024,
                 kind: this.groupKind === 'all' ? undefined : this.groupKind,
                 sort: this.groupSort,
+                ...this.groupSearchArgs,
                 offset: this.groups.length,
                 limit: GROUP_PAGE_SIZE,
             });

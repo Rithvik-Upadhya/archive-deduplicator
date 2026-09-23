@@ -18,6 +18,7 @@
     import * as Empty from '$lib/components/ui/empty';
     import * as Resizable from '$lib/components/ui/resizable/index.js';
     import { taskTray } from '$lib/stores/tasks.svelte';
+    import { AUTO_EXPAND_LIMIT, search } from '$lib/stores/search.svelte';
     import {
         formatBytes,
         countBelow,
@@ -193,6 +194,54 @@
     function childrenOf(parentId: number | null): ConsolidationNode[] {
         return index.byParent.get(parentId) ?? [];
     }
+
+    // The top-bar search, applied to the in-memory end-state tree: matches on
+    // the displayed (possibly renamed) name, plus every ancestor of one. Null
+    // when not searching.
+    const searchHits = $derived.by(() => {
+        if (!search.active) return null;
+        const matched = nodes.filter(n => search.matches(n.name));
+        const ancestors = new Set<number>();
+        for (const n of matched) {
+            let pid = n.parent_id;
+            while (pid != null && !ancestors.has(pid)) {
+                ancestors.add(pid);
+                pid = index.byId.get(pid)?.parent_id ?? null;
+            }
+        }
+        const visible = new Set(ancestors);
+        for (const n of matched) visible.add(n.id);
+        return { matched: matched.length, ancestors, visible };
+    });
+
+    /** `childrenOf` minus what the search hides. Rendering only: drops,
+     *  sort orders and totals keep using the unfiltered tree. */
+    function visibleChildrenOf(parentId: number | null): ConsolidationNode[] {
+        const kids = childrenOf(parentId);
+        return searchHits ? kids.filter(n => searchHits.visible.has(n.id)) : kids;
+    }
+
+    // Open the folders leading to the matches once per search, so later
+    // collapses stick. Same cap as the device trees.
+    let seededFor = -1;
+    $effect(() => {
+        const gen = search.generation;
+        if (gen === seededFor || !searchHits) return;
+        seededFor = gen;
+        if (searchHits.matched > AUTO_EXPAND_LIMIT) return;
+        for (const id of searchHits.ancestors) search.consExpanded.add(id);
+    });
+
+    // Selections the search might hide must not ride along into a drag,
+    // strike or delete, so a search starting or ending clears them.
+    let clearedFor = search.generation;
+    $effect(() => {
+        const gen = search.generation;
+        if (gen === clearedFor) return;
+        clearedFor = gen;
+        sourceSelection.clear();
+        consSelection.clear();
+    });
 
     async function handleDropFromSource(parentId: number | null, e: DragEvent) {
         const raw = e.dataTransfer?.getData('application/x-dedup-node');
@@ -559,11 +608,15 @@
                     <p class="p-4 text-center text-sm text-muted-foreground">
                         Drop files or folders here to build your target tree.
                     </p>
+                {:else if visibleChildrenOf(null).length === 0}
+                    <p class="p-4 text-center text-sm text-muted-foreground">
+                        No matches in the consolidated tree.
+                    </p>
                 {:else}
-                    {#each childrenOf(null) as node (node.id)}
+                    {#each visibleChildrenOf(null) as node (node.id)}
                         <ConsolidationNodeItem
                             {node}
-                            {childrenOf}
+                            childrenOf={visibleChildrenOf}
                             stats={index.stats}
                             {barsOf}
                             {relocOf}

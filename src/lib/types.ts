@@ -239,6 +239,14 @@ export interface NodeLocation {
     hidden_by_filter: boolean;
 }
 
+/** Result of `search_nodes`: a name search over the device trees. */
+export interface NodeSearchResult {
+    /** Nodes whose name contains the query. */
+    matched: number[];
+    /** Strict ancestors of at least one match. A match can be in both. */
+    ancestors: number[];
+}
+
 /** Outcome of `pathfix_rename`: the name afterwards, and the original while
  *  the row is still renamed (null once reverted). */
 export interface RenameResult {

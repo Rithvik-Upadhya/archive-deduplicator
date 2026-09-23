@@ -9,6 +9,8 @@
     import { app } from '$lib/stores/app.svelte';
     import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
     import { consolidationTreeExpanded } from '$lib/stores/treeExpansion.svelte';
+    import { search } from '$lib/stores/search.svelte';
+    import Highlight from './Highlight.svelte';
     import Self from './ConsolidationNodeItem.svelte';
     import SourceBarsCell from './SourceBarsCell.svelte';
     import NameMarks from './NameMarks.svelte';
@@ -90,7 +92,12 @@
         isFullyDone(node.id) ? 'text-done' : struck ? 'text-struck' : ''
     );
 
-    const expanded = $derived(consolidationTreeExpanded.has(node.id));
+    // While searching, expansion lives in a search-scoped set, so the
+    // normal one is untouched when the search is cleared.
+    const expandSet = $derived(
+        search.active ? search.consExpanded : consolidationTreeExpanded
+    );
+    const expanded = $derived(expandSet.has(node.id));
     let dragOver = $state(false);
     let editing = $state(false);
     let editValue = $state('');
@@ -160,7 +167,7 @@
             aria-label="Toggle"
             onclick={e => {
                 e.stopPropagation();
-                consolidationTreeExpanded.toggle(node.id);
+                expandSet.toggle(node.id);
             }}>
             <Icon icon="ph:caret-right-bold" />
         </button>
@@ -184,7 +191,7 @@
                 <span
                     class="truncate {markTone}"
                     class:line-through={struck}
-                    title={origin}>{node.name}</span>
+                    title={origin}><Highlight text={node.name} /></span>
                 <NameMarks
                     original={node.original_name}
                     renamedBelow={renamedBelowOf(node.id)}

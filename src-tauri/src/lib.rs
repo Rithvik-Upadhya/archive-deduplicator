@@ -13,6 +13,7 @@ mod rollup;
 mod scan;
 #[cfg(windows)]
 mod scan_win;
+mod search;
 
 use db::{Db, DbPath};
 use std::sync::Mutex;
@@ -65,6 +66,7 @@ pub fn run() {
             commands::get_groups,
             commands::get_group_for_node,
             commands::node_location,
+            commands::search_nodes,
             commands::consolidation_get,
             commands::consolidation_add_node,
             commands::consolidation_add_source_subtree,

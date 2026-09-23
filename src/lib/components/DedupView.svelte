@@ -16,6 +16,8 @@
     import DeviceTree from './DeviceTree.svelte';
     import GroupDialog from './GroupDialog.svelte';
     import RevealButton from './RevealButton.svelte';
+    import MemberPath from './MemberPath.svelte';
+    import { search } from '$lib/stores/search.svelte';
     import { TreeSelection } from '$lib/stores/selection.svelte';
     import SourceManager from './SourceManager.svelte';
     import Icon from '$lib/components/Icon.svelte';
@@ -41,6 +43,15 @@
     let groupOpen = $state(false);
     let groupNode = $state<TreeNode | null>(null);
     let sentinel = $state<HTMLElement | null>(null);
+
+    // Selections the search might hide must not linger past it.
+    let clearedFor = search.generation;
+    $effect(() => {
+        const gen = search.generation;
+        if (gen === clearedFor) return;
+        clearedFor = gen;
+        deviceSelection.clear();
+    });
 
     // Re-query group filters once the sliders settle, and persist the new
     // tuning + flag results stale -- min_size in particular is a hard filter
@@ -275,8 +286,13 @@
                                 </Empty.Media>
                                 <Empty.Title>No duplicate groups</Empty.Title>
                                 <Empty.Description>
-                                    Adjust the sliders and run “Find
-                                    Duplicates”.
+                                    {#if search.applied}
+                                        No group has a member whose name
+                                        contains “{search.applied.query}”.
+                                    {:else}
+                                        Adjust the sliders and run “Find
+                                        Duplicates”.
+                                    {/if}
                                 </Empty.Description>
                             </Empty.Header>
                         </Empty.Root>
@@ -323,13 +339,22 @@
                                             {#each g.members as m (m.node_id)}
                                                 <li
                                                     class="flex items-center gap-2 px-2 py-0.5 text-xs">
+                                                    <!-- Yellow names the member the
+                                                         search matched, in case the
+                                                         highlight is truncated. -->
                                                     <span
-                                                        class="shrink-0 font-medium whitespace-nowrap text-muted-foreground"
+                                                        class="shrink-0 font-medium whitespace-nowrap {search.matches(
+                                                            m.name
+                                                        )
+                                                            ? 'text-hit-text'
+                                                            : 'text-muted-foreground'}"
                                                         >{m.device_label}</span>
                                                     <span
                                                         class="flex-1 truncate"
                                                         title={m.rel_path}
-                                                        >{m.rel_path}</span>
+                                                        ><MemberPath
+                                                            relPath={m.rel_path}
+                                                            name={m.name} /></span>
                                                     <Button
                                                         variant="ghost"
                                                         size="icon"

@@ -46,6 +46,13 @@
  *                  Kept apart from --ok / --destructive on purpose: a tick is
  *                  not a confidence reading, and a to-delete mark is a note
  *                  for later, not an irreversible action.
+ *   --hit / --hit-text  Name-search matches. --hit is the highlight *behind*
+ *                  matched text, which keeps its own colour: bright yellow
+ *                  under near-black text in light mode (13.9:1), dark mustard
+ *                  under near-white text in dark mode (5.2:1). --hit-text is
+ *                  yellow *as text* on a card (the matched member's source
+ *                  label): 4.8:1 light, 13.4:1 dark. Not --warn, which means
+ *                  "not judged" -- a search hit is no finding at all.
  *
  * NOTE: `--accent` (the hover/active surface token) is deliberately a plain
  * neutral step, NOT a tinted primary.
@@ -92,6 +99,10 @@
     --done: oklch(0.6 0.09 150);
 
     --struck: oklch(0.56 0.1 22);
+
+    --hit: oklch(0.9 0.18 98);
+
+    --hit-text: oklch(0.55 0.11 95);
 
     --border: oklch(0.906 0.006 17);
 
@@ -170,6 +181,10 @@
     --done: oklch(0.8 0.09 150);
 
     --struck: oklch(0.68 0.09 22);
+
+    --hit: oklch(0.5 0.1 95);
+
+    --hit-text: oklch(0.9 0.16 100);
 
     --border: oklch(1 0 0 / 11%);
 
@@ -254,6 +269,10 @@
     --color-done: var(--done);
 
     --color-struck: var(--struck);
+
+    --color-hit: var(--hit);
+
+    --color-hit-text: var(--hit-text);
 
     --color-accent-foreground: var(--accent-foreground);
 

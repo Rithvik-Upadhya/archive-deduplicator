@@ -13,6 +13,7 @@ import type {
     MatchGroup,
     MediumInfoDto,
     NodeLocation,
+    NodeSearchResult,
     NodeType,
     PathTreeNode,
     RenameResult,
@@ -120,6 +121,9 @@ export const getGroups = (args: {
     sort?: GroupSort;
     offset: number;
     limit: number;
+    /** Keep only groups with a member whose name contains this. */
+    search?: string;
+    caseSensitive?: boolean;
 }) =>
     invoke<GroupPage>('get_groups', {
         workspaceId: args.workspaceId,
@@ -129,9 +133,17 @@ export const getGroups = (args: {
         sort: args.sort ?? 'confidence',
         offset: args.offset,
         limit: args.limit,
+        search: args.search ?? null,
+        caseSensitive: args.caseSensitive ?? false,
     });
 export const getGroupForNode = (nodeId: number) =>
     invoke<MatchGroup | null>('get_group_for_node', { nodeId });
+
+export const searchNodes = (
+    workspaceId: number,
+    query: string,
+    caseSensitive: boolean,
+) => invoke<NodeSearchResult>('search_nodes', { workspaceId, query, caseSensitive });
 
 export const nodeLocation = (nodeId: number) =>
     invoke<NodeLocation>('node_location', { nodeId });

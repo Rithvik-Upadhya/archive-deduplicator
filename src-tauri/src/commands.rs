@@ -4,7 +4,7 @@
 use crate::db::Db;
 use crate::dedup::DedupParams;
 use crate::model::*;
-use crate::{hashing, links, medium, parse, pathfix, rollup, scan};
+use crate::{hashing, links, medium, parse, pathfix, rollup, scan, search};
 use chrono::Utc;
 use rusqlite::params;
 use std::collections::HashMap;
@@ -892,7 +892,8 @@ pub async fn run_dedup(
 }
 
 /// Return a page of match groups for a workspace, filtered by confidence,
-/// minimum size and kind, sorted by confidence or size. Members are fetched
+/// minimum size, kind and (optionally) a name search, sorted by confidence or
+/// size. Members are fetched
 /// with a single batched query per page so pagination stays cheap even with
 /// hundreds of thousands of groups.
 #[tauri::command]
@@ -906,6 +907,8 @@ pub fn get_groups(
     sort: Option<String>,
     offset: i64,
     limit: i64,
+    search: Option<String>,
+    case_sensitive: bool,
 ) -> CmdResult<GroupPage> {
     let conn = db.lock();
     group_page(
@@ -917,6 +920,8 @@ pub fn get_groups(
         sort,
         offset,
         limit,
+        search,
+        case_sensitive,
     )
     .map_err(map_err)
 }
@@ -933,6 +938,8 @@ fn group_page(
     sort: Option<String>,
     offset: i64,
     limit: i64,
+    search: Option<String>,
+    case_sensitive: bool,
 ) -> rusqlite::Result<GroupPage> {
     let kind_filter = kind.unwrap_or_default();
     let order = match sort.as_deref() {
@@ -963,13 +970,40 @@ fn group_page(
         ""
     };
 
+    // Name search: keep a group when at least one of its *displayed* members
+    // matches. Excluded-source members are filtered here as they are in the
+    // member query below -- a member the pane hides must not be the reason a
+    // group shows up in it.
+    // An empty needle means "no search"; the guard is always present (and
+    // short-circuits on `?7 = ''`) so both statements bind the same
+    // parameter list. The count leaves `?5`/`?6` unreferenced, which SQLite
+    // allows as long as a higher index is used.
+    search::register(conn)?;
+    let needle = search
+        .map(|q| search::fold_needle(&q, case_sensitive))
+        .unwrap_or_default();
+    let search_guard = "AND (?7 = '' OR EXISTS (SELECT 1 FROM match_members mm
+              JOIN nodes n ON n.id = mm.node_id
+              JOIN sources s ON s.id = n.source_id
+              WHERE mm.group_id = match_groups.id AND s.excluded = 0
+                AND search_match(n.name, ?7, ?8)))";
+
     let total: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM match_groups
                  WHERE workspace_id = ?1 AND confidence >= ?2 AND size >= ?3
-                   AND (?4 = '' OR kind = ?4) {live_member_guard}"
+                   AND (?4 = '' OR kind = ?4) {live_member_guard} {search_guard}"
         ),
-        params![workspace_id, min_confidence, min_size, kind_filter],
+        params![
+            workspace_id,
+            min_confidence,
+            min_size,
+            kind_filter,
+            limit,
+            offset,
+            needle,
+            case_sensitive
+        ],
         |r| r.get(0),
     )?;
 
@@ -977,7 +1011,7 @@ fn group_page(
         "SELECT id, workspace_id, kind, confidence, primary_signal, size
          FROM match_groups
          WHERE workspace_id = ?1 AND confidence >= ?2 AND size >= ?3
-           AND (?4 = '' OR kind = ?4) {live_member_guard}
+           AND (?4 = '' OR kind = ?4) {live_member_guard} {search_guard}
          ORDER BY {order} LIMIT ?5 OFFSET ?6"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -989,7 +1023,9 @@ fn group_page(
                 min_size,
                 kind_filter,
                 limit,
-                offset
+                offset,
+                needle,
+                case_sensitive
             ],
             |r| {
                 Ok(MatchGroup {
@@ -1044,6 +1080,18 @@ fn group_page(
     }
 
     Ok(GroupPage { total, groups })
+}
+
+/// Name search over the workspace's device trees (see `search.rs`).
+#[tauri::command]
+pub fn search_nodes(
+    db: State<Db>,
+    workspace_id: i64,
+    query: String,
+    case_sensitive: bool,
+) -> CmdResult<NodeSearchResult> {
+    let conn = db.lock();
+    search::search_nodes(&conn, workspace_id, &query, case_sensitive).map_err(map_err)
 }
 
 /// Ancestors of a node and whether the device funnel hides it, so the
@@ -1821,7 +1869,58 @@ mod tests {
     }
 
     fn page_all(conn: &Connection, ws: i64) -> GroupPage {
-        group_page(conn, ws, 0.0, 0, None, None, 0, 100).unwrap()
+        group_page(conn, ws, 0.0, 0, None, None, 0, 100, None, false).unwrap()
+    }
+
+    fn page_search(conn: &Connection, ws: i64, q: &str) -> GroupPage {
+        group_page(conn, ws, 0.0, 0, None, None, 0, 100, Some(q.into()), false).unwrap()
+    }
+
+    #[test]
+    fn get_groups_search_keeps_a_group_when_one_member_matches() {
+        let (conn, ws) = seeded_conn();
+        let src_x = insert_source(&conn, ws);
+        let src_y = insert_source(&conn, ws);
+        let a = insert_node_returning(&conn, src_x, "Holiday.MOV");
+        let b = insert_node_returning(&conn, src_y, "clip-0001.mov");
+        let group = insert_group(&conn, ws, "file", &[a, b]);
+        let c = insert_node_returning(&conn, src_x, "notes.txt");
+        let d = insert_node_returning(&conn, src_y, "notes.txt");
+        insert_group(&conn, ws, "file", &[c, d]);
+
+        let page = page_search(&conn, ws, "holiday");
+        assert_eq!(page.total, 1);
+        assert_eq!(page.groups[0].id, group);
+        assert_eq!(
+            page.groups[0].members.len(),
+            2,
+            "every member is still listed"
+        );
+        assert_eq!(
+            page_search(&conn, ws, "").total,
+            2,
+            "empty query is no search"
+        );
+    }
+
+    #[test]
+    fn get_groups_search_ignores_a_match_on_an_excluded_member() {
+        let (conn, ws) = seeded_conn();
+        let src_x = insert_source(&conn, ws);
+        let src_y = insert_source(&conn, ws);
+        let src_z = insert_source(&conn, ws);
+        let x1 = insert_node_returning(&conn, src_x, "renamed-copy.jpg");
+        let y1 = insert_node_returning(&conn, src_y, "img.jpg");
+        let z1 = insert_node_returning(&conn, src_z, "img.jpg");
+        insert_group(&conn, ws, "file", &[x1, y1, z1]);
+
+        assert_eq!(page_search(&conn, ws, "renamed").total, 1);
+        set_excluded(&conn, src_x, true);
+        assert_eq!(
+            page_search(&conn, ws, "renamed").total,
+            0,
+            "the only matching member is hidden, so the group must be too"
+        );
     }
 
     #[test]

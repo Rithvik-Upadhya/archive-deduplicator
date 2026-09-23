@@ -13,6 +13,8 @@
         pct,
     } from '$lib/util';
     import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
+    import { search } from '$lib/stores/search.svelte';
+    import Highlight from './Highlight.svelte';
     import Self from './TreeItem.svelte';
     import Icon from '$lib/components/Icon.svelte';
     import { Badge } from '$lib/components/ui/badge';
@@ -49,12 +51,23 @@
         filterCrossDevice = false,
     }: Props = $props();
 
-    const expanded = $derived(deviceTreeExpanded.has(node.id));
+    // While searching, expansion lives in a search-scoped set, so the
+    // normal one is untouched when the search is cleared.
+    const expandSet = $derived(
+        search.active ? search.deviceExpanded : deviceTreeExpanded
+    );
+    const expanded = $derived(expandSet.has(node.id));
     let children = $state<TreeNode[] | null>(null);
     let loading = $state(false);
 
+    // A search keeps only matches and the folders leading to them -- so a
+    // matched folder shows only its matching descendants.
     const visibleChildren = $derived(
-        children?.filter(c => !filterCrossDevice || !c.cross_dup) ?? null
+        children?.filter(
+            c =>
+                (!filterCrossDevice || !c.cross_dup) &&
+                (!search.active || search.deviceVisible.has(c.id))
+        ) ?? null
     );
 
     const isDir = $derived(node.type === 'directory');
@@ -125,7 +138,7 @@
 
     async function toggleExpanded() {
         const willExpand = !expanded;
-        deviceTreeExpanded.toggle(node.id);
+        expandSet.toggle(node.id);
         if (isDir && willExpand && children === null) {
             await loadChildren();
         }
@@ -256,7 +269,8 @@
              only on the rows that actually carry it, and still lands just left
              of the count column. -->
         <div class="flex min-w-0 flex-1 items-center gap-1.5">
-            <span class="truncate" title={node.rel_path}>{node.name}</span>
+            <span class="truncate" title={node.rel_path}
+                ><Highlight text={node.name} /></span>
             <!-- `--warn` carries the "uncertain" data semantic (see app.css):
                  these nodes are neither confirmed duplicates nor confirmed
                  unique, which is exactly what that token is for. -->

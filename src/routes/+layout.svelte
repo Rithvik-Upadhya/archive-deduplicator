@@ -6,6 +6,8 @@
     import AppSidebar from '$lib/components/AppSidebar.svelte';
     import * as Breadcrumb from '$lib/components/ui/breadcrumb/index.js';
     import TaskTray from '$lib/components/TaskTray.svelte';
+    import SearchBar from '$lib/components/SearchBar.svelte';
+    import { Separator } from '$lib/components/ui/separator';
     import { app, viewLabel } from '$lib/stores/app.svelte';
     import { getVersion } from '@tauri-apps/api/app';
     let { children } = $props();
@@ -26,7 +28,7 @@
     <main
         class="flex h-svh min-w-0 grow flex-col gap-2 overflow-hidden py-2 px-5 antialiased">
         <div class="flex h-9 shrink-0 flex-row items-center gap-2">
-            <Breadcrumb.Root class="grow">
+            <Breadcrumb.Root class="shrink-0">
                 <Breadcrumb.List
                     class="font-heading text-xs font-medium tracking-wide">
                     <Breadcrumb.Item>
@@ -40,11 +42,16 @@
                     </Breadcrumb.Item>
                 </Breadcrumb.List>
             </Breadcrumb.Root>
+            <!-- Not in Fix Paths. Switching views resets the search
+                 (`app.setView`). `h-4!` beats the separator's own
+                 `data-[orientation=vertical]:h-full`. -->
+            {#if app.view !== 'pathlimits'}
+                <Separator orientation="vertical" class="mx-1 h-4!" />
+                <SearchBar />
+            {/if}
             {#if version}
-                <!-- `Breadcrumb.Root` above carries `grow`, so this sits hard
-                     against the right edge without needing `ms-auto`. -->
                 <span
-                    class="shrink-0 font-heading text-xs tabular-nums text-muted-foreground">
+                    class="ms-auto shrink-0 font-heading text-xs tabular-nums text-muted-foreground">
                     v{version}
                 </span>
             {/if}

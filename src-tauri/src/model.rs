@@ -293,6 +293,16 @@ pub struct NodeLocation {
     pub hidden_by_filter: bool,
 }
 
+/// Result of a name search over the workspace's device trees.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeSearchResult {
+    /// Nodes whose name contains the query.
+    pub matched: Vec<i64>,
+    /// Strict ancestors of at least one match -- the folders a filtered tree
+    /// keeps (and opens) to reach them. A match can be in both lists.
+    pub ancestors: Vec<i64>,
+}
+
 /// Outcome of `pathfix::rename`: the row's name afterwards, and its original
 /// if it is still renamed (`None` once reverted).
 #[derive(Debug, Clone, Serialize, Deserialize)]

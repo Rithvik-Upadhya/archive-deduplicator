@@ -410,3 +410,68 @@ export function strikeToggle(
         ? { ids: effective, value: false }
         : { ids: roots, value: true };
 }
+
+/** One run of a name split by `NameQuery.parts`. */
+export interface HighlightPart {
+    text: string;
+    hit: boolean;
+}
+
+/** A compiled name-search query: the one matcher behind the consolidated
+ *  tree's filter, the matched-member label and every highlight. */
+export interface NameQuery {
+    /** Whether `name` matches -- the frontend twin of `search_match`. */
+    test(name: string): boolean;
+    /** `text` split into runs with every match marked. */
+    parts(text: string): HighlightPart[];
+}
+
+/** Regex syntax characters, plus `/`: the only identity escapes the `u`
+ *  flag permits (`\-` and friends are a SyntaxError there). */
+const REGEX_SYNTAX = /[\\^$.*+?()[\]{}|/]/;
+
+/**
+ * Compile a name-search query: a case-optional substring match in which `*`
+ * matches any run of characters and `?` exactly one. It must agree with the
+ * backend's `search.rs` (`fold_needle` + `contains_folded`, run as SQL
+ * `search_match`) or a row would be kept by the filter but show no
+ * highlight, or the reverse. So:
+ *
+ * - case folding is `toLowerCase` on both sides, as Rust's `to_lowercase`,
+ *   never the `i` flag (which uses a different, simple case folding);
+ * - the `u` flag makes `.` take one code point, as `?` takes one `char` in
+ *   Rust, and `s` lets it take a newline too;
+ * - `*` is lazy, so a highlight spans the shortest match. Rust only answers
+ *   yes/no, so laziness changes what is marked, never what is kept.
+ *
+ * A case-insensitive highlight runs over a lowercased copy, which only maps
+ * back onto `text` when lowercasing kept its length (it can grow, e.g. `İ`).
+ * When it did not, the name is returned unmarked rather than marking the
+ * wrong characters. Zero-length matches (a query of only `*`) mark nothing.
+ */
+export function compileNameQuery(query: string, caseSensitive: boolean): NameQuery {
+    const fold = (text: string) => (caseSensitive ? text : text.toLowerCase());
+    const source = Array.from(fold(query), ch =>
+        ch === '*' ? '.*?' : ch === '?' ? '.' : REGEX_SYNTAX.test(ch) ? `\\${ch}` : ch,
+    ).join('');
+    const once = new RegExp(source, 'su');
+    const every = new RegExp(source, 'gsu');
+    return {
+        test: name => once.test(fold(name)),
+        parts(text) {
+            const hay = fold(text);
+            if (!query || hay.length !== text.length) return [{ text, hit: false }];
+            const parts: HighlightPart[] = [];
+            let from = 0;
+            for (const m of hay.matchAll(every)) {
+                if (m[0] === '') continue;
+                const at = m.index;
+                if (at > from) parts.push({ text: text.slice(from, at), hit: false });
+                parts.push({ text: text.slice(at, at + m[0].length), hit: true });
+                from = at + m[0].length;
+            }
+            if (from < text.length) parts.push({ text: text.slice(from), hit: false });
+            return parts;
+        },
+    };
+}

@@ -12,6 +12,8 @@
         pct,
     } from '$lib/util';
     import RevealButton from './RevealButton.svelte';
+    import MemberPath from './MemberPath.svelte';
+    import { search } from '$lib/stores/search.svelte';
     import Icon from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button';
 
@@ -46,10 +48,16 @@
         <li
             class="flex items-center gap-2 rounded-sm px-1 py-0.5 text-xs data-[self=true]:bg-brand/10"
             data-self={m.node_id === selfId}>
+            <!-- Yellow names the member the search matched, in case the
+                 highlight itself is truncated out of view. -->
             <span
-                class="shrink-0 font-medium whitespace-nowrap text-muted-foreground"
-                >{m.device_label}</span>
-            <span class="flex-1 truncate" title={m.rel_path}>{m.rel_path}</span>
+                class="shrink-0 font-medium whitespace-nowrap {search.matches(
+                    m.name
+                )
+                    ? 'text-hit-text'
+                    : 'text-muted-foreground'}">{m.device_label}</span>
+            <span class="flex-1 truncate" title={m.rel_path}
+                ><MemberPath relPath={m.rel_path} name={m.name} /></span>
             <span class="shrink-0 whitespace-nowrap text-muted-foreground">
                 {formatBytes(
                     group.kind === 'folder' ? m.subtree_size : m.size

@@ -50,6 +50,7 @@
     import Stack from 'phosphor-svelte/lib/Stack';
     import Sun from 'phosphor-svelte/lib/Sun';
     import Trash from 'phosphor-svelte/lib/Trash';
+    import TextAa from 'phosphor-svelte/lib/TextAa';
     import Textbox from 'phosphor-svelte/lib/Textbox';
     import TextStrikethrough from 'phosphor-svelte/lib/TextStrikethrough';
     import TreeStructure from 'phosphor-svelte/lib/TreeStructure';
@@ -96,6 +97,7 @@
         'spinner-gap': SpinnerGap,
         stack: Stack,
         sun: Sun,
+        'text-aa': TextAa,
         textbox: Textbox,
         'text-strikethrough': TextStrikethrough,
         trash: Trash,
