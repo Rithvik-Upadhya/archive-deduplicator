@@ -160,6 +160,77 @@ export function sourceBarsFor(
     };
 }
 
+/** A row's internal-relocation marks. `color`/`title` are set when the row
+ *  itself was moved within its own source; `movedBelow` counts relocated
+ *  items anywhere beneath this row. */
+export interface Relocation {
+    color: string | null;
+    title: string | null;
+    movedBelow: number;
+}
+
+/** What relocation needs from a row -- shared by `ConsolidationNode` and
+ *  `PathTreeNode`. `origin_path` is the source's `nodes.rel_path`, which both
+ *  import paths build with `/` regardless of platform. */
+type LocatedNode = {
+    id: number;
+    parent_id: number | null;
+    origin_path: string | null;
+    origin_source_id: number | null;
+};
+
+const NO_RELOCATION: Relocation = { color: null, title: null, movedBelow: 0 };
+
+/**
+ * Internal relocations in an end-state tree, as a lookup. The one
+ * implementation behind both the Consolidate and Fix Paths trees.
+ *
+ * Derived from positions, not from move history: a row is *relocated* when its
+ * parent comes from the same source but is not the folder it sits in on that
+ * source. A parent from another source, a hand-made folder, or no parent at
+ * all is not an internal move -- the source bars and the grey bar already show
+ * those. A relocated folder's contents still sit under it, so only the moved
+ * root is marked.
+ *
+ * Every ancestor of a moved row carries a count, like the rename and strike
+ * marks, so the moved item stays findable with its folders collapsed however
+ * deep it was dropped.
+ */
+export function relocationsFor(
+    nodes: LocatedNode[],
+    sources: Source[],
+): (id: number) => Relocation {
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const sourceById = new Map(sources.map((s) => [s.id, s]));
+    const moved = new Map<number, Relocation>();
+
+    for (const n of nodes) {
+        if (n.origin_source_id == null || n.origin_path == null) continue;
+        const parent = n.parent_id == null ? undefined : byId.get(n.parent_id);
+        if (!parent || parent.origin_source_id !== n.origin_source_id) continue;
+        const slash = n.origin_path.lastIndexOf('/');
+        const srcParent = slash < 0 ? '' : n.origin_path.slice(0, slash);
+        if (parent.origin_path === srcParent) continue;
+
+        const source = sourceById.get(n.origin_source_id);
+        moved.set(n.id, {
+            color: source ? sourceColor(source) : NO_SOURCE_COLOR,
+            title: `Moved within ${source?.device_label ?? 'its device'} — originally in ${
+                srcParent === '' ? 'the device root' : srcParent
+            }`,
+            movedBelow: 0,
+        });
+    }
+    const movedBelow = countBelow(nodes, (n) => moved.has(n.id));
+
+    return (id) => {
+        const below = movedBelow.get(id) ?? 0;
+        const own = moved.get(id);
+        if (!own && below === 0) return NO_RELOCATION;
+        return { ...(own ?? NO_RELOCATION), movedBelow: below };
+    };
+}
+
 /* --- Colour scales ---------------------------------------------------------
  *
  * Duplicate markers are coloured by *where the other copies live*, not by how

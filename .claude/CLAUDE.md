@@ -255,10 +255,16 @@ hash_spec)` makes re-scanning an unchanged tree a no-op read-wise. Resumable: ca
 - **After-name indicators** (`NameMarks.svelte`, shared by both tree rows):
   - a reset button when the row itself is renamed;
   - a `textbox` mark with a count when something beneath it is renamed;
-  - a strikethrough mark when something beneath the row is struck but the row isn't.
+  - a strikethrough mark when something beneath the row is struck but the row isn't;
+  - an `arrows-out-cardinal` mark for a **move within one source**: in the source's colour on the
+    moved row, muted on every folder above it (the count is in its tooltip).
 
   The "beneath" counts cover every descendant and come from `util.countBelow`; don't derive them
-  separately per view.
+  separately per view — that includes the moved-item counts. Relocation itself comes from
+  `util.relocationsFor`, also shared, and is derived from positions rather than move history: a
+  row is relocated when its end-state parent is from the same source but isn't the folder its
+  `origin_path` sits in. A parent from another source or a hand-made folder is not an internal
+  move — the source bars already show those.
 - **Consolidated-tree marks.** `consolidation_nodes.done` ("carried out on disk") and `struck`
   ("to be deleted on disk") are independent flags. `done` applies to one row only. `struck` is
   stored only where it was applied and **inherited downward at read time**: a row is struck when it

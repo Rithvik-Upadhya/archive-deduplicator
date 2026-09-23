@@ -18,6 +18,7 @@
         pathSegments,
         strikeToggle,
         sourceBarsFor,
+        relocationsFor,
     } from '$lib/util';
 
     let consolidationId = $state<number | null>(null);
@@ -176,6 +177,7 @@
     });
 
     const barsOf = $derived(sourceBarsFor(nodes, app.sources));
+    const relocOf = $derived(relocationsFor(nodes, app.sources));
 
     /** A node's path within the consolidated tree, root-first. */
     const pathOf = (id: number) => pathSegments(index.byId, id);
@@ -538,6 +540,7 @@
                         {childrenOf}
                         stats={index.stats}
                         {barsOf}
+                        {relocOf}
                         {pathOf}
                         selection={consSelection}
                         isStruck={id => index.struck.has(id)}

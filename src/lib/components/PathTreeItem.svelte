@@ -2,7 +2,7 @@
     import { untrack } from 'svelte';
     import type { PathTreeNode } from '$lib/types';
     import { app } from '$lib/stores/app.svelte';
-    import { copyPath, type SourceBars } from '$lib/util';
+    import { copyPath, type Relocation, type SourceBars } from '$lib/util';
     import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
     import { consolidationTreeExpanded } from '$lib/stores/treeExpansion.svelte';
     import Self from './PathTreeItem.svelte';
@@ -21,6 +21,8 @@
         /** Source-colour bars for a row: own source first, then (folders)
          *  every other source nested beneath it. */
         barsOf: (node: PathTreeNode) => SourceBars;
+        /** Internal-relocation marks for a row (see `util.relocationsFor`). */
+        relocOf: (id: number) => Relocation;
         limit: number;
         selection: TreeSelection;
         /** Renamed items anywhere beneath a row. */
@@ -39,6 +41,7 @@
         childrenOf,
         pathOf,
         barsOf,
+        relocOf,
         limit,
         selection,
         renamedBelowOf,
@@ -73,6 +76,7 @@
     );
     const kids = $derived(childrenOf(node.id));
     const bars = $derived(barsOf(node));
+    const reloc = $derived(relocOf(node.id));
     // A leaf of the *end state*: live, with no live children. Only these are
     // measured (see pathfix.rs), so only these carry a path-length badge. A
     // live folder whose children are all struck is one.
@@ -198,6 +202,9 @@
                     original={node.edited ? node.original_name : null}
                     renamedBelow={renamedBelowOf(node.id)}
                     struckBelow={!node.struck && struckBelowOf(node.id) > 0}
+                    relocatedColor={reloc.color}
+                    relocatedTitle={reloc.title}
+                    movedBelow={reloc.movedBelow}
                     onreset={() => onrevert(node)} />
             </span>
         {/if}
@@ -248,6 +255,7 @@
                     {childrenOf}
                     {pathOf}
                     {barsOf}
+                    {relocOf}
                     {limit}
                     {selection}
                     {renamedBelowOf}

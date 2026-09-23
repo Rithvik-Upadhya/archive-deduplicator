@@ -1,6 +1,11 @@
 <script lang="ts">
     import type { ConsolidationNode } from '$lib/types';
-    import { copyPath, formatBytes, type SourceBars } from '$lib/util';
+    import {
+        copyPath,
+        formatBytes,
+        type Relocation,
+        type SourceBars,
+    } from '$lib/util';
     import { app } from '$lib/stores/app.svelte';
     import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
     import { consolidationTreeExpanded } from '$lib/stores/treeExpansion.svelte';
@@ -18,6 +23,8 @@
         /** Source-colour bars for a row: own source first, then (folders)
          *  every other source nested beneath it. */
         barsOf: (node: ConsolidationNode) => SourceBars;
+        /** Internal-relocation marks for a row (see `util.relocationsFor`). */
+        relocOf: (id: number) => Relocation;
         /** Path of a node within the consolidated tree, root-first. */
         pathOf: (id: number) => string[];
         selection: TreeSelection;
@@ -39,6 +46,7 @@
         childrenOf,
         stats,
         barsOf,
+        relocOf,
         pathOf,
         selection,
         isStruck,
@@ -57,6 +65,7 @@
     const kids = $derived(childrenOf(node.id));
     const nodeStats = $derived(stats.get(node.id));
     const bars = $derived(barsOf(node));
+    const reloc = $derived(relocOf(node.id));
     const origin = $derived(
         node.origin_device && node.origin_path
             ? `${node.origin_device}://${node.origin_path}`
@@ -180,6 +189,9 @@
                     original={node.original_name}
                     renamedBelow={renamedBelowOf(node.id)}
                     struckBelow={!struck && struckBelowOf(node.id) > 0}
+                    relocatedColor={reloc.color}
+                    relocatedTitle={reloc.title}
+                    movedBelow={reloc.movedBelow}
                     onreset={() => onreset(node)} />
             </span>
         {/if}
@@ -236,6 +248,7 @@
                     {childrenOf}
                     {stats}
                     {barsOf}
+                    {relocOf}
                     {pathOf}
                     {selection}
                     {isStruck}

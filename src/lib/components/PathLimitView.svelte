@@ -9,6 +9,7 @@
         countBelow,
         pathSegments,
         sourceBarsFor,
+        relocationsFor,
         strikeToggle,
     } from '$lib/util';
     import { Button } from '$lib/components/ui/button';
@@ -75,6 +76,7 @@
     });
 
     const barsOf = $derived(sourceBarsFor(nodes, app.sources));
+    const relocOf = $derived(relocationsFor(nodes, app.sources));
 
     function childrenOf(parentId: number | null): PathTreeNode[] {
         return index.byParent.get(parentId) ?? [];
@@ -319,6 +321,7 @@
                         {childrenOf}
                         {pathOf}
                         {barsOf}
+                        {relocOf}
                         {limit}
                         {selection}
                         onrename={handleRename}
