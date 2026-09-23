@@ -72,7 +72,10 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             hash_coverage_files INTEGER NOT NULL DEFAULT 0,
             hash_coverage_bytes INTEGER NOT NULL DEFAULT 0,
             volume_id TEXT,
-            hashing_enabled INTEGER NOT NULL DEFAULT 1
+            hashing_enabled INTEGER NOT NULL DEFAULT 1,
+            -- User-picked `#rrggbb` for attributing consolidated nodes to this
+            -- source. NULL means the frontend's default palette slot.
+            color TEXT
         );
 
         CREATE TABLE IF NOT EXISTS nodes (
@@ -243,7 +246,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 
 /// Target schema version. Bump this and add an entry to `migrate`'s
 /// `alterations` list whenever a column is added to an already-shipped table.
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
@@ -386,6 +389,13 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             "dup_annot",
             "skipped_count",
             "ALTER TABLE dup_annot ADD COLUMN skipped_count INTEGER NOT NULL DEFAULT 0",
+        ),
+        // v11. Deliberately left NULL on existing rows: NULL *is* the
+        // "use the default palette colour" state, so there is nothing to backfill.
+        (
+            "sources",
+            "color",
+            "ALTER TABLE sources ADD COLUMN color TEXT",
         ),
     ];
     for (table, column, ddl) in alterations {
@@ -621,6 +631,7 @@ mod tests {
             "hash_coverage_bytes",
             "volume_id",
             "hashing_enabled",
+            "color",
         ] {
             assert!(
                 column_exists(&conn, "sources", col).unwrap(),

@@ -14,7 +14,13 @@
     import * as Field from '$lib/components/ui/field';
     import * as Empty from '$lib/components/ui/empty';
     import { taskTray } from '$lib/stores/tasks.svelte';
-    import { formatBytes, pathSegments } from '$lib/util';
+    import {
+        formatBytes,
+        NO_SOURCE_COLOR,
+        pathSegments,
+        sourceColor,
+        type SourceBars,
+    } from '$lib/util';
 
     let consolidationId = $state<number | null>(null);
     let nodes = $state<ConsolidationNode[]>([]);
@@ -109,8 +115,62 @@
                 pid = byId.get(pid)?.parent_id ?? null;
             }
         }
-        return { byParent, stats, byId, total };
+
+        // Every source that contributed any descendant, file or folder, per
+        // folder -- so a folder shows what is nested deep inside it, including
+        // an otherwise empty folder dragged in from another device. Each node
+        // adds its source to its whole ancestor chain; once an ancestor already
+        // holds it, every ancestor above does too, so the walk can stop there.
+        const descSources = new Map<number, Set<number>>();
+        for (const n of nodes) {
+            const sid = n.origin_source_id;
+            if (sid == null) continue;
+            let pid = n.parent_id;
+            while (pid != null) {
+                let set = descSources.get(pid);
+                if (!set) descSources.set(pid, (set = new Set()));
+                else if (set.has(sid)) break;
+                set.add(sid);
+                pid = byId.get(pid)?.parent_id ?? null;
+            }
+        }
+        return { byParent, stats, byId, total, descSources };
     });
+
+    // Kept apart from `index` so recolouring a source doesn't redo the stats.
+    const sourceById = $derived(new Map(app.sources.map(s => [s.id, s])));
+
+    /** Source bars for a row: its own source first (grey when it has none),
+     *  then, for a folder, every other source among its descendants in
+     *  source-list order, so a given device always sits in the same slot. */
+    function barsOf(node: ConsolidationNode): SourceBars {
+        const own =
+            node.origin_source_id == null
+                ? undefined
+                : sourceById.get(node.origin_source_id);
+        const colors = [own ? sourceColor(own) : NO_SOURCE_COLOR];
+        let title = own ? `From ${own.device_label}` : 'Not from any device';
+        if (node.type === 'directory') {
+            const rest = [...(index.descSources.get(node.id) ?? [])]
+                .filter(id => id !== own?.id)
+                .map(id => sourceById.get(id))
+                .filter(s => s != null)
+                .sort((a, b) => a.id - b.id);
+            colors.push(...rest.map(sourceColor));
+            if (rest.length > 0) {
+                title += ` · ${own ? 'also contains' : 'contains'} ${rest
+                    .map(s => s.device_label)
+                    .join(', ')}`;
+            }
+        }
+        return { colors, title };
+    }
+
+    /** One slot per source plus the grey no-source slot, so the bar column
+     *  lines up on every row. A slot is a `w-1` bar plus a `gap-0.5`. */
+    const srcColVar = $derived(
+        `--col-src: calc(${app.sources.length + 1} * 0.375rem)`
+    );
 
     /** A node's path within the consolidated tree, root-first. */
     const pathOf = (id: number) => pathSegments(index.byId, id);
@@ -388,6 +448,7 @@
         <div
             class="min-h-32 grow overflow-y-auto rounded-md border-2 border-dashed p-2 transition-colors data-[drag=true]:border-brand data-[drag=true]:bg-brand/10"
             data-drag={rootDragOver}
+            style={srcColVar}
             role="tree"
             aria-label="Consolidated tree"
             tabindex="0"
@@ -411,6 +472,7 @@
                         {node}
                         {childrenOf}
                         stats={index.stats}
+                        {barsOf}
                         {pathOf}
                         selection={consSelection}
                         ondelete={n => (deleteTarget = n)}

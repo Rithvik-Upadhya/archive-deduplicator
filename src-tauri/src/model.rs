@@ -122,6 +122,11 @@ pub struct Source {
     /// hashing was never started (or the source is JSON-only / disabled).
     #[serde(default)]
     pub hashing_phase: Option<String>,
+    /// User-picked `#rrggbb` used to attribute consolidated nodes to this
+    /// source. `None` means "not chosen" -- the frontend falls back to a
+    /// default palette slot keyed on `id`.
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -248,6 +253,10 @@ pub struct ConsolidationNode {
     /// `nodes.rel_path` (full path from the source root) of the origin node.
     #[serde(default)]
     pub origin_path: Option<String>,
+    /// `sources.id` of the origin device. The key for per-source colouring;
+    /// `origin_device` is a renamable label and need not be unique.
+    #[serde(default)]
+    pub origin_source_id: Option<i64>,
     /// Whether the origin node is a hardlink alias. The row still counts as a
     /// file (it is a name someone must recreate), but its bytes are already
     /// accounted for by the canonical, so subtree size rollups must skip them.

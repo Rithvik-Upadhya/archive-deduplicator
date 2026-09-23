@@ -105,7 +105,7 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
     let hash_phase_by_src = hashing::hash_phase_by_source(&conn, workspace_id).map_err(map_err)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, hashing_enabled
+            "SELECT id, workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, hashing_enabled, color
              FROM sources WHERE workspace_id = ?1 ORDER BY id",
         )
         .map_err(map_err)?;
@@ -138,6 +138,7 @@ pub fn source_list(db: State<Db>, workspace_id: i64) -> CmdResult<Vec<Source>> {
                 hash_coverage_bytes: r.get(18)?,
                 hashing_enabled: r.get::<_, i64>(19)? != 0,
                 hashing_phase: None,
+                color: r.get(20)?,
             })
         })
         .map_err(map_err)?;
@@ -245,6 +246,7 @@ pub async fn import_tree_json(
             hash_coverage_bytes: 0,
             hashing_enabled: false,
             hashing_phase: None,
+            color: None,
             physical_size,
             alias_bytes,
             cross_dup_alias_bytes: 0,
@@ -331,6 +333,7 @@ pub async fn scan_folder(
             hash_coverage_bytes: 0,
             hashing_enabled,
             hashing_phase: None,
+            color: None,
             cross_dup_size: 0,
             cross_dup_file_count: 0,
             cross_dup_alias_bytes: 0,
@@ -675,6 +678,17 @@ pub fn source_rename_device(db: State<Db>, source_id: i64, device_label: String)
     conn.execute(
         "UPDATE sources SET device_label = ?1 WHERE id = ?2",
         params![device_label, source_id],
+    )
+    .map_err(map_err)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn source_set_color(db: State<Db>, source_id: i64, color: String) -> CmdResult<()> {
+    let conn = db.lock();
+    conn.execute(
+        "UPDATE sources SET color = ?1 WHERE id = ?2",
+        params![color, source_id],
     )
     .map_err(map_err)?;
     Ok(())
@@ -1123,7 +1137,7 @@ pub fn consolidation_get(
         .prepare(
             "SELECT cn.id, cn.consolidation_id, cn.parent_id, cn.name, cn.type,
                     cn.source_node_id, cn.sort_order, n.size, s.device_label, n.rel_path,
-                    n.alias_of IS NOT NULL
+                    n.alias_of IS NOT NULL, s.id
              FROM consolidation_nodes cn
              LEFT JOIN nodes n ON n.id = cn.source_node_id
              LEFT JOIN sources s ON s.id = n.source_id
@@ -1150,6 +1164,7 @@ pub fn consolidation_get(
                 origin_device: r.get(8)?,
                 origin_path: r.get(9)?,
                 is_alias: r.get::<_, Option<bool>>(10)?.unwrap_or(false),
+                origin_source_id: r.get(11)?,
             })
         })
         .map_err(map_err)?
@@ -1186,7 +1201,7 @@ pub fn consolidation_add_node(
     conn.query_row(
         "SELECT cn.id, cn.consolidation_id, cn.parent_id, cn.name, cn.type,
                 cn.source_node_id, cn.sort_order, n.size, s.device_label, n.rel_path,
-                    n.alias_of IS NOT NULL
+                    n.alias_of IS NOT NULL, s.id
          FROM consolidation_nodes cn
          LEFT JOIN nodes n ON n.id = cn.source_node_id
          LEFT JOIN sources s ON s.id = n.source_id
@@ -1210,6 +1225,7 @@ pub fn consolidation_add_node(
                 origin_device: r.get(8)?,
                 origin_path: r.get(9)?,
                 is_alias: r.get::<_, Option<bool>>(10)?.unwrap_or(false),
+                origin_source_id: r.get(11)?,
             })
         },
     )

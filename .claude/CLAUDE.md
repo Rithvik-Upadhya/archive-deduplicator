@@ -267,7 +267,7 @@ hash_spec)` makes re-scanning an unchanged tree a no-op read-wise. Resumable: ca
   there would reintroduce lock contention with `run_dedup`'s dedicated connection). Adding a column
   to an already-shipped table needs an entry in _both_ `init_schema`'s DDL (for fresh databases) and
   `migrate`'s `alterations` list (for existing ones) — `CREATE TABLE IF NOT EXISTS` alone only ever
-  helps the former. `SCHEMA_VERSION` is **10**; version 3 added the hashing/medium columns to `nodes`
+  helps the former. `SCHEMA_VERSION` is **11** (v11: `sources.color`, the user-picked source colour); version 3 added the hashing/medium columns to `nodes`
   and `sources` plus two brand-new tables, `hash_cache` and `scan_progress` (new tables need only the
   `CREATE TABLE IF NOT EXISTS` in `init_schema`, not a `migrate` entry). Note that a column added
   by `migrate` is **not backfilled** — existing rows get the `DEFAULT`. `sources.physical_size`

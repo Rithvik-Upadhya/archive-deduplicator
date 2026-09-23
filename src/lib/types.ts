@@ -70,6 +70,9 @@ export interface Source {
      *  finishing (a "Resume" affordance applies), `"done"` means it finished,
      *  `null` means hashing was never started. */
     hashing_phase: string | null;
+    /** User-picked `#rrggbb` for attributing consolidated nodes to this
+     *  source; `null` means never picked -- resolve through `sourceColor`. */
+    color: string | null;
 }
 
 export type MediumKind = 'hdd' | 'ssd' | 'network' | 'optical' | 'unknown';
@@ -210,6 +213,9 @@ export interface ConsolidationNode {
     size: number | null;
     origin_device: string | null;
     origin_path: string | null;
+    /** `sources.id` of the origin device -- the key for per-source colouring
+     *  (`origin_device` is a renamable label and need not be unique). */
+    origin_source_id: number | null;
     /** Whether the origin node is a hardlink alias. Still counts as a file --
      *  it is a name someone has to recreate -- but its bytes belong to the
      *  canonical, so size rollups must skip them. */

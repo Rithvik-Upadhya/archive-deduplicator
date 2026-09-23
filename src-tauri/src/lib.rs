@@ -55,6 +55,7 @@ pub fn run() {
             commands::cancel_hash_scan,
             commands::get_scan_progress,
             commands::source_rename_device,
+            commands::source_set_color,
             commands::source_set_excluded,
             commands::source_copy_to_workspace,
             commands::source_delete,

@@ -84,6 +84,8 @@ export const getScanProgress = (sourceId: number) =>
     invoke<ScanProgressInfo | null>('get_scan_progress', { sourceId });
 export const sourceRenameDevice = (sourceId: number, deviceLabel: string) =>
     invoke<void>('source_rename_device', { sourceId, deviceLabel });
+export const sourceSetColor = (sourceId: number, color: string) =>
+    invoke<void>('source_set_color', { sourceId, color });
 export const sourceSetExcluded = (sourceId: number, excluded: boolean) =>
     invoke<void>('source_set_excluded', { sourceId, excluded });
 export const sourceCopyToWorkspace = (sourceId: number, targetWorkspaceId: number) =>

@@ -3,7 +3,7 @@
     import { app } from '$lib/stores/app.svelte';
     import { deviceCollapsed, deviceFilterOn } from '$lib/stores/treeExpansion.svelte';
     import type { Source, TreeNode } from '$lib/types';
-    import { formatBytes, pct, widestBytesWidth } from '$lib/util';
+    import { formatBytes, pct, sourceColor, widestBytesWidth } from '$lib/util';
     import type { TreeSelection } from '$lib/stores/selection.svelte';
     import TreeItem from './TreeItem.svelte';
     import Icon from '$lib/components/Icon.svelte';
@@ -139,6 +139,23 @@
         }
     }
 
+    /** Live value while the native picker is open. `input` fires on every
+     *  drag tick, so it only previews; the pick is persisted once, on `change`. */
+    let colorPreview = $state<string | null>(null);
+    const swatch = $derived(colorPreview ?? sourceColor(source));
+
+    async function saveColor(color: string) {
+        try {
+            await app.setSourceColor(source.id, color);
+        } catch (err) {
+            taskTray.notify('Colour change failed', 'error', String(err));
+        } finally {
+            // On success `source.color` now holds the pick; on failure this
+            // reverts the swatch to what is actually stored.
+            colorPreview = null;
+        }
+    }
+
     async function confirmDelete() {
         deleteBusy = true;
         try {
@@ -175,6 +192,21 @@
                     : 'transition-transform'} />
         </Button>
         <Icon icon="ph:hard-drive-fill" class="shrink-0 text-brand" />
+        <!-- Identity colour for the consolidated tree's source bars. The native
+             input is stretched invisibly over the swatch so a click on it opens
+             the OS picker. -->
+        <label
+            class="relative size-3.5 shrink-0 cursor-pointer rounded-full ring-1 ring-border"
+            style="background: {swatch}"
+            title="Source colour">
+            <input
+                type="color"
+                class="absolute inset-0 size-full cursor-pointer opacity-0"
+                aria-label="Source colour"
+                value={swatch}
+                oninput={e => (colorPreview = e.currentTarget.value)}
+                onchange={e => saveColor(e.currentTarget.value)} />
+        </label>
 
         {#if editing}
             <!-- svelte-ignore a11y_autofocus -->

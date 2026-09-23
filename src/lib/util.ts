@@ -50,6 +50,47 @@ export function pct2(value: number): number {
     return Math.round(Math.max(0, Math.min(100, value)) * 100) / 100;
 }
 
+/* --- Source colours --------------------------------------------------------
+ *
+ * Each source gets an identity colour, used to attribute nodes in the
+ * consolidated tree to the device they came off. Hex, because the header's
+ * native `<input type="color">` only speaks `#rrggbb`.
+ *
+ * The default palette leaves out grey (reserved for "no source") and the
+ * brand crimson / warning yellow, which already mean "duplicated elsewhere"
+ * and "not judged".
+ */
+
+export const SOURCE_PALETTE = [
+    '#3b82f6',
+    '#14b8a6',
+    '#8b5cf6',
+    '#f97316',
+    '#ec4899',
+    '#22c55e',
+    '#06b6d4',
+    '#6366f1',
+] as const;
+
+/** Bar colour for a node with no (surviving) origin source. */
+export const NO_SOURCE_COLOR = 'color-mix(in oklab, var(--muted-foreground) 55%, transparent)';
+
+/**
+ * A source's identity colour: the user's pick, else a palette slot keyed on
+ * the id rather than list position, so removing one source never recolours
+ * the others.
+ */
+export function sourceColor(source: { id: number; color: string | null }): string {
+    return source.color ?? SOURCE_PALETTE[source.id % SOURCE_PALETTE.length];
+}
+
+/** The source-bar column of one consolidated-tree row: one colour per bar,
+ *  own source first, plus the tooltip naming them. */
+export interface SourceBars {
+    colors: string[];
+    title: string;
+}
+
 /* --- Colour scales ---------------------------------------------------------
  *
  * Duplicate markers are coloured by *where the other copies live*, not by how

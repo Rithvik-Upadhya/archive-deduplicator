@@ -243,6 +243,13 @@ class AppState {
         );
     }
 
+    async setSourceColor(sourceId: number, color: string) {
+        await api.sourceSetColor(sourceId, color);
+        this.sources = this.sources.map((s) =>
+            s.id === sourceId ? { ...s, color } : s,
+        );
+    }
+
     async setSourceExcluded(sourceId: number, excluded: boolean) {
         await api.sourceSetExcluded(sourceId, excluded);
         this.sources = this.sources.map((s) =>

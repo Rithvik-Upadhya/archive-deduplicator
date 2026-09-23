@@ -146,6 +146,19 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                 } else {
                     HashMap::new()
                 };
+            // `color` postdates `hashing_enabled`, so the same guard applies;
+            // a missing entry means "never picked", which is NULL anyway.
+            let ext_color: HashMap<i64, Option<String>> =
+                if ext_has_column(&tx, "sources", "color")? {
+                    let mut stmt =
+                        tx.prepare("SELECT id, color FROM ext.sources WHERE workspace_id = ?1")?;
+                    stmt.query_map(params![old_ws_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                        .into_iter()
+                        .collect()
+                } else {
+                    HashMap::new()
+                };
             let mut src_id_map: HashMap<i64, i64> = HashMap::new();
             {
                 let mut stmt = tx.prepare(
@@ -221,10 +234,11 @@ pub fn import_merge(conn: &mut Connection, src_path: &Path) -> rusqlite::Result<
                 ) in rows
                 {
                     let hashing_enabled = ext_hashing_enabled.get(&old_id).copied().unwrap_or(1);
+                    let color = ext_color.get(&old_id).cloned().flatten();
                     tx.execute(
-                        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id, hashing_enabled)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
-                        params![new_ws_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id, hashing_enabled],
+                        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id, hashing_enabled, color)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                        params![new_ws_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id, hashing_enabled, color],
                     )?;
                     let new_id = tx.last_insert_rowid();
                     src_id_map.insert(old_id, new_id);
@@ -613,6 +627,7 @@ pub fn copy_source_to_workspace(
         hash_coverage_bytes,
         volume_id,
         hashing_enabled,
+        color,
     ): (
         String,
         String,
@@ -633,8 +648,9 @@ pub fn copy_source_to_workspace(
         i64,
         Option<String>,
         i64,
+        Option<String>,
     ) = tx.query_row(
-        "SELECT kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id, hashing_enabled
+        "SELECT kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id, hashing_enabled, color
          FROM sources WHERE id = ?1",
         params![source_id],
         |r| {
@@ -658,13 +674,14 @@ pub fn copy_source_to_workspace(
                 r.get(16)?,
                 r.get(17)?,
                 r.get(18)?,
+                r.get(19)?,
             ))
         },
     )?;
 
     tx.execute(
-        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id, hashing_enabled)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+        "INSERT INTO sources (workspace_id, kind, label, device_label, orig_root_path, dev_id, imported_at, total_size, file_count, excluded, physical_size, alias_bytes, medium_kind, filesystem, hash_min_size, hash_spec, hash_coverage_files, hash_coverage_bytes, volume_id, hashing_enabled, color)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
         params![
             target_workspace_id,
             kind,
@@ -685,7 +702,8 @@ pub fn copy_source_to_workspace(
             hash_coverage_files,
             hash_coverage_bytes,
             volume_id,
-            hashing_enabled
+            hashing_enabled,
+            color
         ],
     )?;
     let new_source_id = tx.last_insert_rowid();

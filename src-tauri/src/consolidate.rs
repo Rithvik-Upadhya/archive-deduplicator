@@ -81,12 +81,12 @@ pub fn materialize_subtree(
         return Ok(Vec::new()); // source_node_id no longer exists (e.g. device removed mid-drag)
     };
 
-    // 2. Origin device label, looked up once (a whole dragged directory
-    //    always belongs to one source) — avoids an N+1 join per row.
-    let device_label: String = conn.query_row(
-        "SELECT s.device_label FROM nodes n JOIN sources s ON s.id = n.source_id WHERE n.id = ?1",
+    // 2. Origin source id and device label, looked up once (a whole dragged
+    //    directory always belongs to one source) — avoids an N+1 join per row.
+    let (source_id, device_label): (i64, String) = conn.query_row(
+        "SELECT s.id, s.device_label FROM nodes n JOIN sources s ON s.id = n.source_id WHERE n.id = ?1",
         params![source_node_id],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
 
     // 3. Group descendants by source parent id; sibling order mirrors
@@ -146,6 +146,7 @@ pub fn materialize_subtree(
             size: (root.node_type != "directory").then_some(root.size),
             origin_device: Some(device_label.clone()),
             origin_path: Some(root.rel_path.clone()),
+            origin_source_id: Some(source_id),
             is_alias: root.is_alias,
         });
 
@@ -177,6 +178,7 @@ pub fn materialize_subtree(
                     size: (k.node_type != "directory").then_some(k.size),
                     origin_device: Some(device_label.clone()),
                     origin_path: Some(k.rel_path.clone()),
+                    origin_source_id: Some(source_id),
                     is_alias: k.is_alias,
                 });
                 stack.push(k.id);

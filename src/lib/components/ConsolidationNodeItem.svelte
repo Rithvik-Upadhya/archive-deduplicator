@@ -1,6 +1,6 @@
 <script lang="ts">
     import type { ConsolidationNode } from '$lib/types';
-    import { copyPath, formatBytes } from '$lib/util';
+    import { copyPath, formatBytes, type SourceBars } from '$lib/util';
     import { app } from '$lib/stores/app.svelte';
     import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
     import { consolidationTreeExpanded } from '$lib/stores/treeExpansion.svelte';
@@ -13,6 +13,9 @@
         node: ConsolidationNode;
         childrenOf: (parentId: number | null) => ConsolidationNode[];
         stats: Map<number, { size: number; fileCount: number }>;
+        /** Source-colour bars for a row: own source first, then (folders)
+         *  every other source nested beneath it. */
+        barsOf: (node: ConsolidationNode) => SourceBars;
         /** Path of a node within the consolidated tree, root-first. */
         pathOf: (id: number) => string[];
         selection: TreeSelection;
@@ -25,6 +28,7 @@
         node,
         childrenOf,
         stats,
+        barsOf,
         pathOf,
         selection,
         ondelete,
@@ -38,6 +42,7 @@
     );
     const kids = $derived(childrenOf(node.id));
     const nodeStats = $derived(stats.get(node.id));
+    const bars = $derived(barsOf(node));
     const origin = $derived(
         node.origin_device && node.origin_path
             ? `${node.origin_device}://${node.origin_path}`
@@ -138,6 +143,15 @@
             <span class="flex-1 truncate" title={origin}>{node.name}</span>
         {/if}
 
+        <span
+            class="flex h-4 w-(--col-src) shrink-0 gap-0.5"
+            title={bars.title}>
+            {#each bars.colors as color, i (i)}
+                <span class="h-full w-1 rounded-[1px]" style="background: {color}"
+                ></span>
+            {/each}
+        </span>
+
         {#if isDir}
             <span
                 class="ms-auto shrink-0 font-heading text-xs tabular-nums whitespace-nowrap text-muted-foreground">
@@ -198,6 +212,7 @@
                     node={child}
                     {childrenOf}
                     {stats}
+                    {barsOf}
                     {pathOf}
                     {selection}
                     {ondelete}
