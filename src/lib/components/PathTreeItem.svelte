@@ -1,15 +1,14 @@
 <script lang="ts">
     import { untrack } from 'svelte';
     import type { PathTreeNode } from '$lib/types';
-    import { app } from '$lib/stores/app.svelte';
-    import { copyPath, type Relocation, type SourceBars } from '$lib/util';
+    import { type Relocation, type SourceBars } from '$lib/util';
     import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
     import { consolidationTreeExpanded } from '$lib/stores/treeExpansion.svelte';
     import Self from './PathTreeItem.svelte';
     import SourceBarsCell from './SourceBarsCell.svelte';
     import NameMarks from './NameMarks.svelte';
+    import RowMenu from './RowMenu.svelte';
     import Icon from '$lib/components/Icon.svelte';
-    import { Button } from '$lib/components/ui/button';
     import { Input } from '$lib/components/ui/input';
     import { Badge } from '$lib/components/ui/badge';
 
@@ -33,6 +32,8 @@
         hasLiveKids: (id: number) => boolean;
         onrename: (node: PathTreeNode, newName: string) => void;
         onrevert: (node: PathTreeNode) => void;
+        /** Open the new-folder prompt for a subfolder of this row. */
+        onnewfolder: (node: PathTreeNode) => void;
         ondropInto: (parentId: number | null, e: DragEvent) => void;
     }
 
@@ -49,17 +50,15 @@
         hasLiveKids,
         onrename,
         onrevert,
+        onnewfolder,
         ondropInto,
     }: Props = $props();
 
     const isDir = $derived(node.type === 'directory');
-    const copyLabel = $derived(
-        isDir ? 'Copy folder path' : 'Copy file path'
-    );
     // Where this node came from, in the same shape the Consolidate tree uses.
     // A folder the user created by hand has no source, so it falls back to its
-    // own name. This is hover text only: the copy button deliberately yields
-    // the end-state path instead, with no device name in it.
+    // own name. This is hover text only: the menu's "Copy new path"
+    // deliberately yields the end-state path instead, with no device name.
     const origin = $derived(
         node.origin_device && node.origin_path
             ? `${node.origin_device}://${node.origin_path}`
@@ -67,7 +66,7 @@
     );
     // A renamed row keeps its original name in the tooltip, composed with the
     // origin rather than replacing it, so an edited row shows both. It used to
-    // end "-- click to rename", which was wrong: renaming is the pencil button,
+    // end "-- click to rename", which was wrong: renaming is in the row menu,
     // and clicking the row selects it.
     const nameTitle = $derived(
         node.edited
@@ -200,12 +199,12 @@
                 </span>
                 <NameMarks
                     original={node.edited ? node.original_name : null}
+                    renamedColor={bars.colors[0]}
                     renamedBelow={renamedBelowOf(node.id)}
                     struckBelow={!node.struck && struckBelowOf(node.id) > 0}
                     relocatedColor={reloc.color}
                     relocatedTitle={reloc.title}
-                    movedBelow={reloc.movedBelow}
-                    onreset={() => onrevert(node)} />
+                    movedBelow={reloc.movedBelow} />
             </span>
         {/if}
 
@@ -219,32 +218,16 @@
 
         <SourceBarsCell {bars} />
 
-        <Button
-            variant="ghost"
-            size="icon"
-            class="size-6 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/row:opacity-100 hover:text-foreground"
-            title={copyLabel}
-            aria-label={copyLabel}
-            onclick={e => {
-                e.stopPropagation();
-                // Deliberately not `origin`: hovering shows where this came
-                // from, but what you copy is the end-state path, free of any
-                // device name.
-                copyPath(pathOf(node.id), app.pathSep);
-            }}>
-            <Icon icon="ph:copy-fill" />
-        </Button>
-        <Button
-            variant="ghost"
-            size="icon"
-            class="size-6 shrink-0 text-muted-foreground hover:text-foreground"
-            aria-label="Rename"
-            onclick={e => {
-                e.stopPropagation();
-                startRename();
-            }}>
-            <Icon icon="ph:pencil-simple-fill" />
-        </Button>
+        <!-- Copy new path is deliberately not `origin`: hovering shows where
+             this came from, but the end-state path is free of any device name. -->
+        <RowMenu
+            sourcePath={node.origin_path}
+            newPath={() => pathOf(node.id)}
+            renamed={node.edited}
+            {isDir}
+            onrename={startRename}
+            onreset={() => onrevert(node)}
+            onnewfolder={() => onnewfolder(node)} />
     </div>
 
     {#if isDir && expanded}
@@ -263,6 +246,7 @@
                     {hasLiveKids}
                     {onrename}
                     {onrevert}
+                    {onnewfolder}
                     {ondropInto} />
             {/each}
         </div>

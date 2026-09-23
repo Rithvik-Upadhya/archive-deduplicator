@@ -267,7 +267,8 @@ hash_spec)` makes re-scanning an unchanged tree a no-op read-wise. Resumable: ca
   counts as a revert: it deletes the row instead of leaving an edit that changes nothing.
   `ConsolidationNode.original_name` is read from that table, and `Some` means "renamed".
 - **After-name indicators** (`NameMarks.svelte`, shared by both tree rows):
-  - a reset button when the row itself is renamed;
+  - a `textbox` mark in the row's source colour when the row itself is renamed (its tooltip
+    names the original; reset lives in the row menu);
   - a `textbox` mark with a count when something beneath it is renamed;
   - a strikethrough mark when something beneath the row is struck but the row isn't;
   - an `arrows-out-cardinal` mark for a **move within one source**: in the source's colour on the
@@ -279,6 +280,9 @@ hash_spec)` makes re-scanning an unchanged tree a no-op read-wise. Resumable: ca
   row is relocated when its end-state parent is from the same source but isn't the folder its
   `origin_path` sits in. A parent from another source or a hand-made folder is not an internal
   move — the source bars already show those.
+- **Row menu** (`RowMenu.svelte`, shared by both tree rows): every row ends in one ⋮ button
+  whose menu offers Copy source path, Copy new path, Rename, Reset name (renamed rows only) and
+  New subfolder (folders only). Don't reintroduce per-row buttons in one tree only.
 - **Consolidated-tree marks.** `consolidation_nodes.done` ("carried out on disk") and `struck`
   ("to be deleted on disk") are independent flags. `done` applies to one row only. `struck` is
   stored only where it was applied and **inherited downward at read time**: a row is struck when it
@@ -441,7 +445,9 @@ UI-relevant conventions:
   a success boolean that no caller currently checks, so a clipboard failure is silent today.
 - **Hover text and copy text deliberately differ in the consolidation and Fix Paths trees.** Both
   rows show `device://source-path` on hover (`origin`, built from `origin_device`/`origin_path`)
-  while their copy button yields the source-free end-state path from `pathOf`. Do not "fix" them
+  while the row menu's **Copy new path** yields the source-free end-state path from `pathOf`
+  (its **Copy source path** yields the source-relative `origin_path`, likewise with no device
+  name). Do not "fix" them
   into agreement — a user pasting into a file manager wants a usable path, but a user hovering
   wants to know which shelf the thing came off. Note this means a Fix Paths row can show a source
   path in its tooltip while the badge beside it counts the *end-state* path length; that is two

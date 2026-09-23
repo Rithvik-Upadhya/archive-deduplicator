@@ -6,7 +6,10 @@
         NodeType,
         TreeNode,
     } from '$lib/types';
-    import { deviceFilterOn } from '$lib/stores/treeExpansion.svelte';
+    import {
+        consolidationTreeExpanded,
+        deviceFilterOn,
+    } from '$lib/stores/treeExpansion.svelte';
     import { TreeSelection } from '$lib/stores/selection.svelte';
     import DeviceTree from './DeviceTree.svelte';
     import ConsolidationNodeItem from './ConsolidationNodeItem.svelte';
@@ -45,6 +48,8 @@
     const consSelection = new TreeSelection();
 
     let showNewFolderDialog = $state(false);
+    /** Folder the new one goes inside, or null for the root. */
+    let newFolderParent = $state<ConsolidationNode | null>(null);
     /** Roots awaiting the remove confirmation, or null when it is closed. */
     let deleteIds = $state<number[] | null>(null);
 
@@ -482,22 +487,32 @@
         }
     }
 
-    function openNewFolderDialog() {
+    /** At the root from the toolbar, inside `parent` from a row's menu. */
+    function openNewFolderDialog(parent: ConsolidationNode | null = null) {
         if (consolidationId == null || app.activeWorkspaceId == null) return;
+        newFolderParent = parent;
         showNewFolderDialog = true;
     }
 
     async function createFolder(name: string) {
         if (consolidationId == null || app.activeWorkspaceId == null) return;
+        const parent = newFolderParent;
         try {
             const created = await api.consolidationAddNode({
                 consolidationId,
-                parentId: null,
+                parentId: parent?.id ?? null,
                 name,
                 nodeType: 'directory',
                 sourceNodeId: null,
             });
             nodes = [...nodes, created];
+            // Otherwise the new folder lands inside a collapsed parent and
+            // seems not to have been made.
+            if (parent)
+                (search.active
+                    ? search.consExpanded
+                    : consolidationTreeExpanded
+                ).add(parent.id);
         } catch (err) {
             taskTray.notify('Create failed', 'error', String(err));
         }
@@ -583,7 +598,7 @@
                     <Button
                         variant="outline"
                         size="sm"
-                        onclick={openNewFolderDialog}>
+                        onclick={() => openNewFolderDialog()}>
                         <Icon icon="ph:folder-plus-fill" />
                         <span>Folder</span>
                     </Button>
@@ -628,6 +643,7 @@
                             renamedBelowOf={id => index.renamedBelow.get(id) ?? 0}
                             struckBelowOf={id => index.struckBelow.get(id) ?? 0}
                             onreset={handleReset}
+                            onnewfolder={openNewFolderDialog}
                             ondropInto={handleDrop}
                             onrename={handleRename} />
                     {/each}
@@ -639,7 +655,10 @@
 
 <GroupDialog bind:open={groupOpen} node={groupNode} />
 
-<NewFolderDialog bind:open={showNewFolderDialog} oncreate={createFolder} />
+<NewFolderDialog
+    bind:open={showNewFolderDialog}
+    parentName={newFolderParent?.name ?? null}
+    oncreate={createFolder} />
 
 <RemoveNodesDialog
     ids={deleteIds}

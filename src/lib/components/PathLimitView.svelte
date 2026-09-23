@@ -3,6 +3,7 @@
     import { app } from '$lib/stores/app.svelte';
     import type { PathTreeNode } from '$lib/types';
     import { TreeSelection } from '$lib/stores/selection.svelte';
+    import { consolidationTreeExpanded } from '$lib/stores/treeExpansion.svelte';
     import PathTreeItem from './PathTreeItem.svelte';
     import Icon from '$lib/components/Icon.svelte';
     import {
@@ -25,6 +26,8 @@
     let nodes = $state<PathTreeNode[]>([]);
     let loading = $state(false);
     let showNewFolderDialog = $state(false);
+    /** Folder the new one goes inside, or null for the root. */
+    let newFolderParent = $state<PathTreeNode | null>(null);
     const selection = new TreeSelection();
 
     async function reload() {
@@ -192,8 +195,15 @@
         }
     }
 
+    /** At the root from the toolbar, inside `parent` from a row's menu. */
+    function openNewFolderDialog(parent: PathTreeNode | null = null) {
+        newFolderParent = parent;
+        showNewFolderDialog = true;
+    }
+
     async function createFolder(name: string) {
         if (app.activeWorkspaceId == null) return;
+        const parent = newFolderParent;
         try {
             // Also creates the workspace's consolidation if none exists yet,
             // so a first folder can be made from this view.
@@ -202,11 +212,14 @@
             );
             await api.consolidationAddNode({
                 consolidationId,
-                parentId: null,
+                parentId: parent?.id ?? null,
                 name,
                 nodeType: 'directory',
                 sourceNodeId: null,
             });
+            // Otherwise the new folder lands inside a collapsed parent and
+            // seems not to have been made.
+            if (parent) consolidationTreeExpanded.add(parent.id);
             await reload();
         } catch (err) {
             taskTray.notify('Create failed', 'error', String(err));
@@ -266,7 +279,7 @@
             <Button
                 variant="outline"
                 size="sm"
-                onclick={() => (showNewFolderDialog = true)}>
+                onclick={() => openNewFolderDialog()}>
                 <Icon icon="ph:folder-plus-fill" />
                 <span>Folder</span>
             </Button>
@@ -332,6 +345,7 @@
                         struckBelowOf={id => index.struckBelow.get(id) ?? 0}
                         {hasLiveKids}
                         onrevert={handleRevert}
+                        onnewfolder={openNewFolderDialog}
                         ondropInto={handleDrop} />
                 {/each}
             </div>
@@ -339,4 +353,7 @@
     {/if}
 </div>
 
-<NewFolderDialog bind:open={showNewFolderDialog} oncreate={createFolder} />
+<NewFolderDialog
+    bind:open={showNewFolderDialog}
+    parentName={newFolderParent?.name ?? null}
+    oncreate={createFolder} />

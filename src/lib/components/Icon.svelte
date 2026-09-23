@@ -27,6 +27,7 @@
     import Copy from 'phosphor-svelte/lib/Copy';
     import CopySimple from 'phosphor-svelte/lib/CopySimple';
     import DotsThreeOutline from 'phosphor-svelte/lib/DotsThreeOutline';
+    import DotsThreeVertical from 'phosphor-svelte/lib/DotsThreeVertical';
     import Export from 'phosphor-svelte/lib/Export';
     import Eye from 'phosphor-svelte/lib/Eye';
     import EyeSlash from 'phosphor-svelte/lib/EyeSlash';
@@ -75,6 +76,7 @@
         copy: Copy,
         'copy-simple': CopySimple,
         'dots-three-outline': DotsThreeOutline,
+        'dots-three-vertical': DotsThreeVertical,
         export: Export,
         eye: Eye,
         'eye-slash': EyeSlash,

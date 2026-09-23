@@ -1,4 +1,5 @@
-<!-- Name prompt for a new root folder in the consolidated tree. Shared by the
+<!-- Name prompt for a new folder in the consolidated tree -- at the root, or
+     inside `parentName` when a row's menu asked for a subfolder. Shared by the
      Consolidate and Fix Paths views so the two cannot drift; each supplies
      its own `oncreate`, since they refresh their trees differently. -->
 <script lang="ts">
@@ -10,11 +11,14 @@
 
     interface Props {
         open: boolean;
+        /** Name of the folder the new one goes inside; null/absent for the
+         *  root. */
+        parentName?: string | null;
         /** Called with the trimmed, non-empty name. */
         oncreate: (name: string) => void;
     }
 
-    let { open = $bindable(), oncreate }: Props = $props();
+    let { open = $bindable(), parentName = null, oncreate }: Props = $props();
 
     let name = $state('New Folder');
 
@@ -37,9 +41,17 @@
     <Dialog.Content class="sm:max-w-sm">
         <form onsubmit={submit}>
             <Dialog.Header>
-                <Dialog.Title>New folder</Dialog.Title>
+                <Dialog.Title
+                    >{parentName == null
+                        ? 'New folder'
+                        : 'New subfolder'}</Dialog.Title>
                 <Dialog.Description>
-                    Adds an empty folder at the root of the consolidated tree.
+                    {#if parentName == null}
+                        Adds an empty folder at the root of the consolidated
+                        tree.
+                    {:else}
+                        Adds an empty folder inside “{parentName}”.
+                    {/if}
                 </Dialog.Description>
             </Dialog.Header>
             <Field.FieldGroup class="py-4">

@@ -1,16 +1,19 @@
 <!-- Indicators that sit right after a row's name in the Consolidate and Fix
-     Paths trees, shared so the two cannot drift: a reset button when the row
-     itself was renamed, a textbox mark when something beneath it was, a
+     Paths trees, shared so the two cannot drift: a textbox mark in the source's
+     colour when the row itself was renamed (reset is in `RowMenu`), a muted
+     textbox mark when something beneath it was, a
      strikethrough mark when something beneath it is to be deleted, and an
      arrows-out mark for a move within one source -- in the source's colour on
      the moved row, muted on every folder above it (see `util.relocationsFor`). -->
 <script lang="ts">
     import Icon from '$lib/components/Icon.svelte';
-    import { Button } from '$lib/components/ui/button';
 
     interface Props {
         /** The row's name before it was renamed; null when not renamed. */
         original: string | null;
+        /** The row's own source colour, for its renamed mark -- the same
+         *  colour the relocation mark uses. */
+        renamedColor: string;
         /** Renamed items anywhere beneath the row. */
         renamedBelow: number;
         /** Whether something beneath the row is struck while the row is not. */
@@ -21,20 +24,19 @@
         relocatedTitle?: string | null;
         /** Moves within a source anywhere beneath the row. */
         movedBelow?: number;
-        onreset?: () => void;
     }
 
     let {
         original,
+        renamedColor,
         renamedBelow,
         struckBelow,
         relocatedColor = null,
         relocatedTitle = null,
         movedBelow = 0,
-        onreset,
     }: Props = $props();
 
-    const resetLabel = $derived(`Reset to “${original}”`);
+    const renamedTitle = $derived(`Renamed — originally “${original}”`);
     const renamedLabel = $derived(
         `${renamedBelow} renamed ${renamedBelow === 1 ? 'item' : 'items'} inside`
     );
@@ -44,18 +46,13 @@
 </script>
 
 {#if original != null}
-    <Button
-        variant="ghost"
-        size="icon"
-        class="size-5 shrink-0 text-muted-foreground hover:text-foreground"
-        title={resetLabel}
-        aria-label={resetLabel}
-        onclick={e => {
-            e.stopPropagation();
-            onreset?.();
-        }}>
-        <Icon icon="ph:arrow-counter-clockwise-bold" class="size-3" />
-    </Button>
+    <span
+        class="inline-flex shrink-0"
+        style="color: {renamedColor}"
+        title={renamedTitle}
+        aria-label={renamedTitle}>
+        <Icon icon="ph:textbox" class="size-3.5" />
+    </span>
 {/if}
 {#if renamedBelow > 0}
     <span

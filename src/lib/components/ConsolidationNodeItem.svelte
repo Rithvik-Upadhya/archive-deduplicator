@@ -1,12 +1,10 @@
 <script lang="ts">
     import type { ConsolidationNode } from '$lib/types';
     import {
-        copyPath,
         formatBytes,
         type Relocation,
         type SourceBars,
     } from '$lib/util';
-    import { app } from '$lib/stores/app.svelte';
     import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
     import { consolidationTreeExpanded } from '$lib/stores/treeExpansion.svelte';
     import { search } from '$lib/stores/search.svelte';
@@ -14,8 +12,8 @@
     import Self from './ConsolidationNodeItem.svelte';
     import SourceBarsCell from './SourceBarsCell.svelte';
     import NameMarks from './NameMarks.svelte';
+    import RowMenu from './RowMenu.svelte';
     import Icon, { type IconName } from '$lib/components/Icon.svelte';
-    import { Button } from '$lib/components/ui/button';
     import { Input } from '$lib/components/ui/input';
 
     interface Props {
@@ -41,6 +39,8 @@
         onrename: (node: ConsolidationNode, newName: string) => void;
         /** Restore a renamed row's original name. */
         onreset: (node: ConsolidationNode) => void;
+        /** Open the new-folder prompt for a subfolder of this row. */
+        onnewfolder: (node: ConsolidationNode) => void;
     }
 
     let {
@@ -58,12 +58,10 @@
         ondropInto,
         onrename,
         onreset,
+        onnewfolder,
     }: Props = $props();
 
     const isDir = $derived(node.type === 'directory');
-    const copyLabel = $derived(
-        isDir ? 'Copy folder path' : 'Copy file path'
-    );
     const kids = $derived(childrenOf(node.id));
     const nodeStats = $derived(stats.get(node.id));
     const bars = $derived(barsOf(node));
@@ -194,12 +192,12 @@
                     title={origin}><Highlight text={node.name} /></span>
                 <NameMarks
                     original={node.original_name}
+                    renamedColor={bars.colors[0]}
                     renamedBelow={renamedBelowOf(node.id)}
                     struckBelow={!struck && struckBelowOf(node.id) > 0}
                     relocatedColor={reloc.color}
                     relocatedTitle={reloc.title}
-                    movedBelow={reloc.movedBelow}
-                    onreset={() => onreset(node)} />
+                    movedBelow={reloc.movedBelow} />
             </span>
         {/if}
 
@@ -219,32 +217,14 @@
 
         <SourceBarsCell {bars} />
 
-        <Button
-            variant="ghost"
-            size="icon"
-            class="size-6 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/row:opacity-100 hover:text-foreground"
-            title={copyLabel}
-            aria-label={copyLabel}
-            onclick={e => {
-                e.stopPropagation();
-                // The walk stops at a consolidation root -- a folder the
-                // user made or dropped -- so no source name is included.
-                copyPath(pathOf(node.id), app.pathSep);
-            }}>
-            <Icon icon="ph:copy-fill" />
-        </Button>
-
-        <Button
-            variant="ghost"
-            size="icon"
-            class="size-6 shrink-0 text-muted-foreground hover:text-foreground"
-            aria-label="Rename"
-            onclick={e => {
-                e.stopPropagation();
-                startRename();
-            }}>
-            <Icon icon="ph:pencil-simple-fill" />
-        </Button>
+        <RowMenu
+            sourcePath={node.origin_path}
+            newPath={() => pathOf(node.id)}
+            renamed={node.original_name != null}
+            {isDir}
+            onrename={startRename}
+            onreset={() => onreset(node)}
+            onnewfolder={() => onnewfolder(node)} />
     </div>
 
     {#if isDir && expanded}
@@ -264,7 +244,8 @@
                     {struckBelowOf}
                     {ondropInto}
                     {onrename}
-                    {onreset} />
+                    {onreset}
+                    {onnewfolder} />
             {/each}
         </div>
     {/if}
