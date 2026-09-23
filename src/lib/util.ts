@@ -111,7 +111,10 @@ type AttributedNode = {
  * adds every other source among its descendants, in source-list order so a
  * given device always sits in the same slot. Descendant *folders* count as
  * well as files, so an otherwise empty folder dragged in from another device
- * still shows on its ancestors.
+ * still shows on its ancestors. Sourceless descendants -- hand-made folders,
+ * and ghosts left by a deleted source -- add one grey bar, last, to every
+ * ancestor that has a source of its own (a sourceless row already leads with
+ * grey).
  */
 export function sourceBarsFor(
     nodes: AttributedNode[],
@@ -123,9 +126,17 @@ export function sourceBarsFor(
     // Each node adds its source to its whole ancestor chain; once an ancestor
     // already holds it, every ancestor above does too, so the walk stops there.
     const descSources = new Map<number, Set<number>>();
+    const hasSourceless = new Set<number>();
     for (const n of nodes) {
         const sid = n.origin_source_id;
-        if (sid == null) continue;
+        if (sid == null) {
+            let pid = n.parent_id;
+            while (pid != null && !hasSourceless.has(pid)) {
+                hasSourceless.add(pid);
+                pid = parentOf.get(pid) ?? null;
+            }
+            continue;
+        }
         let pid = n.parent_id;
         while (pid != null) {
             let set = descSources.get(pid);
@@ -150,10 +161,13 @@ export function sourceBarsFor(
                 .filter((s) => s != null)
                 .sort((a, b) => a.id - b.id);
             colors.push(...rest.map(sourceColor));
-            if (rest.length > 0) {
-                title += ` · ${own ? 'also contains' : 'contains'} ${rest
-                    .map((s) => s.device_label)
-                    .join(', ')}`;
+            const contents = rest.map((s) => s.device_label);
+            if (own && hasSourceless.has(node.id)) {
+                colors.push(NO_SOURCE_COLOR);
+                contents.push('items not from any device');
+            }
+            if (contents.length > 0) {
+                title += ` · ${own ? 'also contains' : 'contains'} ${contents.join(', ')}`;
             }
         }
         return { colors, title };
@@ -476,8 +490,12 @@ const NAME_COLLATOR = new Intl.Collator(undefined, {
 /**
  * Sibling order in both end-state trees (Consolidate and Fix Paths): folders
  * first, then by name the way a file manager sorts it -- case-insensitive,
- * "2" before "10". The id breaks ties so equal names never swap on re-render.
- * Sorts on the current name, so a renamed row moves to its new place.
+ * "2" before "10". Case is folded here rather than left to the collator's
+ * `sensitivity: 'base'`, which the webview does not reliably honour; the
+ * collator still supplies the numeric order. Names differing only in case
+ * are then ordered by the raw compare, and the id breaks any remaining tie so
+ * equal names never swap on re-render. Sorts on the current name, so a
+ * renamed row moves to its new place.
  */
 export function compareTreeRows(
     a: { id: number; type: NodeType; name: string },
@@ -485,7 +503,11 @@ export function compareTreeRows(
 ): number {
     const aDir = a.type === 'directory';
     if (aDir !== (b.type === 'directory')) return aDir ? -1 : 1;
-    return NAME_COLLATOR.compare(a.name, b.name) || a.id - b.id;
+    return (
+        NAME_COLLATOR.compare(a.name.toLowerCase(), b.name.toLowerCase()) ||
+        NAME_COLLATOR.compare(a.name, b.name) ||
+        a.id - b.id
+    );
 }
 
 /**
