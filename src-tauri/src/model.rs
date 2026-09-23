@@ -303,6 +303,10 @@ pub struct PathTreeNode {
     pub origin_device: Option<String>,
     #[serde(default)]
     pub origin_path: Option<String>,
+    /// `sources.id` of the origin device, for the per-source colour bars.
+    /// `None` exactly when `origin_device` is.
+    #[serde(default)]
+    pub origin_source_id: Option<i64>,
 }
 
 /// Progress payload emitted while a long-running dedup pass is executing.

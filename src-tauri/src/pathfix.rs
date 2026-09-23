@@ -30,6 +30,7 @@ struct CNode {
     /// folder the user made by hand, which has no source.
     origin_device: Option<String>,
     origin_path: Option<String>,
+    origin_source_id: Option<i64>,
 }
 
 /// Stored rename edit for a consolidation node.
@@ -46,7 +47,7 @@ fn load_cnodes(conn: &Connection, workspace_id: i64) -> rusqlite::Result<Vec<CNo
     // worse bug than a missing tooltip.
     let mut stmt = conn.prepare(
         "SELECT cn.id, cn.parent_id, cn.name, cn.type, cn.sort_order,
-                s.device_label, n.rel_path
+                s.device_label, n.rel_path, s.id
          FROM consolidation_nodes cn
          JOIN consolidations c ON c.id = cn.consolidation_id
          LEFT JOIN nodes n ON n.id = cn.source_node_id
@@ -62,6 +63,7 @@ fn load_cnodes(conn: &Connection, workspace_id: i64) -> rusqlite::Result<Vec<CNo
             sort_order: r.get(4)?,
             origin_device: r.get(5)?,
             origin_path: r.get(6)?,
+            origin_source_id: r.get(7)?,
         })
     })?;
     rows.collect()
@@ -126,6 +128,7 @@ impl<'a> Walker<'a> {
         sort_order: i64,
         origin_device: Option<String>,
         origin_path: Option<String>,
+        origin_source_id: Option<i64>,
     ) {
         let idx = self.out.len();
         self.out.push(PathTreeNode {
@@ -140,6 +143,7 @@ impl<'a> Walker<'a> {
             sort_order,
             origin_device,
             origin_path,
+            origin_source_id,
         });
         self.stack.push(idx);
     }
@@ -187,6 +191,7 @@ impl<'a> Walker<'a> {
                 c.sort_order,
                 c.origin_device.clone(),
                 c.origin_path.clone(),
+                c.origin_source_id,
             );
 
             if node_type == "directory" && has_kids {

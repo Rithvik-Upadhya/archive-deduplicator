@@ -5,6 +5,7 @@
     import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
     import { consolidationTreeExpanded } from '$lib/stores/treeExpansion.svelte';
     import Self from './ConsolidationNodeItem.svelte';
+    import SourceBarsCell from './SourceBarsCell.svelte';
     import Icon from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button';
     import { Input } from '$lib/components/ui/input';
@@ -143,15 +144,6 @@
             <span class="flex-1 truncate" title={origin}>{node.name}</span>
         {/if}
 
-        <span
-            class="flex h-4 w-(--col-src) shrink-0 gap-0.5"
-            title={bars.title}>
-            {#each bars.colors as color, i (i)}
-                <span class="h-full w-1 rounded-[1px]" style="background: {color}"
-                ></span>
-            {/each}
-        </span>
-
         {#if isDir}
             <span
                 class="ms-auto shrink-0 font-heading text-xs tabular-nums whitespace-nowrap text-muted-foreground">
@@ -165,6 +157,8 @@
                 {formatBytes(node.size ?? 0)}
             </span>
         {/if}
+
+        <SourceBarsCell {bars} />
 
         <Button
             variant="ghost"

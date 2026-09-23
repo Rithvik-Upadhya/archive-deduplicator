@@ -2,10 +2,11 @@
     import { untrack } from 'svelte';
     import type { PathTreeNode } from '$lib/types';
     import { app } from '$lib/stores/app.svelte';
-    import { copyPath } from '$lib/util';
+    import { copyPath, type SourceBars } from '$lib/util';
     import { selectable, type TreeSelection } from '$lib/stores/selection.svelte';
     import { consolidationTreeExpanded } from '$lib/stores/treeExpansion.svelte';
     import Self from './PathTreeItem.svelte';
+    import SourceBarsCell from './SourceBarsCell.svelte';
     import Icon from '$lib/components/Icon.svelte';
     import { Button } from '$lib/components/ui/button';
     import { Input } from '$lib/components/ui/input';
@@ -16,6 +17,9 @@
         childrenOf: (parentId: number | null) => PathTreeNode[];
         /** Path of a node within the end-state tree, root-first. */
         pathOf: (id: number) => string[];
+        /** Source-colour bars for a row: own source first, then (folders)
+         *  every other source nested beneath it. */
+        barsOf: (node: PathTreeNode) => SourceBars;
         limit: number;
         selection: TreeSelection;
         onrename: (node: PathTreeNode, newName: string) => void;
@@ -28,6 +32,7 @@
         node,
         childrenOf,
         pathOf,
+        barsOf,
         limit,
         selection,
         onrename,
@@ -59,6 +64,7 @@
             : origin
     );
     const kids = $derived(childrenOf(node.id));
+    const bars = $derived(barsOf(node));
     const isLeaf = $derived(kids.length === 0);
 
     // Applied once, on this node's first-ever encounter, not a reactive
@@ -186,6 +192,8 @@
             </Badge>
         {/if}
 
+        <SourceBarsCell {bars} />
+
         {#if node.edited}
             <Button
                 variant="ghost"
@@ -246,6 +254,7 @@
                     node={child}
                     {childrenOf}
                     {pathOf}
+                    {barsOf}
                     {limit}
                     {selection}
                     {onrename}

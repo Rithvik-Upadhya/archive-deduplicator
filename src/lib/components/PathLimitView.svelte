@@ -5,7 +5,7 @@
     import { TreeSelection } from '$lib/stores/selection.svelte';
     import PathTreeItem from './PathTreeItem.svelte';
     import Icon from '$lib/components/Icon.svelte';
-    import { pathSegments } from '$lib/util';
+    import { pathSegments, sourceBarsFor, sourceColumnVar } from '$lib/util';
     import { Button } from '$lib/components/ui/button';
     import { Slider } from '$lib/components/ui/slider';
     import { Label } from '$lib/components/ui/label';
@@ -63,6 +63,9 @@
         const byId = new Map(nodes.map(n => [n.id, n]));
         return { byParent, byId };
     });
+
+    const barsOf = $derived(sourceBarsFor(nodes, app.sources));
+    const srcColVar = $derived(sourceColumnVar(app.sources.length));
 
     function childrenOf(parentId: number | null): PathTreeNode[] {
         return index.byParent.get(parentId) ?? [];
@@ -249,6 +252,7 @@
             <div
                 class="min-h-full rounded-md border border-transparent pe-2 data-[drag=true]:border-brand data-[drag=true]:bg-brand/10"
                 data-drag={rootDragOver}
+                style={srcColVar}
                 role="tree"
                 aria-label="Consolidated tree"
                 tabindex="0"
@@ -267,6 +271,7 @@
                         {node}
                         {childrenOf}
                         {pathOf}
+                        {barsOf}
                         {limit}
                         {selection}
                         onrename={handleRename}

@@ -238,6 +238,8 @@ export interface PathTreeNode {
      *  end-state path. */
     origin_device: string | null;
     origin_path: string | null;
+    /** `sources.id` of the origin device, for the per-source colour bars. */
+    origin_source_id: number | null;
 }
 
 export interface DedupProgress {
